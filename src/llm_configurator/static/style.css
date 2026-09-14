@@ -594,3 +594,16 @@ dialog dd {
     gap: 8px;
   }
 }
+
+.credential-settings {
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+  max-width: 680px;
+}
+.credential-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 15px;
+}

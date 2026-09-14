@@ -10,6 +10,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from .domain import GIB, Variant, now
+from .credentials import resolve, validate_key
 
 QUANTS = ("Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0")
 SCORE_FIELDS = {"general": "artificial_analysis_intelligence_index", "coding": "artificial_analysis_coding_index",
@@ -77,9 +78,9 @@ def fetch_variants(entry):
 
 
 def fetch_scores():
-    key = os.environ.get("AA_API_KEY")
+    key, _ = resolve()
     if not key:
-        raise ValueError("Set AA_API_KEY to retrieve Artificial Analysis rankings; quality remains unknown without it")
+        raise ValueError("Add an API key in Benchmark settings to retrieve Artificial Analysis rankings; quality remains unknown without it")
     items, version = [], None
     for page in range(1, 101):
         payload = get_json(f"https://artificialanalysis.ai/api/v2/language/models/free?page={page}", {"x-api-key": key})
@@ -154,3 +155,13 @@ def demo_variants():
                                   quant=quant, size_bytes=int(size * bytes_per_param * GIB), layers=layers,
                                   kv_heads=kv_heads, head_dim=128, max_context=32768, architecture="qwen3", demo=True))
     return result
+
+
+def test_connection(value=None):
+    key = validate_key(value) if value else resolve()[0]
+    if not key:
+        raise ValueError("Enter or save an Artificial Analysis API key first.")
+    payload = get_json("https://artificialanalysis.ai/api/v2/language/models/free?page=1", {"x-api-key": key})
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        raise ValueError("Unexpected response from Artificial Analysis.")
+    return {"ok": True, "message": "Connection successful. Your key can retrieve benchmark data."}

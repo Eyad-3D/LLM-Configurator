@@ -36,6 +36,20 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(result["demo"])
         self.assertIn("candidates", result)
 
+    def test_credential_endpoints_protect_secret(self):
+        from llm_configurator import credentials
+        with patch.object(credentials, '_session_key', None), patch.object(credentials, 'vault', side_effect=ValueError('unavailable')):
+            request = Request(self.url + '/api/credentials/save', data=b'{"key":"fake-secret","remember":false}', headers={"X-Session-Token": self.token})
+            with urlopen(request) as response:
+                saved = response.read().decode()
+            self.assertNotIn('fake-secret', saved)
+            self.assertEqual(json.loads(saved)['source'], 'session')
+            with urlopen(Request(self.url + '/api/credentials', headers={"X-Session-Token": self.token})) as response:
+                self.assertNotIn('fake-secret', response.read().decode())
+            with self.assertRaises(HTTPError) as error:
+                urlopen(Request(self.url + '/api/credentials/save', data=b'{"key":"other"}'))
+            self.assertEqual(error.exception.code, 403)
+
     def test_cross_origin_and_missing_session_blocked(self):
         for headers in [{}, {"X-Session-Token": self.token, "Origin": "https://example.com"}]:
             request = Request(self.url + "/api/recommend", data=b"{}", headers=headers)

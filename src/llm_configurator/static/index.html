@@ -193,10 +193,50 @@
             rel="noreferrer"
             >Artificial Analysis</a
           >
-          supplies base-model evaluation references. Set
-          <code>AA_API_KEY</code> before starting the app to enable benchmark
-          retrieval.
+          supplies base-model evaluation references. Add your key below to
+          enable benchmark retrieval.
         </p>
+        <form id="api-key-form" class="credential-settings" autocomplete="off">
+          <h3>Benchmark settings</h3>
+          <p class="hint">
+            <a
+              href="https://artificialanalysis.ai/data-api/docs"
+              target="_blank"
+              rel="noreferrer"
+              >Get an Artificial Analysis API key</a
+            >. Testing sends the key only to Artificial Analysis through this
+            local app.
+          </p>
+          <p id="key-status" class="hint" role="status" aria-live="polite">
+            Checking credential status…
+          </p>
+          <label for="aa-api-key">Artificial Analysis API key</label>
+          <input
+            id="aa-api-key"
+            type="password"
+            placeholder="Paste your API key"
+            autocomplete="off"
+            spellcheck="false"
+            maxlength="4096"
+          />
+          <label class="check"
+            ><input id="remember-key" type="checkbox" checked /> Remember on
+            this computer (OS credential store)</label
+          >
+          <p class="hint">
+            Unchecked: use only until the app closes. Saved keys are never
+            returned to the browser.
+          </p>
+          <div class="credential-actions">
+            <button id="test-key" type="button" class="secondary">
+              Test connection
+            </button>
+            <button id="save-key" type="submit">Save key</button>
+            <button id="remove-key" type="button" class="secondary">
+              Remove key
+            </button>
+          </div>
+        </form>
         <details>
           <summary>Match benchmark entries</summary>
           <p class="hint">

@@ -265,3 +265,57 @@ $("export").addEventListener("click", () => {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 loadState().catch((error) => message(error.message, true));
+
+async function credentialStatus() {
+  const state = await api("/api/credentials");
+  const labels = {
+    saved: "Key saved securely in your OS credential store.",
+    session:
+      "Using a session-only key. It will be forgotten when the app closes.",
+    environment:
+      "Using AA_API_KEY from the environment. Remove it there to disable it.",
+    none: "No API key configured.",
+  };
+  $("key-status").textContent =
+    labels[state.source] || "Credential status unavailable.";
+}
+async function credentialAction(action) {
+  const buttons = ["test-key", "save-key", "remove-key"];
+  buttons.forEach((id) => ($(id).disabled = true));
+  $("key-status").textContent =
+    action === "test" ? "Testing connection…" : "Updating credentials…";
+  try {
+    const body =
+      action === "remove"
+        ? {}
+        : { key: $("aa-api-key").value, remember: $("remember-key").checked };
+    const result = await api("/api/credentials/" + action, body);
+    if (action === "test") {
+      $("key-status").textContent =
+        result.message +
+        ($("aa-api-key").value ? " Click Save key to apply this key." : "");
+    } else {
+      $("aa-api-key").value = "";
+      await credentialStatus();
+      message(
+        action === "save"
+          ? "API key applied. Refresh model metadata to retrieve rankings."
+          : "App credentials cleared. An existing AA_API_KEY environment variable remains active.",
+      );
+    }
+  } catch (error) {
+    $("key-status").textContent = error.message;
+  } finally {
+    buttons.forEach((id) => ($(id).disabled = false));
+  }
+}
+$("api-key-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  credentialAction("save");
+});
+$("test-key").addEventListener("click", () => credentialAction("test"));
+$("remove-key").addEventListener("click", () => credentialAction("remove"));
+credentialStatus().catch(() => {
+  $("key-status").textContent =
+    "Could not read credential status. Try reloading the app.";
+});

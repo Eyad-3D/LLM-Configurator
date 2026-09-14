@@ -51,21 +51,13 @@ The initial curated catalogue covers the dense Qwen3 0.6B, 1.7B, 4B, 8B, 14B and
 
 ## Artificial Analysis integration
 
-Create an API key through [Artificial Analysis](https://artificialanalysis.ai/data-api/docs). Set it in the terminal **before** starting the program:
+Open **Benchmark settings** in the interface and paste your Artificial Analysis key into the masked field. Use **Test connection** to validate it, then **Save key** and refresh metadata. Testing alone does not save or apply a newly entered key.
 
-```powershell
-# PowerShell
-$env:AA_API_KEY = "your-key"
-.\.venv\Scripts\python.exe -m llm_configurator serve
-```
+**Remember on this computer** stores it in the native OS credential store (Windows Credential Manager, macOS Keychain or supported Linux vault). Uncheck it for explicit process-only storage. If the vault is unavailable or locked, saving fails with a clear message; the app never silently writes a plaintext credential file. The field clears after saving. **Remove key** clears session and accessible saved credentials. Saved keys are shared by this app's instances under the same OS account, independently of the catalogue cache directory.
 
-```bash
-# Bash; assumes your virtual environment is active
-export AA_API_KEY='your-key'
-python -m llm_configurator serve
-```
+The saved key works on subsequent app launches and CLI refreshes. An explicitly entered session key takes precedence over a saved key; a saved key takes precedence over the optional `AA_API_KEY` environment variable. Removing credentials from the GUI does not remove an environment variable. Session-only use does not replace a previously saved key: that saved key becomes active again after restart.
 
-The adapter uses the paginated `/api/v2/language/models/free` endpoint. API keys remain in the Python process and are not sent to the browser or stored in SQLite. Hugging Face public metadata normally needs no token; `HF_TOKEN` is optional for repositories requiring access.
+The adapter uses the paginated `/api/v2/language/models/free` endpoint. Keys are passed from the local form to the loopback Python server, then to Artificial Analysis over HTTPS. They are never returned by status endpoints, placed in browser storage, or stored in SQLite/logs. Hugging Face public metadata normally needs no token; `HF_TOKEN` remains optional for repositories requiring access.
 
 After refreshing, expand **Match benchmark entries** and choose the exact evaluation entry, including reasoning mode, for each base model. Matches deliberately start empty: similar names are insufficient evidence of identical models/settings. Save the match and compare again. CLI equivalents are `benchmarks` and `map`.
 

@@ -8,7 +8,8 @@ from urllib.parse import urlparse
 import webbrowser
 
 from .app import evaluate, map_benchmark
-from .catalogue import definitions, refresh
+from .catalogue import definitions, refresh, test_connection
+from . import credentials
 from .hardware import scan
 
 
@@ -48,6 +49,8 @@ def make_server(store, port=8765, demo=False):
                     return self.send(200, data, mime)
                 if self.headers.get("X-Session-Token") != token:
                     return self.send(403, {"error": "Reload the application to refresh the session"})
+                if path == "/api/credentials":
+                    return self.send(200, credentials.status())
                 if path == "/api/state":
                     cache = store.get("scores", {})
                     return self.send(200, {"hardware": scan(), "demo": demo, "status": store.get("refresh_status"),
@@ -71,6 +74,12 @@ def make_server(store, port=8765, demo=False):
                 if not isinstance(body, dict):
                     raise ValueError("Expected a JSON object")
                 path = urlparse(self.path).path
+                if path == "/api/credentials/test":
+                    return self.send(200, test_connection(body.get("key")))
+                if path == "/api/credentials/save":
+                    return self.send(200, credentials.save(body.get("key"), body.get("remember", True)))
+                if path == "/api/credentials/remove":
+                    return self.send(200, credentials.remove())
                 if path == "/api/recommend":
                     return self.send(200, evaluate(store, body, demo))
                 if path == "/api/map":
