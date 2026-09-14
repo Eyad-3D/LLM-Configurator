@@ -1,0 +1,8 @@
+[
+  {"base_repo":"Qwen/Qwen3-0.6B","gguf_repo":"Qwen/Qwen3-0.6B-GGUF","aa_slug":null},
+  {"base_repo":"Qwen/Qwen3-1.7B","gguf_repo":"Qwen/Qwen3-1.7B-GGUF","aa_slug":null},
+  {"base_repo":"Qwen/Qwen3-4B","gguf_repo":"Qwen/Qwen3-4B-GGUF","aa_slug":null},
+  {"base_repo":"Qwen/Qwen3-8B","gguf_repo":"Qwen/Qwen3-8B-GGUF","aa_slug":null},
+  {"base_repo":"Qwen/Qwen3-14B","gguf_repo":"Qwen/Qwen3-14B-GGUF","aa_slug":null},
+  {"base_repo":"Qwen/Qwen3-32B","gguf_repo":"Qwen/Qwen3-32B-GGUF","aa_slug":null}
+]

@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="session-token" content="__SESSION_TOKEN__" />
+    <title>LLM Configurator · Find your local fit</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script defer src="/app.js"></script>
+  </head>
+  <body>
+    <header>
+      <div class="brand">
+        <span class="mark">◈</span> LLM Configurator
+        <span class="version">0.1</span>
+      </div>
+      <span class="local"><i></i> Running locally</span>
+    </header>
+    <main>
+      <section class="intro">
+        <div>
+          <p class="eyebrow">YOUR HARDWARE. YOUR WORKLOAD.</p>
+          <h1>Find your local fit.</h1>
+          <p class="lede">
+            Compare models, precision and context — with room for everything
+            else you run.
+          </p>
+        </div>
+        <button id="scan" class="secondary">↻ Rescan hardware</button>
+      </section>
+      <div id="message" role="status" aria-live="polite"></div>
+      <div id="demo" class="banner" hidden>
+        DEMO MODE · Fictional models on your real hardware. Quality and speed
+        scores are not fabricated.
+      </div>
+      <section id="hardware" class="hardware" aria-label="Hardware summary">
+        <div class="metric">Reading your hardware…</div>
+      </section>
+      <div class="workspace">
+        <aside>
+          <form id="requirements" class="panel">
+            <p class="eyebrow">01 / YOUR REQUIREMENTS</p>
+            <h2>What do you want to run?</h2>
+            <label for="workload">Primary workload</label
+            ><select id="workload" name="workload">
+              <option value="general">General chat & reasoning</option>
+              <option value="coding">Coding assistance</option>
+              <option value="agentic">Agentic & tool-based work</option>
+              <option value="documents">Document analysis</option>
+            </select>
+            <label for="context">Minimum context per user</label
+            ><select id="context" name="context">
+              <option value="2048">2,048 tokens</option>
+              <option value="4096">4,096 tokens</option>
+              <option value="8192" selected>8,192 tokens</option>
+              <option value="16384">16,384 tokens</option>
+              <option value="32768">32,768 tokens</option>
+              <option value="65536">65,536 tokens</option>
+            </select>
+            <p class="hint">
+              Includes input, history, reasoning and generated output.
+            </p>
+            <div class="pair">
+              <div>
+                <label for="users">Active users</label
+                ><input
+                  id="users"
+                  type="number"
+                  min="1"
+                  max="64"
+                  value="1"
+                  required
+                />
+              </div>
+              <div>
+                <label for="min_tps">Minimum tok/s</label
+                ><input
+                  id="min_tps"
+                  type="number"
+                  min="0"
+                  max="100000"
+                  step="1"
+                  value="15"
+                  required
+                />
+              </div>
+            </div>
+            <p class="hint">Speed target is per active user.</p>
+            <label for="gpu_index">GPU</label
+            ><select id="gpu_index">
+              <option value="0">Detecting…</option>
+            </select>
+            <details>
+              <summary>Memory headroom</summary>
+              <div class="pair">
+                <div>
+                  <label for="reserve_gib">RAM reserve / GiB</label
+                  ><input
+                    id="reserve_gib"
+                    type="number"
+                    min="0"
+                    max="1024"
+                    step="0.5"
+                    value="2"
+                    required
+                  />
+                </div>
+                <div>
+                  <label for="gpu_reserve_gib">VRAM reserve / GiB</label
+                  ><input
+                    id="gpu_reserve_gib"
+                    type="number"
+                    min="0"
+                    max="1024"
+                    step="0.25"
+                    value="0.5"
+                    required
+                  />
+                </div>
+              </div>
+              <p class="hint">
+                Additional headroom beyond what your system already uses.
+              </p>
+            </details>
+            <label class="check"
+              ><input id="strict_speed" type="checkbox" /> Only show locally
+              verified speed fits</label
+            >
+            <button type="submit" id="compare">
+              Compare configurations <span>→</span>
+            </button>
+            <p class="hint">Text models · FP16 KV cache · llama.cpp</p>
+          </form>
+          <section class="panel processes">
+            <p class="eyebrow">02 / RESOURCE SCENARIOS</p>
+            <h2>Make a little room.</h2>
+            <p class="hint">
+              Select applications you could close. We estimate the benefit; you
+              stay in control.
+            </p>
+            <div id="processes">Loading applications…</div>
+            <p class="hint">
+              Estimates use 75% of private memory where available. No processes
+              are closed. Rescan after closing apps.
+            </p>
+          </section>
+        </aside>
+        <section class="results">
+          <div class="results-heading">
+            <div>
+              <p class="eyebrow">03 / YOUR OPTIONS</p>
+              <h2>Configurations to consider</h2>
+            </div>
+            <button id="export" class="secondary" disabled>Export JSON</button>
+          </div>
+          <div class="toolbar">
+            <span id="count">Ready when you are</span
+            ><label class="check"
+              ><input id="show_all" type="checkbox" /> Show all fits</label
+            >
+          </div>
+          <div id="cards">
+            <div class="empty">
+              <span class="empty-symbol">◈</span>
+              <h3>A model is only half the answer.</h3>
+              <p>
+                Set your workload and compare the complete configuration:
+                memory, context, precision and speed.
+              </p>
+              <p class="hint">
+                First visit? Refresh model metadata below. No model weights are
+                downloaded.
+              </p>
+            </div>
+          </div>
+          <div id="notes" class="notes"></div>
+        </section>
+      </div>
+      <section class="panel sources">
+        <div class="results-heading">
+          <div>
+            <p class="eyebrow">DATA & EVIDENCE</p>
+            <h2>A transparent recommendation.</h2>
+          </div>
+          <button class="secondary" id="refresh">Refresh model metadata</button>
+        </div>
+        <p id="catalogue_status" class="hint">Loading catalogue status…</p>
+        <p class="hint">
+          Hugging Face supplies pinned model files and architecture metadata.
+          <a
+            href="https://artificialanalysis.ai"
+            target="_blank"
+            rel="noreferrer"
+            >Artificial Analysis</a
+          >
+          supplies base-model evaluation references. Set
+          <code>AA_API_KEY</code> before starting the app to enable benchmark
+          retrieval.
+        </p>
+        <details>
+          <summary>Match benchmark entries</summary>
+          <p class="hint">
+            Select the exact model and reasoning mode. These are base-model
+            references, not scores for each quantisation. Leave uncertain
+            matches unmapped.
+          </p>
+          <div id="mappings"></div>
+        </details>
+      </section>
+      <footer>
+        Built for local inference. Memory is estimated; performance is measured
+        when available.<span>LLM Configurator / v0.1</span>
+      </footer>
+    </main>
+    <dialog id="detail">
+      <button id="close_detail" class="secondary close">Close</button>
+      <div id="detail_content"></div>
+    </dialog>
+  </body>
+</html>
