@@ -1,0 +1,171 @@
+# LLM Configurator
+
+A local Python application that compares **model + quantisation + context + CPU/GPU placement** against current resources and workload requirements. Includes a browser interface, CLI, Hugging Face metadata retrieval, Artificial Analysis integration, and an optional local llama.cpp benchmark runner.
+
+This is a working **v0.1 engineering prototype**. Memory estimates require calibration against real inference workloads. Unknown speed and quantisation quality are explicitly labelled; the application does not invent benchmark scores.
+
+## Run it
+
+Requires Python 3.10 or newer. Run on the computer whose hardware you want to configure. A remotely hosted instance measures the server, not your laptop.
+
+### Windows / PowerShell
+
+```powershell
+git clone https://github.com/Eyad-3D/LLM-Configurator.git
+cd LLM-Configurator
+py -m venv .venv
+.\.venv\Scripts\python.exe -m pip install .
+.\.venv\Scripts\python.exe -m llm_configurator serve
+```
+
+### Linux / macOS
+
+```bash
+git clone https://github.com/Eyad-3D/LLM-Configurator.git
+cd LLM-Configurator
+python3 -m venv .venv
+.venv/bin/python -m pip install .
+.venv/bin/python -m llm_configurator serve
+```
+
+The interface opens at **http://127.0.0.1:8765**. It is local-only and is not a hosted website. Stop with Ctrl+C. Use `--port 8766` if the port is already occupied.
+
+To explore without internet access or an API key:
+
+```bash
+python -m llm_configurator serve --demo
+```
+
+Use the Python executable from your environment. Demo mode uses **fictional models with real hardware measurements**, clearly marked throughout. No demo scores are provided; demo artifacts cannot be downloaded or benchmarked.
+
+## First real comparison
+
+1. Start the interface and click **Refresh model metadata**. This downloads metadata only, not model weights.
+2. Set workload, minimum context, concurrent users, speed target, and memory reserves.
+3. Optionally select processes you could close. Their private memory is used to estimate a separate hypothetical scenario; the application never terminates them.
+4. Click **Compare configurations**. Inspect the shortlist or select **Show all fits**.
+5. Open **View configuration** for exact model revision, file, memory breakdown, runtime settings, and download/benchmark commands.
+6. Close applications yourself if desired, rescan, and compare again.
+
+The initial curated catalogue covers the dense Qwen3 0.6B, 1.7B, 4B, 8B, 14B and 32B repositories with Q4_K_M, Q5_K_M, Q6_K and Q8_0 variants where single-file artifacts are available. Availability is fetched from Hugging Face rather than hardcoded. Sharded variants are excluded in this release.
+
+## Artificial Analysis integration
+
+Create an API key through [Artificial Analysis](https://artificialanalysis.ai/data-api/docs). Set it in the terminal **before** starting the program:
+
+```powershell
+# PowerShell
+$env:AA_API_KEY = "your-key"
+.\.venv\Scripts\python.exe -m llm_configurator serve
+```
+
+```bash
+# Bash; assumes your virtual environment is active
+export AA_API_KEY='your-key'
+python -m llm_configurator serve
+```
+
+The adapter uses the paginated `/api/v2/language/models/free` endpoint. API keys remain in the Python process and are not sent to the browser or stored in SQLite. Hugging Face public metadata normally needs no token; `HF_TOKEN` is optional for repositories requiring access.
+
+After refreshing, expand **Match benchmark entries** and choose the exact evaluation entry, including reasoning mode, for each base model. Matches deliberately start empty: similar names are insufficient evidence of identical models/settings. Save the match and compare again. CLI equivalents are `benchmarks` and `map`.
+
+Scores are attributed to **[Artificial Analysis](https://artificialanalysis.ai)**. General, coding and agentic indices are used for their corresponding workloads. Documents currently use general intelligence as a proxy. Different index versions are not numerically ranked together. Missing values stay unknown, including a missing quantisation-specific evaluation. API data usage remains subject to Artificial Analysis's terms; no third-party score dataset is bundled in this repository.
+
+## How memory estimation works
+
+All internal measurements use bytes; the UI displays **GiB** (2^30 bytes).
+
+The estimator supports dense `qwen2`, `qwen3`, and `llama` configurations with full-attention FP16 KV-cache accounting:
+
+```text
+KV bytes = 2 × layers × KV heads × head dimension × 2 bytes × context × active users
+```
+
+The first factor of two accounts for K and V. It does not use the total number of query heads for grouped-query attention. Context includes input, history, reasoning and generated output. No shared-prefix savings are assumed.
+
+The current estimator adds:
+
+- 10% over file weight size for placement/metadata uncertainty.
+- 0.75 GiB plus 0.20 GiB per active user for buffers in each active memory pool.
+- 0.5 GiB of host staging allowance for GPU execution.
+- User-configurable headroom, defaulting to 2 GiB RAM and 0.5 GiB VRAM.
+
+These are **explicit engineering assumptions, not fitted constants or guaranteed upper bounds**. Buffers, non-layer tensors, loading peaks, runtime versions and architecture-specific behaviour can exceed them. GPU layer placement is approximated proportionally; file-backed mappings are not assumed to require a permanent full duplicate of weights in RAM. Test a chosen configuration before relying on it.
+
+Available OS memory already accounts for current usage; OS usage is not subtracted twice. Reclaim scenarios add only 75% of accessible process USS (private memory). RSS is shown for reference but is not summed as reclaimable memory. Missing USS produces no reclaim credit. GPU memory does not receive speculative reclaim credit. Swap is never added to usable RAM.
+
+The search evaluates CPU-only, full GPU, and the largest fitting partial GPU allocation for each context. All intermediate layer allocations are checked for feasibility, but not all are returned. It returns contexts at or above the user's requested minimum, plus a **memory-only context ceiling** per configuration. That ceiling is not a speed guarantee or a measured long-context quality limit.
+
+## Speed measurements
+
+Hardware specifications and hosted API speed are **not** converted into fabricated local tok/s estimates. Without matching evidence, a candidate is marked **speed unverified**. The strict-speed checkbox excludes these candidates.
+
+Install a compatible [llama.cpp](https://github.com/ggml-org/llama.cpp) build containing `llama-bench` for your hardware. It must support JSON output, `-d` / `--n-depth`, and device selection. No runtime binary is bundled or installed automatically.
+
+1. Get an exact ID from `python -m llm_configurator models` or the interface.
+2. Explicitly download the pinned GGUF with `download`. A SHA256 and size check verifies it.
+3. Run `bench` on that file. It rechecks available resources, generates 128 tokens near the requested context limit, and records the average of three repetitions.
+4. Compare again. A matching measurement can qualify a candidate against the requested tok/s.
+
+```bash
+python -m llm_configurator download 'EXACT_VARIANT_ID' --directory ./models
+python -m llm_configurator bench 'EXACT_VARIANT_ID' \
+  --model ./models/model.gguf --context 8192 --gpu-layers 0 \
+  --executable /path/to/llama-bench
+```
+
+The interface supplies commands with actual IDs. On PowerShell use one line rather than Bash's backslash continuation. `--gpu-layers` counts transformer layers; a fully offloaded model automatically adds the output layer for the llama.cpp invocation. CPU-only uses explicit device `none`; NVIDIA execution selects one GPU by UUID. `bench` currently reserves 2 GiB RAM / 0.5 GiB VRAM regardless of exploratory UI settings.
+
+Measurements are matched by exact file hash and variant revision, hardware/driver fingerprint, context, GPU placement, CPU threads and single-user operation. They expire after 30 days. The runtime build is retained in the result. They are historical synthetic measurements; changing workload, runtime, background load, thermals or power mode can alter speed. They do not measure TTFT, agent completion time, intelligence, peak memory, or concurrent-user throughput. Multi-user memory can be estimated, but multi-user speed stays unverified.
+
+## CLI
+
+```bash
+python -m llm_configurator --help
+python -m llm_configurator scan
+python -m llm_configurator refresh
+python -m llm_configurator models
+python -m llm_configurator benchmarks
+python -m llm_configurator map Qwen/Qwen3-8B EXACT_AA_SLUG
+python -m llm_configurator recommend --workload coding --context 8192 --users 1 --min-tps 20
+python -m llm_configurator recommend --reclaim-pids 1234 5678 --json
+python -m llm_configurator recommend --strict-speed --output comparison.json
+```
+
+`llm-config` is an equivalent shortcut when your environment's scripts directory is on PATH. `--data-dir PATH` must precede the subcommand. The local SQLite cache is stored under `%LOCALAPPDATA%/LLMConfigurator` on Windows or `$XDG_DATA_HOME/llm-configurator` (default `~/.local/share/llm-configurator`) elsewhere. Override with `LLM_CONFIG_HOME`.
+
+To extend the curated set, copy the bundled `src/llm_configurator/catalogue.json` into your data directory and edit repository pairs. Only supported architectures and single-file quantisations are accepted. Base and GGUF relationships are curated; the program does not assert that arbitrary repositories with matching names are equivalent. Failed refreshes preserve cached variants and display the problem. Metadata dates remain visible.
+
+## Architecture
+
+| Module | Responsibility |
+|---|---|
+| `domain.py` | Validated requirements and model variants |
+| `hardware.py` | psutil process/system scan and NVIDIA telemetry |
+| `catalogue.py` | Hugging Face + Artificial Analysis adapters |
+| `engine.py` | Memory allocation, context search, constraints and ranking |
+| `runtime.py` | Explicit verified downloads and llama-bench execution |
+| `storage.py` | Local SQLite cache |
+| `app.py` | Shared orchestration and benchmark mappings |
+| `server.py`, `static/` | Loopback-only browser interface |
+| `cli.py` | Command-line workflows |
+
+The HTTP interface is loopback-only, checks Host/Origin/session tokens, and does not expose arbitrary shell commands, process termination, or model downloads. Resource/process data stays local. Exported browser reports omit process identities; raw CLI scans/reports include them. No telemetry is sent to a service; remote requests fetch model metadata and optional benchmark data.
+
+## Tests and current limits
+
+```bash
+python -m pip install -e .
+python -m unittest discover -s tests -v
+```
+
+GitHub Actions runs tests on Windows and Linux with Python 3.10 and 3.12. Tests use fixtures for external APIs and do not need a GPU, API key or model download. They cover memory budgets, concurrency, context limits, workload ranking, benchmark identity, sharded-file exclusion, cache behaviour and local HTTP requests.
+
+Not yet implemented: AMD/Intel/Apple GPU telemetry, unified-memory GPU placement, multi-GPU sharding, sharded model downloads, image understanding/generation workflows, licence filtering, quantisation quality evaluations, TTFT benchmarking, calibrated speed prediction for unseen hardware, automatic runtime installation, or an executable installer. The browser interface is responsive but the program itself must run locally. The hardware and performance paths need real Windows/NVIDIA validation before this should be treated as production-ready.
+
+## Reference documentation
+
+- [psutil](https://psutil.readthedocs.io/)
+- [Hugging Face API](https://huggingface.co/docs/huggingface_hub/package_reference/hf_api)
+- [Artificial Analysis API and attribution](https://artificialanalysis.ai/data-api/docs)
+- [llama-bench usage](https://github.com/ggml-org/llama.cpp/blob/master/tools/llama-bench/README.md)
