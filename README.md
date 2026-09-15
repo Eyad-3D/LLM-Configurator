@@ -41,19 +41,19 @@ Use the Python executable from your environment. Demo mode uses **fictional mode
 ## First real comparison
 
 1. Click **Get started**. Hardware detection runs in the background.
-2. Answer one question per screen: main use, quality/speed priority, context needs, active users, and whether other applications will stay open. Exact tokens, tok/s and memory reserves live under advanced controls.
-3. Review your answers. Each **Edit** button opens just that question and returns to the review.
-4. After the review, optionally connect Artificial Analysis. Choose **Continue without rankings** to skip benchmark requests and exclude even previously cached scores from this comparison. You can enable rankings later.
+2. Choose **Include rankings**, save your key, and continue; or choose **Continue without rankings**. Returning users reuse their saved choice when possible.
+3. Answer one question per screen: main use, quality/speed priority, context needs, active users, and whether other applications will stay open. Exact tokens, tok/s and memory reserves live under advanced controls.
+4. Review your answers. Each **Edit** button opens just that question and returns to the review.
 5. See up to **three recommendations** with distinct models where possible. Cards show workload rank (when available), context, local speed evidence, deployment mode and a brief explanation. **View details & setup** reveals memory breakdown, sources and launch instructions. **Compare all configurations** expands the list.
 6. Use **Adjust my answers** to edit a specific answer and recalculate, keeping your other answers and ranking choice. **Ranking settings** lets you change that choice separately.
 
-The app automatically fetches missing model metadata when generating the first recommendations. No weights are downloaded. A saved key can be reused at the optional ranking step; the key prompt never appears before the questions. Benchmark mappings still require choosing the correct model/evaluation entry under **Match benchmark entries**; missing scores are not fabricated.
+The app retrieves model metadata and optional rankings in the background during the questions. No weights are downloaded. The key is optional and requested before the questions; opting out excludes cached scores too. Benchmark mappings still require choosing the correct model/evaluation entry under **Match benchmark entries**; missing scores are not fabricated.
 
 The initial curated catalogue covers the dense Qwen3 0.6B, 1.7B, 4B, 8B, 14B and 32B repositories with Q4_K_M, Q5_K_M, Q6_K and Q8_0 variants where single-file artifacts are available. Availability is fetched from Hugging Face rather than hardcoded. Sharded variants are excluded in this release.
 
 ## Artificial Analysis integration
 
-Open **Benchmark settings** in the interface and paste your Artificial Analysis key into the masked field. Use **Test connection** to validate it, then **Save key** and refresh metadata. Testing alone does not save or apply a newly entered key.
+Open **Benchmark settings** in the interface and paste your Artificial Analysis key into the masked field. Use **Test connection** to validate it, then **Save key** and **Continue with rankings**. Testing alone does not save or apply a newly entered key.
 
 **Remember on this computer** stores it in the native OS credential store (Windows Credential Manager, macOS Keychain or supported Linux vault). Uncheck it for explicit process-only storage. If the vault is unavailable or locked, saving fails with a clear message; the app never silently writes a plaintext credential file. The field clears after saving. **Remove key** clears session and accessible saved credentials. Saved keys are shared by this app's instances under the same OS account, independently of the catalogue cache directory.
 
@@ -190,3 +190,11 @@ The refresh API accepts independent boolean `include_models` and `include_scores
 ### Results latency
 
 Version 0.2.3 removes network refreshes from the cached-results path. The final hardware scan reads current RAM and GPU availability and inspects memory details only for selected processes. NVIDIA telemetry has a two-second timeout. Recommendations remain usable during a slow or failed benchmark refresh; late responses cannot overwrite an edited or newer comparison. The five-second target depends on machine load and having a populated catalogue; it is not a guaranteed cold-start SLA.
+
+### Ranking choice before questions (v0.2.4)
+
+Guided setup now offers optional rankings before the five questions. “Include rankings” reveals the API-key controls; continuing starts model and benchmark retrieval concurrently. “Continue without rankings” starts model discovery only. The review screen goes directly to recommendations.
+
+The browser remembers only the boolean ranking preference. Saved keys remain in the OS credential store, never browser storage. Returning users with rankings enabled and an available key proceed straight to the questions; missing keys restore the optional setup screen. “Change ranking settings” lets users revise their choice while keeping answers. Results reuse the preparation job, including rankings, rather than fetching the same benchmark data again. Cached results remain available while preparation completes.
+
+Loading feedback uses a green spinner and live stage text. After ten seconds the waiting screen expands to show actual model-source completion counts and benchmark status, including failed sources. This measures completed requests, not a percentage of elapsed time. Cached results remain interactive with a small ranking-update indicator. Reduced-motion preferences disable rotation.

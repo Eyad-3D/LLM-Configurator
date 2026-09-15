@@ -1,6 +1,7 @@
 from dataclasses import replace
 import json
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
@@ -12,6 +13,39 @@ from llm_configurator.domain import GIB
 
 
 class AdapterTests(unittest.TestCase):
+    def test_refresh_reports_completed_requests_and_failures(self):
+        updates = []
+        entries = [{"base_repo": "test/one", "gguf_repo": "test/one"},
+                   {"base_repo": "test/two", "gguf_repo": "test/two"}]
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("llm_configurator.catalogue.definitions", return_value=entries), \
+                 patch("llm_configurator.catalogue.fetch_variants", side_effect=[[], ValueError("offline")]), \
+                 patch("llm_configurator.catalogue.fetch_scores", side_effect=ValueError("key unavailable")):
+                refresh(Store(directory), progress=updates.append)
+        self.assertEqual(updates[0]["models_done"], 0)
+        self.assertEqual(updates[-1], {"models_done": 2, "models_total": 2,
+                                      "models_failed": 1, "scores": "failed"})
+        self.assertEqual(len(updates), 4)
+
+    def test_model_and_score_requests_overlap(self):
+        scores_started = threading.Event()
+        models_started = threading.Event()
+        def scores():
+            scores_started.set()
+            if not models_started.wait(2):
+                raise AssertionError("Models waited for scores")
+            return {"version": "test", "data": [], "fetched_at": "today"}
+        def models(entry):
+            models_started.set()
+            if not scores_started.wait(2):
+                raise AssertionError("Scores waited for models")
+            return []
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("llm_configurator.catalogue.fetch_scores", side_effect=scores), \
+                 patch("llm_configurator.catalogue.fetch_variants", side_effect=models):
+                result = refresh(Store(directory))
+                self.assertEqual(result["warnings"], [])
+
     def test_scores_only_refresh_preserves_models_without_hf_requests(self):
         with tempfile.TemporaryDirectory() as directory:
             store = Store(directory)

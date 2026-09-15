@@ -246,6 +246,20 @@ $("scan").addEventListener("click", async () => {
   }
 });
 $("show_all").addEventListener("change", renderResults);
+function renderPreparationProgress(progress) {
+  if (!progress) return;
+  $("model-progress").textContent = progress.models_total
+    ? `Model sources checked: ${progress.models_done} of ${progress.models_total}${progress.models_failed ? ` · ${progress.models_failed} unavailable` : ""}`
+    : "Using prepared model data";
+  $("score-progress").textContent =
+    {
+      running: "Benchmark rankings: retrieving…",
+      complete: "Benchmark rankings: retrieved",
+      failed:
+        "Benchmark rankings: update unavailable; using cached data if available",
+      skipped: "Benchmark rankings: skipped",
+    }[progress.scores] || "Benchmark rankings: pending";
+}
 async function refreshMetadata(withScores, withModels = true) {
   // A different tab or manual refresh may own the server worker. Wait, then
   // submit our own scope so a model-only job cannot satisfy a ranking request.
@@ -264,6 +278,7 @@ async function refreshMetadata(withScores, withModels = true) {
   for (;;) {
     await new Promise((resolve) => setTimeout(resolve, 1000));
     const state = await api("/api/refresh");
+    renderPreparationProgress(state.progress);
     if (!state.running) {
       await loadState();
       return state.result;
@@ -333,9 +348,10 @@ async function credentialAction(action) {
     } else {
       $("aa-api-key").value = "";
       await credentialStatus();
+      document.dispatchEvent(new Event("credentials-changed"));
       message(
         action === "save"
-          ? "API key applied. Refresh model metadata to retrieve rankings."
+          ? "API key applied. Continue with rankings to start background preparation."
           : "App credentials cleared. An existing AA_API_KEY environment variable remains active.",
       );
     }

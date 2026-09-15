@@ -95,10 +95,12 @@ def make_server(store, port=8765, demo=False):
                         raise ValueError("include_models must be a boolean")
                     if not refresh_lock.acquire(blocking=False):
                         return self.send(409, {"error": "Metadata refresh already running"})
-                    refresh_state.update(running=True, result=None)
+                    refresh_state.update(running=True, result=None, progress=None)
+                    def progress(value):
+                        refresh_state["progress"] = value
                     def run():
                         try:
-                            refresh_state["result"] = refresh(store, include_scores=include_scores, include_models=include_models)
+                            refresh_state["result"] = refresh(store, include_scores=include_scores, include_models=include_models, progress=progress)
                         except Exception as error:
                             refresh_state["result"] = {"warnings": [f"Refresh failed: {type(error).__name__}: {error}"]}
                         finally:

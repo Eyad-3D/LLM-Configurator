@@ -57,7 +57,9 @@ class ServerTests(unittest.TestCase):
                 with self.assertRaises(HTTPError) as error:
                     post({"include_scores": True, "include_models": False})
                 self.assertEqual(error.exception.code, 409)
-                self.assertEqual(job.call_args.kwargs, {"include_scores": False, "include_models": True})
+                self.assertFalse(job.call_args.kwargs["include_scores"])
+                self.assertTrue(job.call_args.kwargs["include_models"])
+                self.assertTrue(callable(job.call_args.kwargs["progress"]))
             finally:
                 release.set()
 

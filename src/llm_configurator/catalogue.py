@@ -1,6 +1,6 @@
 """Remote metadata only; refreshing never downloads model weights."""
 import json
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import math
 import os
 from pathlib import Path
@@ -112,24 +112,37 @@ def apply_scores(variant, entry, score_cache):
     variant.score_settings = item.get("name", slug)
 
 
-def refresh(store, include_scores=True, include_models=True):
+def refresh(store, include_scores=True, include_models=True, progress=None):
     errors = []
     score_cache = store.get("scores")
-    if include_scores:
-        try:
-            score_cache = fetch_scores()
-            store.put("scores", score_cache)
-        except ValueError as error:
-            errors.append(str(error))
     old = store.get("variants", [])
     variants = []
     entries = definitions(store)
-    # Only remote reads run concurrently. Cache writes and mappings remain sequential.
-    if include_models:
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = [pool.submit(fetch_variants, entry) for entry in entries]
-    else:
-        futures = [None] * len(entries)
+    state = {"models_done": 0, "models_total": len(entries) if include_models else 0,
+             "models_failed": 0, "scores": "running" if include_scores else "skipped"}
+    def notify():
+        if progress:
+            progress(dict(state))
+    notify()
+    # Fetch rankings and model metadata concurrently; only this thread writes the cache.
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        score_future = pool.submit(fetch_scores) if include_scores else None
+        futures = [pool.submit(fetch_variants, entry) for entry in entries] if include_models else [None] * len(entries)
+        jobs = [future for future in futures if future is not None] + ([score_future] if score_future else [])
+        for future in as_completed(jobs):
+            failed = future.exception() is not None
+            if future is score_future:
+                state["scores"] = "failed" if failed else "complete"
+            else:
+                state["models_done"] += 1
+                state["models_failed"] += int(failed)
+            notify()
+    if score_future:
+        try:
+            score_cache = score_future.result()
+            store.put("scores", score_cache)
+        except ValueError as error:
+            errors.append(str(error))
     for entry, future in zip(entries, futures):
         try:
             fetched = future.result() if future else [Variant(**v) for v in old if v["repo"] == entry["gguf_repo"]]

@@ -948,3 +948,43 @@ dialog dd {
   font-size: 10px;
   color: var(--muted);
 }
+
+/* Indeterminate activity has no invented percentage or remaining-time promise. */
+.wait-spinner,
+.is-preparing::before {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  border: 2px solid #dbe7dc;
+  border-top-color: #246546;
+  border-radius: 50%;
+  animation: wait-turn 900ms linear infinite;
+}
+.is-preparing::before {
+  content: "";
+  width: 12px;
+  height: 12px;
+  margin-right: 9px;
+  vertical-align: middle;
+}
+.wait-spinner {
+  margin-bottom: 16px;
+}
+#wait-details {
+  border-left: 2px solid #cad8c8;
+  padding-left: 18px;
+}
+#wait-details li {
+  margin: 8px 0;
+}
+@keyframes wait-turn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wait-spinner,
+  .is-preparing::before {
+    animation: none;
+  }
+}

@@ -31,6 +31,9 @@
         ></progress>
       </div>
       <p id="preparation-status" class="hint" role="status" hidden></p>
+      <button id="change-ranking" class="text-button" type="button">
+        Change ranking settings
+      </button>
       <section data-screen="welcome" class="welcome">
         <p class="eyebrow">A LITTLE GUIDANCE. A BETTER FIT.</p>
         <h1 tabindex="-1">Find the right AI<br />for your computer.</h1>
@@ -215,102 +218,132 @@
         <section id="benchmark-settings">
           <div class="results-heading">
             <div>
-              <p class="eyebrow">OPTIONAL · AFTER YOUR QUESTIONS</p>
-              <h2>Would you like model rankings?</h2>
+              <p class="eyebrow">OPTIONAL · BEFORE WE START</p>
+              <h2>Would you like model performance rankings?</h2>
             </div>
-            <button class="secondary" id="refresh">
-              Refresh model metadata
+          </div>
+          <p class="lede">
+            Compare model capability as well as hardware fit. Connect once and
+            we’ll prepare rankings while you answer the questions.
+          </p>
+          <button id="include-ranking" type="button">Include rankings →</button>
+          <div id="ranking-details" hidden>
+            <form
+              id="api-key-form"
+              class="credential-settings"
+              autocomplete="off"
+            >
+              <h3>Connect Artificial Analysis</h3>
+              <p class="hint">
+                <a
+                  href="https://artificialanalysis.ai/data-api/docs"
+                  target="_blank"
+                  rel="noreferrer"
+                  >Get an Artificial Analysis API key</a
+                >. Testing sends the key only to Artificial Analysis through
+                this local app.
+              </p>
+              <p id="key-status" class="hint" role="status" aria-live="polite">
+                Checking credential status…
+              </p>
+              <label for="aa-api-key">Artificial Analysis API key</label>
+              <input
+                id="aa-api-key"
+                type="password"
+                placeholder="Paste your API key"
+                autocomplete="off"
+                spellcheck="false"
+                maxlength="4096"
+              />
+              <label class="check"
+                ><input id="remember-key" type="checkbox" checked /> Remember on
+                this computer (OS credential store)</label
+              >
+              <p class="hint">
+                Unchecked: use only until the app closes. Saved keys are never
+                returned to the browser.
+              </p>
+              <div class="credential-actions">
+                <button id="test-key" type="button" class="secondary">
+                  Test connection
+                </button>
+                <button id="save-key" type="submit">Save key</button>
+                <button id="remove-key" type="button" class="secondary">
+                  Remove key
+                </button>
+              </div>
+            </form>
+            <details>
+              <summary>Advanced catalogue settings</summary>
+              <button class="secondary" id="refresh">
+                Refresh model metadata
+              </button>
+              <p id="catalogue_status" class="hint">
+                Loading catalogue status…
+              </p>
+              <p class="hint">
+                Hugging Face supplies pinned model files and architecture
+                metadata.
+                <a
+                  href="https://artificialanalysis.ai"
+                  target="_blank"
+                  rel="noreferrer"
+                  >Artificial Analysis</a
+                >
+                supplies base-model evaluation references. Use your key to
+                enable benchmark retrieval.
+              </p>
+            </details>
+            <details>
+              <summary>Match benchmark entries</summary>
+              <p class="hint">
+                Select the exact model and reasoning mode. These are base-model
+                references, not scores for each quantisation. Leave uncertain
+                matches unmapped.
+              </p>
+              <div id="mappings"></div>
+            </details>
+            <button id="with-ranking" type="button">
+              Continue with rankings →
             </button>
           </div>
-          <p id="catalogue_status" class="hint">Loading catalogue status…</p>
-          <p class="hint">
-            Hugging Face supplies pinned model files and architecture metadata.
-            <a
-              href="https://artificialanalysis.ai"
-              target="_blank"
-              rel="noreferrer"
-              >Artificial Analysis</a
-            >
-            supplies base-model evaluation references. Add your key below to
-            enable benchmark retrieval.
-          </p>
-          <form
-            id="api-key-form"
-            class="credential-settings"
-            autocomplete="off"
-          >
-            <h3>Connect Artificial Analysis</h3>
-            <p class="hint">
-              <a
-                href="https://artificialanalysis.ai/data-api/docs"
-                target="_blank"
-                rel="noreferrer"
-                >Get an Artificial Analysis API key</a
-              >. Testing sends the key only to Artificial Analysis through this
-              local app.
-            </p>
-            <p id="key-status" class="hint" role="status" aria-live="polite">
-              Checking credential status…
-            </p>
-            <label for="aa-api-key">Artificial Analysis API key</label>
-            <input
-              id="aa-api-key"
-              type="password"
-              placeholder="Paste your API key"
-              autocomplete="off"
-              spellcheck="false"
-              maxlength="4096"
-            />
-            <label class="check"
-              ><input id="remember-key" type="checkbox" checked /> Remember on
-              this computer (OS credential store)</label
-            >
-            <p class="hint">
-              Unchecked: use only until the app closes. Saved keys are never
-              returned to the browser.
-            </p>
-            <div class="credential-actions">
-              <button id="test-key" type="button" class="secondary">
-                Test connection
-              </button>
-              <button id="save-key" type="submit">Save key</button>
-              <button id="remove-key" type="button" class="secondary">
-                Remove key
-              </button>
-            </div>
-          </form>
-          <details>
-            <summary>Match benchmark entries</summary>
-            <p class="hint">
-              Select the exact model and reasoning mode. These are base-model
-              references, not scores for each quantisation. Leave uncertain
-              matches unmapped.
-            </p>
-            <div id="mappings"></div>
-          </details>
         </section>
         <p class="hint">
           You can skip this and compare memory, context and available local
           speed evidence. You can enable rankings later.
         </p>
         <div class="wizard-nav">
-          <button id="ranking-back" class="secondary">Back to answers</button
+          <button id="ranking-back" class="secondary">Back</button
           ><button id="skip-ranking" class="secondary">
-            Continue without rankings</button
-          ><button id="with-ranking">
-            Find configurations with rankings →
+            Continue without rankings
           </button>
         </div>
       </section>
       <section data-screen="loading" class="question" hidden>
         <p class="eyebrow">MATCHING YOUR REQUIREMENTS</p>
+        <span class="wait-spinner" aria-hidden="true"></span>
         <h1 tabindex="-1">Finding your options…</h1>
         <p id="loading-text" class="lede" role="status">
           Checking available resources and model metadata.
         </p>
-        <button id="loading-back" class="secondary">Back to answers</button>
+        <div id="wait-details" class="hint" hidden>
+          <p>
+            This is taking a little longer. Your answers are saved for this
+            session.
+          </p>
+          <ul aria-label="Preparation progress" aria-live="polite">
+            <li id="model-progress">Model data: preparing…</li>
+            <li id="score-progress">Benchmark rankings: checking status…</li>
+          </ul>
+        </div>
+
+        <button id="loading-back" class="secondary">Back</button>
       </section>
       <section data-screen="results" hidden>
+        <p id="results-busy" class="hint is-preparing" role="status" hidden>
+          Updating rankings. You can explore these results now.
+        </p>
+
         <div class="results-heading">
           <div>
             <p class="eyebrow">YOUR SHORTLIST</p>

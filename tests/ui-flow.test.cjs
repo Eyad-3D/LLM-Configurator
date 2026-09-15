@@ -10,6 +10,9 @@ function setup({
   processes = [],
   refreshGate = null,
   refreshFails = false,
+  preference = null,
+  configured = true,
+  fastLongWait = false,
 } = {}) {
   const dom = new JSDOM(fs.readFileSync(root + "index.html", "utf8"), {
     url: "http://127.0.0.1:8765",
@@ -17,6 +20,12 @@ function setup({
   });
   const w = dom.window;
   w.scrollTo = () => {};
+  if (fastLongWait) {
+    const timer = w.setTimeout.bind(w);
+    w.setTimeout = (fn, delay) => timer(fn, delay === 10000 ? 20 : delay);
+  }
+  if (preference !== null)
+    w.localStorage.setItem("include-rankings", String(preference));
   const calls = [];
   const hardware = {
     ram_available: 16e9,
@@ -46,7 +55,7 @@ function setup({
         scores: [],
       };
     else if (path === "/api/credentials")
-      result = { configured: true, source: "saved" };
+      result = { configured, source: configured ? "saved" : "none" };
     else if (path === "/api/refresh") {
       if (refreshFails) throw new Error("Offline");
       if (!body && refreshGate) await refreshGate;
@@ -108,11 +117,27 @@ function setup({
     $("requirements").dispatchEvent(
       new w.Event("submit", { bubbles: true, cancelable: true }),
     );
-  const review = () => {
+  const begin = () => {
     $("start").click();
+    $("skip-ranking").click();
+  };
+  const review = () => {
+    begin();
     for (let i = 0; i < 5; i++) next();
   };
-  return { w, $, calls, visible, next, review, close: async () => { await tick(); w.close(); } };
+  return {
+    w,
+    $,
+    calls,
+    visible,
+    next,
+    review,
+    begin,
+    close: async () => {
+      await tick();
+      w.close();
+    },
+  };
 }
 
 test("welcome reveals neither questions nor key setup; one question at a time", async () => {
@@ -123,7 +148,7 @@ test("welcome reveals neither questions nor key setup; one question at a time", 
     s.calls.some((c) => c.path === "/api/credentials"),
     false,
   );
-  s.$("start").click();
+  s.begin();
   assert.deepEqual(s.visible(), ["q1"]);
   s.next();
   assert.deepEqual(s.visible(), ["q2"]);
@@ -143,7 +168,7 @@ test("review allows editing a single answer and retains other values", async () 
   assert.match(s.$("answer-summary").textContent, /3/);
   s.$("review-next").click();
   await tick();
-  assert.deepEqual(s.visible(), ["ranking"]);
+  assert.deepEqual(s.visible(), ["results"]);
   await s.close();
 });
 
@@ -153,7 +178,6 @@ test("skip rankings sends explicit opt-out and shows three cards; edit results p
   s.review();
   s.$("review-next").click();
   await tick();
-  s.$("skip-ranking").click();
   await tick();
   assert.deepEqual(s.visible(), ["results"]);
   assert.equal(
@@ -183,7 +207,6 @@ test("first-run skip refreshes models without requesting benchmark scores", asyn
   s.review();
   s.$("review-next").click();
   await tick();
-  s.$("skip-ranking").click();
   await new Promise((resolve) => setTimeout(resolve, 1150));
   assert.equal(
     s.calls.find((c) => c.path === "/api/refresh" && c.body).body
@@ -194,13 +217,31 @@ test("first-run skip refreshes models without requesting benchmark scores", asyn
   await s.close();
 });
 
-test("saved credential can be used after review without re-entry", async () => {
-  const s = setup();
+test("first setup offers optional rankings before questions and only reveals the key on request", async () => {
+  const s = setup({ configured: false });
   await tick();
-  s.review();
-  s.$("review-next").click();
-  await tick();
+  s.$("start").click();
+  assert.deepEqual(s.visible(), ["ranking"]);
+  assert.equal(s.$("ranking-details").hidden, true);
+  s.$("include-ranking").click();
+  assert.equal(s.$("ranking-details").hidden, false);
   s.$("with-ranking").click();
+  await tick();
+  assert.deepEqual(s.visible(), ["ranking"]);
+  s.$("skip-ranking").click();
+  assert.deepEqual(s.visible(), ["q1"]);
+  assert.equal(s.w.localStorage.getItem("include-rankings"), "false");
+  await s.close();
+});
+
+test("returning user reuses ranking preference and saved key before answering", async () => {
+  const s = setup({ preference: true });
+  await tick();
+  s.$("start").click();
+  await tick();
+  assert.deepEqual(s.visible(), ["q1"]);
+  for (let i = 0; i < 5; i++) s.next();
+  s.$("review-next").click();
   await tick();
   assert.deepEqual(s.visible(), ["results"]);
   assert.equal(
@@ -208,6 +249,28 @@ test("saved credential can be used after review without re-entry", async () => {
     true,
   );
   await s.close();
+});
+
+test("remembered opt-out bypasses key setup; a missing saved key restores the choice", async () => {
+  const s = setup({ preference: false });
+  await tick();
+  s.$("start").click();
+  assert.deepEqual(s.visible(), ["q1"]);
+  assert.equal(
+    s.calls.some((c) => c.path === "/api/credentials"),
+    false,
+  );
+  s.$("change-ranking").click();
+  assert.deepEqual(s.visible(), ["ranking"]);
+  s.$("ranking-back").click();
+  assert.deepEqual(s.visible(), ["q1"]);
+  await s.close();
+  const missing = setup({ preference: true, configured: false });
+  await tick();
+  missing.$("start").click();
+  await tick();
+  assert.deepEqual(missing.visible(), ["ranking"]);
+  await missing.close();
 });
 
 test("invalid numeric answer cannot advance", async () => {
@@ -224,7 +287,7 @@ test("invalid numeric answer cannot advance", async () => {
 test("themed dropdowns preserve keyboard selection and Escape cancellation", async () => {
   const s = setup();
   await tick();
-  s.$("start").click();
+  s.begin();
   const select = s.$("workload");
   const trigger = select.parentElement.querySelector("[role=combobox]");
   assert.equal(select.hidden, true);
@@ -322,7 +385,7 @@ test("model preparation runs during questions, is reused after edits, and skip m
   });
   const s = setup({ demo: false, cached: 0, refreshGate: gate });
   await tick();
-  s.$("start").click();
+  s.begin();
   await tick();
   assert.deepEqual(s.visible(), ["q1"]);
   assert.equal(
@@ -341,7 +404,6 @@ test("model preparation runs during questions, is reused after edits, and skip m
   for (let i = 0; i < 4; i++) s.next();
   s.$("review-next").click();
   await tick();
-  s.$("skip-ranking").click();
   await tick();
   assert.deepEqual(s.visible(), ["results"]);
   s.$("adjust").click();
@@ -361,32 +423,32 @@ test("model preparation runs during questions, is reused after edits, and skip m
   await s.close();
 });
 
-test("cached results show before preparation finishes; rankings update separately", async () => {
+test("model and ranking preparation starts together before answers and is reused at results", async () => {
   let release;
   const gate = new Promise((resolve) => {
     release = resolve;
   });
   const s = setup({ demo: false, refreshGate: gate });
   await tick();
-  s.review();
-  s.$("review-next").click();
-  await tick();
+  s.$("start").click();
+  s.$("include-ranking").click();
   s.$("with-ranking").click();
   await tick();
-  assert.deepEqual(s.visible(), ["results"]);
-  assert.equal(
-    s.calls.filter((c) => c.path === "/api/refresh" && c.body).length,
-    1,
-  );
-  release();
-  await new Promise((resolve) => setTimeout(resolve, 2200));
-  assert.deepEqual(s.visible(), ["results"]);
-  const jobs = s.calls.filter((c) => c.path === "/api/refresh" && c.body);
-  assert.equal(jobs.length, 2);
-  assert.deepEqual(jobs[1].body, {
+  assert.deepEqual(s.visible(), ["q1"]);
+  const jobs = () => s.calls.filter((c) => c.path === "/api/refresh" && c.body);
+  assert.deepEqual(jobs()[0].body, {
     include_scores: true,
-    include_models: false,
+    include_models: true,
   });
+  assert.equal(s.w.localStorage.getItem("include-rankings"), "true");
+  for (let i = 0; i < 5; i++) s.next();
+  s.$("review-next").click();
+  await tick();
+  assert.deepEqual(s.visible(), ["results"]);
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 1150));
+  assert.equal(jobs().length, 1);
+  assert.equal(s.calls.filter((c) => c.path === "/api/recommend").length, 2);
   await s.close();
 });
 
@@ -398,28 +460,66 @@ test("background failure keeps answers usable and allows cached recommendations"
   assert.match(s.$("preparation-status").textContent, /could not be updated/);
   s.$("review-next").click();
   await tick();
-  s.$("skip-ranking").click();
   await tick();
   assert.deepEqual(s.visible(), ["results"]);
   assert.match(s.$("message").textContent, /Offline/);
   await s.close();
 });
 
-
 test("cached skip returns while remote model discovery remains blocked", async () => {
   let release;
-  const gate = new Promise(resolve => { release = resolve; });
-  const s = setup({demo:false, cached:1, refreshGate:gate});
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const s = setup({ demo: false, cached: 1, refreshGate: gate });
   await tick();
   s.review();
   s.$("review-next").click();
   await tick();
-  s.$("skip-ranking").click();
   await tick();
   assert.deepEqual(s.visible(), ["results"]);
-  assert.equal(s.calls.filter(c => c.path === "/api/recommend").length, 1);
-  assert.equal(s.calls.some(c => c.body?.include_scores === true), false);
+  assert.equal(s.calls.filter((c) => c.path === "/api/recommend").length, 1);
+  assert.equal(
+    s.calls.some((c) => c.body?.include_scores === true),
+    false,
+  );
   release();
-  await new Promise(resolve => setTimeout(resolve, 1100));
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  await s.close();
+});
+
+test("long waits reveal real stage details and stop showing busy state at results", async () => {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const s = setup({
+    demo: false,
+    cached: 0,
+    refreshGate: gate,
+    fastLongWait: true,
+  });
+  await tick();
+  s.review();
+  s.$("review-next").click();
+  await tick();
+  assert.deepEqual(s.visible(), ["loading"]);
+  assert.equal(s.$("wait-details").hidden, false);
+  s.w.renderPreparationProgress({
+    models_done: 3,
+    models_total: 6,
+    models_failed: 1,
+    scores: "running",
+  });
+  assert.match(s.$("model-progress").textContent, /3 of 6.*1 unavailable/);
+  assert.match(s.$("score-progress").textContent, /retrieving/);
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 1150));
+  assert.deepEqual(s.visible(), ["results"]);
+  assert.equal(s.$("wait-details").hidden, true);
+  assert.equal(
+    s.$("preparation-status").classList.contains("is-preparing"),
+    false,
+  );
   await s.close();
 });
