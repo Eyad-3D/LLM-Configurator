@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="/style.css" />
     <script defer src="/app.js"></script>
     <script defer src="/wizard.js"></script>
+    <script defer src="/selects.js"></script>
   </head>
   <body>
     <header>
@@ -69,7 +70,7 @@
           <details>
             <summary>Set a specific speed target</summary>
             <label for="min_tps"
-              >Minimum generated tokens per second, per user</label
+              >Minimum generated tokens per second, per active session</label
             ><input
               id="min_tps"
               type="number"
@@ -107,7 +108,7 @@
           <details>
             <summary>Choose an exact context size</summary>
             <label for="context"
-              >Tokens per user, including generated output</label
+              >Tokens per session, including generated output</label
             ><input
               id="context"
               type="number"
@@ -119,11 +120,12 @@
           </details>
         </section>
         <section data-screen="q4" class="question" hidden>
-          <h1 tabindex="-1">How many people will use it at once?</h1>
+          <h1 tabindex="-1">How many sessions or agents will run at once?</h1>
           <p class="lede">
-            Count simultaneous requests, rather than everyone with access.
+            Count concurrent model requests across people, chat sessions and
+            agents. One person can run several agents.
           </p>
-          <label for="users">Active users</label
+          <label for="users">Concurrent sessions or agents</label
           ><input
             id="users"
             type="number"
@@ -133,8 +135,10 @@
             step="1"
           />
           <p class="hint">
-            More active users need more memory. Concurrent speed estimates are
-            not yet available.
+            For example: one person running three agents at the same time counts
+            as 3. People or agents taking turns in one sequential session count
+            as 1. More concurrent requests need more memory. Concurrent speed
+            estimates are not yet available.
           </p>
         </section>
         <section data-screen="q5" class="question" hidden>
@@ -147,8 +151,8 @@
           </select>
           <div id="resource-choices" hidden>
             <p class="hint">
-              Select applications you could close. Nothing will be closed
-              automatically.
+              Largest memory users first. Select applications you could close.
+              Nothing will be closed automatically.
             </p>
             <div id="processes">Scanning applications…</div>
           </div>

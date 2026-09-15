@@ -4,7 +4,7 @@ const { JSDOM } = require("jsdom");
 const fs = require("node:fs");
 const root = "src/llm_configurator/static/";
 const tick = () => new Promise((resolve) => setTimeout(resolve, 30));
-function setup({ demo = true, cached = 1 } = {}) {
+function setup({ demo = true, cached = 1, processes = [] } = {}) {
   const dom = new JSDOM(fs.readFileSync(root + "index.html", "utf8"), {
     url: "http://127.0.0.1:8765",
     runScripts: "outside-only",
@@ -21,7 +21,7 @@ function setup({ demo = true, cached = 1 } = {}) {
     cpu: "Test CPU",
     gpus: [],
     disk_free: 100e9,
-    processes: [],
+    processes,
   };
   w.fetch = async (path, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : null;
@@ -85,6 +85,10 @@ function setup({ demo = true, cached = 1 } = {}) {
   );
   vm.runInContext(
     fs.readFileSync(root + "wizard.js", "utf8"),
+    dom.getInternalVMContext(),
+  );
+  vm.runInContext(
+    fs.readFileSync(root + "selects.js", "utf8"),
     dom.getInternalVMContext(),
   );
   const $ = (id) => w.document.getElementById(id);
@@ -206,5 +210,99 @@ test("invalid numeric answer cannot advance", async () => {
   s.$("users").value = "0";
   s.next();
   assert.deepEqual(s.visible(), ["q4"]);
+  s.close();
+});
+
+test("themed dropdowns preserve keyboard selection and Escape cancellation", async () => {
+  const s = setup();
+  await tick();
+  s.$("start").click();
+  const select = s.$("workload");
+  const trigger = select.parentElement.querySelector("[role=combobox]");
+  assert.equal(select.hidden, true);
+  assert.equal(
+    s.w.document.querySelector('label[for="' + trigger.id + '"]').textContent,
+    "Primary use",
+  );
+  const key = (name) =>
+    trigger.dispatchEvent(
+      new s.w.KeyboardEvent("keydown", {
+        key: name,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  trigger.click();
+  key("ArrowDown");
+  key("Escape");
+  assert.equal(select.value, "general");
+  assert.equal(trigger.getAttribute("aria-expanded"), "false");
+  trigger.click();
+  key("ArrowDown");
+  key("Enter");
+  assert.equal(select.value, "coding");
+  assert.match(trigger.textContent, /code/);
+  s.close();
+});
+
+test("dynamically loaded dropdown options use the theme and update the native value", async () => {
+  const s = setup();
+  await tick();
+  const select = s.w.document.createElement("select");
+  select.innerHTML =
+    '<option value="a">Alpha</option><option value="b">Beta</option>';
+  s.w.document.body.append(select);
+  await tick();
+  const trigger = select.parentElement.querySelector("[role=combobox]");
+  assert.ok(trigger);
+  let changes = 0;
+  select.addEventListener("change", () => changes++);
+  trigger.click();
+  select.parentElement.querySelectorAll("[role=option]")[1].click();
+  assert.equal(select.value, "b");
+  assert.equal(changes, 1);
+  select.innerHTML = '<option value="c">Gamma</option>';
+  await tick();
+  assert.match(trigger.textContent, /Gamma/);
+  s.close();
+});
+
+test("concurrency question explicitly includes sessions and agents", async () => {
+  const s = setup();
+  await tick();
+  s.review();
+  s.w.document.querySelector('[data-edit="3"]').click();
+  assert.match(
+    s.w.document.querySelector("[data-screen=q4] h1").textContent,
+    /sessions or agents/,
+  );
+  s.$("users").value = "3";
+  s.next();
+  assert.match(
+    s.$("answer-summary").textContent,
+    /Concurrent sessions \/ agents/,
+  );
+  s.close();
+});
+
+test("application list sorts by used memory and labels reclaim separately", async () => {
+  const s = setup({
+    processes: [
+      {
+        pid: 1,
+        name: "Small",
+        rss: 1073741824,
+        reclaimable: 800000000,
+        created: 1,
+      },
+      { pid: 2, name: "Large", rss: 3221225472, reclaimable: null, created: 2 },
+    ],
+  });
+  await tick();
+  const rows = s.w.document.querySelectorAll(".process-row");
+  assert.match(rows[0].textContent, /Large/);
+  assert.match(rows[0].textContent, /3.0 GiB used/);
+  assert.match(rows[0].textContent, /Freeable memory unknown/);
+  assert.match(rows[1].textContent, /Small/);
   s.close();
 });

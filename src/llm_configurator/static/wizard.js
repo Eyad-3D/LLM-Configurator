@@ -38,9 +38,9 @@ function answerRows() {
     ["Priority", text("priority") + ` · minimum ${$("min_tps").value} tok/s`],
     [
       "Context",
-      Number($("context").value).toLocaleString() + " tokens per user",
+      Number($("context").value).toLocaleString() + " tokens per session",
     ],
-    ["Active users", $("users").value],
+    ["Concurrent sessions / agents", $("users").value],
     ["Resources", text("resource-mode")],
   ];
 }

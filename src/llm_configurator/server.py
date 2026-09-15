@@ -42,10 +42,10 @@ def make_server(store, port=8765, demo=False):
                 return self.send(403, {"error": "Local access only"})
             path = urlparse(self.path).path
             try:
-                if path in {"/", "/app.js", "/wizard.js", "/style.css"}:
-                    name = {"/": "index.html", "/app.js": "app.js", "/wizard.js": "wizard.js", "/style.css": "style.css"}[path]
+                if path in {"/", "/app.js", "/wizard.js", "/selects.js", "/style.css"}:
+                    name = {"/": "index.html", "/app.js": "app.js", "/wizard.js": "wizard.js", "/selects.js": "selects.js", "/style.css": "style.css"}[path]
                     data = (static / name).read_bytes().replace(b"__SESSION_TOKEN__", token.encode())
-                    mime = {"/": "text/html; charset=utf-8", "/app.js": "text/javascript; charset=utf-8", "/wizard.js": "text/javascript; charset=utf-8", "/style.css": "text/css; charset=utf-8"}[path]
+                    mime = {"/": "text/html; charset=utf-8", "/app.js": "text/javascript; charset=utf-8", "/wizard.js": "text/javascript; charset=utf-8", "/selects.js": "text/javascript; charset=utf-8", "/style.css": "text/css; charset=utf-8"}[path]
                     return self.send(200, data, mime)
                 if self.headers.get("X-Session-Token") != token:
                     return self.send(403, {"error": "Reload the application to refresh the session"})

@@ -170,3 +170,11 @@ Not yet implemented: AMD/Intel/Apple GPU telemetry, unified-memory GPU placement
 - [Hugging Face API](https://huggingface.co/docs/huggingface_hub/package_reference/hf_api)
 - [Artificial Analysis API and attribution](https://artificialanalysis.ai/data-api/docs)
 - [llama-bench usage](https://github.com/ggml-org/llama.cpp/blob/master/tools/llama-bench/README.md)
+
+### Dropdowns and concurrency
+
+All single-choice menus use the app's green theme, including dynamically loaded GPU and benchmark choices. They support arrow keys, Home/End, typing to locate options, Enter to select, and Escape to dismiss without changing the selection.
+
+The setup asks for **concurrent sessions or agents**, including requests from human users. One person running three agents concurrently counts as three; sequential use of one session counts as one. This is the same concurrency budget used for KV-cache memory. The existing CLI/API field `users` is retained for compatibility and means concurrent active model requests. Context and speed targets are per active session, not per person.
+
+The application list is ordered by measured resident memory usage (RSS), largest first. Each row shows used memory and a separately labelled conservative reclaim estimate; missing reclaim estimates do not hide measured usage.

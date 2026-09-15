@@ -817,3 +817,134 @@ dialog dd {
     white-space: normal;
   }
 }
+/* Menus are app-rendered so expanded options also follow the theme on Windows. */
+.themed-select {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+.select-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  padding: 12px 14px;
+  text-align: left;
+  background: #fafbf8;
+  color: #243e30;
+  border: 1px solid #cad8c8;
+  border-radius: 7px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+.select-trigger::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid #426650;
+  border-bottom: 1.5px solid #426650;
+  transform: rotate(45deg);
+  flex-shrink: 0;
+  margin: -4px 3px 0 0;
+}
+.select-trigger:hover {
+  background: #f0f5ed;
+  border-color: #8ca88c;
+}
+.select-trigger:focus-visible,
+.is-open > .select-trigger {
+  outline: 2px solid #86ac92;
+  outline-offset: 2px;
+}
+.is-open > .select-trigger::after {
+  transform: rotate(225deg);
+  margin-top: 4px;
+}
+.select-trigger:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.select-value {
+  overflow-wrap: anywhere;
+}
+.select-menu {
+  position: absolute;
+  top: calc(100% + 7px);
+  left: 0;
+  right: 0;
+  z-index: 100;
+  max-height: min(300px, 45vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px;
+  background: #fafbf8;
+  border: 1px solid #cad8c8;
+  border-radius: 9px;
+  box-shadow: 0 12px 30px #20352e21;
+  scrollbar-color: #a4b6a0 #f0f5ed;
+  scrollbar-width: thin;
+}
+.opens-up > .select-menu {
+  top: auto;
+  bottom: calc(100% + 7px);
+}
+.select-option {
+  position: relative;
+  padding: 11px 34px 11px 12px;
+  border-radius: 5px;
+  color: #2d4435;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.select-option:hover,
+.select-option.is-active {
+  background: #e4efdf;
+  color: #204f36;
+}
+.select-option[aria-selected="true"] {
+  background: #dbead6;
+  color: #1e5135;
+  font-weight: 600;
+}
+.select-option[aria-selected="true"]::after {
+  content: "✓";
+  position: absolute;
+  right: 12px;
+  color: #246546;
+}
+.select-option[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.question .select-trigger {
+  padding: 17px;
+  font-size: 15px;
+}
+.question .select-option {
+  font-size: 14px;
+}
+.mapping .themed-select {
+  min-width: 0;
+}
+
+.process-size {
+  text-align: right;
+  flex-shrink: 0;
+}
+.process-size strong {
+  display: block;
+  font-weight: 550;
+  font-size: 11px;
+  color: #354c3e;
+}
+.process-size small {
+  display: block;
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--muted);
+}
