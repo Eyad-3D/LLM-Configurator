@@ -20,7 +20,7 @@ def nvidia_gpus():
     try:
         result = subprocess.run(
             [executable, "--query-gpu=index,uuid,name,memory.total,memory.free,utilization.gpu,driver_version", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=8, check=True,
+            capture_output=True, text=True, timeout=2, check=True,
         )
         gpus = []
         for row in csv.reader(io.StringIO(result.stdout), skipinitialspace=True):
@@ -33,14 +33,16 @@ def nvidia_gpus():
         return [], ["Could not read NVIDIA memory. GPU capacity is unknown, not zero."]
 
 
-def scan(include_processes=True):
+def scan(include_processes=True, process_ids=None):
     memory = psutil.virtual_memory()
     gpus, warnings = nvidia_gpus()
     processes = []
     if include_processes:
-        for proc in psutil.process_iter(["pid", "name", "memory_info", "username", "create_time"]):
+        for proc in psutil.process_iter(["pid"]):
             try:
-                info = proc.info
+                if process_ids is not None and proc.pid not in process_ids:
+                    continue
+                info = proc.as_dict(attrs=["pid", "name", "memory_info", "create_time"])
                 rss = info["memory_info"].rss
                 if rss < 32 * 1024**2 or info["pid"] == os.getpid():
                     continue

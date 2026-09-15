@@ -361,7 +361,7 @@ test("model preparation runs during questions, is reused after edits, and skip m
   await s.close();
 });
 
-test("ranking waits for in-flight preparation and then requests scores only", async () => {
+test("cached results show before preparation finishes; rankings update separately", async () => {
   let release;
   const gate = new Promise((resolve) => {
     release = resolve;
@@ -373,7 +373,7 @@ test("ranking waits for in-flight preparation and then requests scores only", as
   await tick();
   s.$("with-ranking").click();
   await tick();
-  assert.deepEqual(s.visible(), ["loading"]);
+  assert.deepEqual(s.visible(), ["results"]);
   assert.equal(
     s.calls.filter((c) => c.path === "/api/refresh" && c.body).length,
     1,
@@ -402,5 +402,24 @@ test("background failure keeps answers usable and allows cached recommendations"
   await tick();
   assert.deepEqual(s.visible(), ["results"]);
   assert.match(s.$("message").textContent, /Offline/);
+  await s.close();
+});
+
+
+test("cached skip returns while remote model discovery remains blocked", async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const s = setup({demo:false, cached:1, refreshGate:gate});
+  await tick();
+  s.review();
+  s.$("review-next").click();
+  await tick();
+  s.$("skip-ranking").click();
+  await tick();
+  assert.deepEqual(s.visible(), ["results"]);
+  assert.equal(s.calls.filter(c => c.path === "/api/recommend").length, 1);
+  assert.equal(s.calls.some(c => c.body?.include_scores === true), false);
+  release();
+  await new Promise(resolve => setTimeout(resolve, 1100));
   await s.close();
 });

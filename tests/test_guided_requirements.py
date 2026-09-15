@@ -10,6 +10,16 @@ from test_engine import hardware
 
 
 class GuidedRequirementsTests(unittest.TestCase):
+    def test_evaluation_only_scans_selected_processes(self):
+        from llm_configurator.app import evaluate
+        with tempfile.TemporaryDirectory() as directory:
+            with patch('llm_configurator.app.scan', return_value=hardware()) as scan:
+                evaluate(Store(directory), {}, demo=True)
+                scan.assert_called_once_with(include_processes=False, process_ids=set())
+                scan.reset_mock()
+                evaluate(Store(directory), {'reclaim_pids': [123]}, demo=True)
+                scan.assert_called_once_with(include_processes=True, process_ids={123})
+
     def test_skip_rankings_ignores_cached_quality(self):
         model = replace(demo_variants()[0], scores={'general': 80}, score_source='https://example.com', score_version='4.3')
         report = recommend([model], hardware(), Requirements(include_rankings=False))

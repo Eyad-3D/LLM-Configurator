@@ -189,17 +189,13 @@ async function findConfigurations(rankings) {
   showScreen("loading");
   try {
     $("loading-text").textContent = "Finishing model preparation…";
-    await prepareModels();
-    if (request !== generation) return;
+    // Cached catalogue reads never wait for a remote refresh.
+    await startScan;
     if (!appState) await loadState();
+    const preparation = prepareModels();
+    if (!appState.demo && !appState.status?.variants) await preparation;
+    if (request !== generation) return;
     const warnings = [...(preparationResult?.warnings || [])];
-    if (!appState.demo && rankings) {
-      $("loading-text").textContent =
-        "Retrieving benchmark rankings. Model data is already prepared.";
-      const result = await refreshMetadata(true, false);
-      if (request !== generation) return;
-      warnings.push(...(result?.warnings || []));
-    }
     if (warnings.length) message(warnings.join(" · "));
     if (request !== generation) return;
     $("loading-text").textContent =
@@ -215,6 +211,10 @@ async function findConfigurations(rankings) {
       .map((row) => row[1])
       .join(" · ");
     showScreen("results");
+    if (!appState.demo && rankings) {
+      message("Showing available results. Benchmark rankings are updating in the background.");
+      void updateRankings(request, JSON.stringify(requirements()), preparation);
+    }
   } catch (error) {
     if (request === generation) {
       showScreen("review");
@@ -222,6 +222,23 @@ async function findConfigurations(rankings) {
     }
   } finally {
     if (request === generation) busy = false;
+  }
+}
+// Refresh scores independently and never overwrite a later comparison or edited answers.
+async function updateRankings(request, answers, preparation) {
+  try {
+    await preparation;
+    if (request !== generation || !includeRankings) return;
+    const result = await refreshMetadata(true, false);
+    if (request !== generation || screen !== "results" || answers !== JSON.stringify(requirements())) return;
+    const updated = await api("/api/recommend", JSON.parse(answers));
+    if (request !== generation || screen !== "results" || answers !== JSON.stringify(requirements())) return;
+    report = updated;
+    renderResults();
+    message(result?.warnings?.length ? result.warnings.join(" · ") : "Benchmark update complete.");
+  } catch (error) {
+    if (request === generation && screen === "results")
+      message("Rankings could not be updated. Available results are still shown. " + error.message);
   }
 }
 showScreen("welcome");

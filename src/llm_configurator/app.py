@@ -14,7 +14,8 @@ def variants(store, demo=False):
 def evaluate(store, payload, demo=False):
     requirements = Requirements(**payload)
     models = variants(store, demo)
-    report = recommend(models, scan(), requirements, store.get("measurements", []))
+    hardware = scan(include_processes=bool(requirements.reclaim_pids), process_ids=set(requirements.reclaim_pids))
+    report = recommend(models, hardware, requirements, store.get("measurements", []))
     report["demo"] = demo
     report["catalogue_status"] = store.get("refresh_status")
     if not models:

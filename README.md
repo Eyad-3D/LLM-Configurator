@@ -183,6 +183,10 @@ The application list is ordered by measured resident memory usage (RSS), largest
 
 Starting guided setup launches a background Hugging Face metadata refresh while the user answers questions. This retrieves model sizes and architecture information, not model weights. A quiet status line reports progress. Editing answers reuses the same preparation job. The final comparison scans current hardware again and applies the latest answers.
 
-Model and benchmark retrieval are separate stages: the optional ranking step refreshes only Artificial Analysis data and applies it to the prepared catalogue. Skipping rankings makes no benchmark request. If discovery is still running, the results screen waits for it; slow networks cannot guarantee zero wait. Failed sources retain cached model metadata and expose warnings with the results. Manual metadata refresh remains available.
+Model and benchmark retrieval are separate stages: the optional ranking step refreshes only Artificial Analysis data and applies it to the prepared catalogue. Skipping rankings makes no benchmark request. With cached model data, results never wait for discovery. A first run without cached models must wait for discovery; slow networks cannot guarantee zero wait. Rankings update the displayed results asynchronously, using cached scores in the meantime when available. Failed sources retain cached model metadata and expose warnings with the results. Manual metadata refresh remains available.
 
 The refresh API accepts independent boolean `include_models` and `include_scores` flags (both default to true for compatibility). The server serializes refresh jobs; a busy worker returns HTTP 409 so the client can retry its requested scope rather than mistake a different refresh for its own.
+
+### Results latency
+
+Version 0.2.3 removes network refreshes from the cached-results path. The final hardware scan reads current RAM and GPU availability and inspects memory details only for selected processes. NVIDIA telemetry has a two-second timeout. Recommendations remain usable during a slow or failed benchmark refresh; late responses cannot overwrite an edited or newer comparison. The five-second target depends on machine load and having a populated catalogue; it is not a guaranteed cold-start SLA.
