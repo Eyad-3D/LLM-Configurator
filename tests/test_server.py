@@ -40,6 +40,27 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(result["demo"])
         self.assertIn("candidates", result)
 
+    def test_refresh_scope_and_busy_worker(self):
+        started, release = threading.Event(), threading.Event()
+        def refresh_job(*args, **kwargs):
+            started.set()
+            release.wait(5)
+            return {"warnings": []}
+        def post(body):
+            return urlopen(Request(self.url + "/api/refresh", data=json.dumps(body).encode(),
+                                   headers={"X-Session-Token": self.token}))
+        with patch("llm_configurator.server.refresh", side_effect=refresh_job) as job:
+            try:
+                with post({"include_scores": False, "include_models": True}) as response:
+                    self.assertEqual(response.status, 202)
+                self.assertTrue(started.wait(2))
+                with self.assertRaises(HTTPError) as error:
+                    post({"include_scores": True, "include_models": False})
+                self.assertEqual(error.exception.code, 409)
+                self.assertEqual(job.call_args.kwargs, {"include_scores": False, "include_models": True})
+            finally:
+                release.set()
+
     def test_credential_endpoints_protect_secret(self):
         from llm_configurator import credentials
         with patch.object(credentials, '_session_key', None), patch.object(credentials, 'vault', side_effect=ValueError('unavailable')):

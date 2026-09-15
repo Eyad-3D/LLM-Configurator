@@ -4,7 +4,13 @@ const { JSDOM } = require("jsdom");
 const fs = require("node:fs");
 const root = "src/llm_configurator/static/";
 const tick = () => new Promise((resolve) => setTimeout(resolve, 30));
-function setup({ demo = true, cached = 1, processes = [] } = {}) {
+function setup({
+  demo = true,
+  cached = 1,
+  processes = [],
+  refreshGate = null,
+  refreshFails = false,
+} = {}) {
   const dom = new JSDOM(fs.readFileSync(root + "index.html", "utf8"), {
     url: "http://127.0.0.1:8765",
     runScripts: "outside-only",
@@ -41,9 +47,11 @@ function setup({ demo = true, cached = 1, processes = [] } = {}) {
       };
     else if (path === "/api/credentials")
       result = { configured: true, source: "saved" };
-    else if (path === "/api/refresh")
+    else if (path === "/api/refresh") {
+      if (refreshFails) throw new Error("Offline");
+      if (!body && refreshGate) await refreshGate;
       result = { running: false, result: { warnings: [] } };
-    else if (path === "/api/recommend") {
+    } else if (path === "/api/recommend") {
       const candidates = Array.from({ length: 4 }, (_, i) => ({
         id: String(i),
         name: "Model " + i,
@@ -104,7 +112,7 @@ function setup({ demo = true, cached = 1, processes = [] } = {}) {
     $("start").click();
     for (let i = 0; i < 5; i++) next();
   };
-  return { w, $, calls, visible, next, review, close: () => w.close() };
+  return { w, $, calls, visible, next, review, close: async () => { await tick(); w.close(); } };
 }
 
 test("welcome reveals neither questions nor key setup; one question at a time", async () => {
@@ -119,7 +127,7 @@ test("welcome reveals neither questions nor key setup; one question at a time", 
   assert.deepEqual(s.visible(), ["q1"]);
   s.next();
   assert.deepEqual(s.visible(), ["q2"]);
-  s.close();
+  await s.close();
 });
 
 test("review allows editing a single answer and retains other values", async () => {
@@ -136,7 +144,7 @@ test("review allows editing a single answer and retains other values", async () 
   s.$("review-next").click();
   await tick();
   assert.deepEqual(s.visible(), ["ranking"]);
-  s.close();
+  await s.close();
 });
 
 test("skip rankings sends explicit opt-out and shows three cards; edit results preserves choice", async () => {
@@ -166,7 +174,7 @@ test("skip rankings sends explicit opt-out and shows three cards; edit results p
   const latest = s.calls.filter((c) => c.path === "/api/recommend").at(-1).body;
   assert.equal(latest.context, 16384);
   assert.equal(latest.include_rankings, false);
-  s.close();
+  await s.close();
 });
 
 test("first-run skip refreshes models without requesting benchmark scores", async () => {
@@ -183,7 +191,7 @@ test("first-run skip refreshes models without requesting benchmark scores", asyn
     false,
   );
   assert.deepEqual(s.visible(), ["results"]);
-  s.close();
+  await s.close();
 });
 
 test("saved credential can be used after review without re-entry", async () => {
@@ -199,7 +207,7 @@ test("saved credential can be used after review without re-entry", async () => {
     s.calls.find((c) => c.path === "/api/recommend").body.include_rankings,
     true,
   );
-  s.close();
+  await s.close();
 });
 
 test("invalid numeric answer cannot advance", async () => {
@@ -210,7 +218,7 @@ test("invalid numeric answer cannot advance", async () => {
   s.$("users").value = "0";
   s.next();
   assert.deepEqual(s.visible(), ["q4"]);
-  s.close();
+  await s.close();
 });
 
 test("themed dropdowns preserve keyboard selection and Escape cancellation", async () => {
@@ -242,7 +250,7 @@ test("themed dropdowns preserve keyboard selection and Escape cancellation", asy
   key("Enter");
   assert.equal(select.value, "coding");
   assert.match(trigger.textContent, /code/);
-  s.close();
+  await s.close();
 });
 
 test("dynamically loaded dropdown options use the theme and update the native value", async () => {
@@ -264,7 +272,7 @@ test("dynamically loaded dropdown options use the theme and update the native va
   select.innerHTML = '<option value="c">Gamma</option>';
   await tick();
   assert.match(trigger.textContent, /Gamma/);
-  s.close();
+  await s.close();
 });
 
 test("concurrency question explicitly includes sessions and agents", async () => {
@@ -282,7 +290,7 @@ test("concurrency question explicitly includes sessions and agents", async () =>
     s.$("answer-summary").textContent,
     /Concurrent sessions \/ agents/,
   );
-  s.close();
+  await s.close();
 });
 
 test("application list sorts by used memory and labels reclaim separately", async () => {
@@ -304,5 +312,95 @@ test("application list sorts by used memory and labels reclaim separately", asyn
   assert.match(rows[0].textContent, /3.0 GiB used/);
   assert.match(rows[0].textContent, /Freeable memory unknown/);
   assert.match(rows[1].textContent, /Small/);
-  s.close();
+  await s.close();
+});
+
+test("model preparation runs during questions, is reused after edits, and skip makes no ranking request", async () => {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const s = setup({ demo: false, cached: 0, refreshGate: gate });
+  await tick();
+  s.$("start").click();
+  await tick();
+  assert.deepEqual(s.visible(), ["q1"]);
+  assert.equal(
+    s.calls.filter((c) => c.path === "/api/refresh" && c.body).length,
+    1,
+  );
+  assert.deepEqual(
+    s.calls.find((c) => c.path === "/api/refresh" && c.body).body,
+    { include_scores: false, include_models: true },
+  );
+  s.next();
+  assert.deepEqual(s.visible(), ["q2"]);
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  assert.match(s.$("preparation-status").textContent, /ready/);
+  for (let i = 0; i < 4; i++) s.next();
+  s.$("review-next").click();
+  await tick();
+  s.$("skip-ranking").click();
+  await tick();
+  assert.deepEqual(s.visible(), ["results"]);
+  s.$("adjust").click();
+  s.w.document.querySelector('[data-edit="3"]').click();
+  s.$("users").value = "3";
+  s.next();
+  s.$("review-next").click();
+  await tick();
+  assert.equal(
+    s.calls.filter((c) => c.path === "/api/refresh" && c.body).length,
+    1,
+  );
+  assert.equal(
+    s.calls.filter((c) => c.path === "/api/recommend").at(-1).body.users,
+    3,
+  );
+  await s.close();
+});
+
+test("ranking waits for in-flight preparation and then requests scores only", async () => {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const s = setup({ demo: false, refreshGate: gate });
+  await tick();
+  s.review();
+  s.$("review-next").click();
+  await tick();
+  s.$("with-ranking").click();
+  await tick();
+  assert.deepEqual(s.visible(), ["loading"]);
+  assert.equal(
+    s.calls.filter((c) => c.path === "/api/refresh" && c.body).length,
+    1,
+  );
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 2200));
+  assert.deepEqual(s.visible(), ["results"]);
+  const jobs = s.calls.filter((c) => c.path === "/api/refresh" && c.body);
+  assert.equal(jobs.length, 2);
+  assert.deepEqual(jobs[1].body, {
+    include_scores: true,
+    include_models: false,
+  });
+  await s.close();
+});
+
+test("background failure keeps answers usable and allows cached recommendations", async () => {
+  const s = setup({ demo: false, refreshFails: true });
+  await tick();
+  s.review();
+  await tick();
+  assert.match(s.$("preparation-status").textContent, /could not be updated/);
+  s.$("review-next").click();
+  await tick();
+  s.$("skip-ranking").click();
+  await tick();
+  assert.deepEqual(s.visible(), ["results"]);
+  assert.match(s.$("message").textContent, /Offline/);
+  await s.close();
 });

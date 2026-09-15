@@ -6,6 +6,33 @@ let busy = false;
 let generation = 0;
 const questionScreens = ["q1", "q2", "q3", "q4", "q5"];
 const startScan = loadState().catch(() => null);
+let modelPreparation = null;
+let preparationResult = null;
+function prepareModels() {
+  if (modelPreparation) return modelPreparation;
+  $("preparation-status").hidden = false;
+  $("preparation-status").textContent =
+    "Preparing model data while you answer…";
+  modelPreparation = (async () => {
+    await startScan;
+    if (!appState) await loadState();
+    const result = appState.demo
+      ? { warnings: [] }
+      : await refreshMetadata(false, true);
+    preparationResult = result;
+    $("preparation-status").textContent = result?.warnings?.length
+      ? "Model data prepared with some unavailable sources. Details will appear with your results."
+      : "Model data ready.";
+    return result;
+  })().catch((error) => {
+    // Handle background failures immediately; surface them when results are requested.
+    preparationResult = { warnings: [error.message] };
+    $("preparation-status").textContent =
+      "Model data could not be updated. Cached data will be used if available.";
+    return preparationResult;
+  });
+  return modelPreparation;
+}
 function showScreen(name) {
   screen = name;
   document.querySelectorAll("[data-screen]").forEach((element) => {
@@ -88,7 +115,10 @@ async function openRanking() {
       "Credential status unavailable. You can continue without rankings.";
   }
 }
-$("start").addEventListener("click", () => showScreen("q1"));
+$("start").addEventListener("click", () => {
+  void prepareModels();
+  showScreen("q1");
+});
 $("requirements").addEventListener("submit", (event) => {
   event.preventDefault();
   if (!validQuestion()) return;
@@ -158,16 +188,19 @@ async function findConfigurations(rankings) {
   message("");
   showScreen("loading");
   try {
-    await startScan;
+    $("loading-text").textContent = "Finishing model preparation…";
+    await prepareModels();
+    if (request !== generation) return;
     if (!appState) await loadState();
-    if (!appState.demo && (rankings || !appState.status?.variants)) {
-      $("loading-text").textContent = rankings
-        ? "Retrieving model and benchmark metadata. No model weights are downloaded."
-        : "Retrieving model metadata. Benchmark rankings are skipped.";
-      const result = await refreshMetadata(rankings);
+    const warnings = [...(preparationResult?.warnings || [])];
+    if (!appState.demo && rankings) {
+      $("loading-text").textContent =
+        "Retrieving benchmark rankings. Model data is already prepared.";
+      const result = await refreshMetadata(true, false);
       if (request !== generation) return;
-      if (result.warnings?.length) message(result.warnings.join(" · "));
+      warnings.push(...(result?.warnings || []));
     }
+    if (warnings.length) message(warnings.join(" · "));
     if (request !== generation) return;
     $("loading-text").textContent =
       "Comparing configurations against your current resources…";

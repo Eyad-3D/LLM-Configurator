@@ -5,13 +5,39 @@ import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from llm_configurator.catalogue import apply_scores, demo_variants, fetch_scores, fetch_variants
+from llm_configurator.catalogue import apply_scores, demo_variants, fetch_scores, fetch_variants, refresh
 from llm_configurator.runtime import bench
 from llm_configurator.storage import Store
 from llm_configurator.domain import GIB
 
 
 class AdapterTests(unittest.TestCase):
+    def test_scores_only_refresh_preserves_models_without_hf_requests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(directory)
+            variant = demo_variants()[0]
+            store.put("variants", [variant.to_dict()])
+            entries = [{"base_repo": variant.base_repo, "gguf_repo": variant.repo, "aa_slug": "rated"}]
+            scores = {"version": "test", "fetched_at": "today", "data": [
+                {"slug": "rated", "evaluations": {"artificial_analysis_intelligence_index": 42}}]}
+            with patch("llm_configurator.catalogue.definitions", return_value=entries), \
+                 patch("llm_configurator.catalogue.fetch_variants") as hf, \
+                 patch("llm_configurator.catalogue.fetch_scores", return_value=scores):
+                refresh(store, include_models=False)
+                hf.assert_not_called()
+            cached = store.get("variants")[0]
+            self.assertEqual(cached["id"], variant.id)
+            self.assertEqual(cached["size_bytes"], variant.size_bytes)
+            self.assertEqual(cached["scores"]["general"], 42)
+
+    def test_model_only_refresh_does_not_fetch_scores(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(directory)
+            with patch("llm_configurator.catalogue.fetch_variants", return_value=[]), \
+                 patch("llm_configurator.catalogue.fetch_scores") as scores:
+                refresh(store, include_scores=False)
+                scores.assert_not_called()
+
     def test_hf_uses_real_file_size_and_skips_shards(self):
         responses = [{"sha": "base123"}, {"model_type": "qwen3", "num_hidden_layers": 32, "num_key_value_heads": 8,
                      "head_dim": 128, "max_position_embeddings": 32768}, {"sha": "gguf123", "siblings": [

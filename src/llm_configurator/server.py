@@ -90,17 +90,21 @@ def make_server(store, port=8765, demo=False):
                     include_scores = body.get("include_scores", True)
                     if type(include_scores) is not bool:
                         raise ValueError("include_scores must be a boolean")
-                    if refresh_lock.acquire(blocking=False):
-                        refresh_state.update(running=True, result=None)
-                        def run():
-                            try:
-                                refresh_state["result"] = refresh(store, include_scores=include_scores)
-                            except Exception as error:
-                                refresh_state["result"] = {"warnings": [f"Refresh failed: {type(error).__name__}: {error}"]}
-                            finally:
-                                refresh_state["running"] = False
-                                refresh_lock.release()
-                        threading.Thread(target=run, daemon=True).start()
+                    include_models = body.get("include_models", True)
+                    if type(include_models) is not bool:
+                        raise ValueError("include_models must be a boolean")
+                    if not refresh_lock.acquire(blocking=False):
+                        return self.send(409, {"error": "Metadata refresh already running"})
+                    refresh_state.update(running=True, result=None)
+                    def run():
+                        try:
+                            refresh_state["result"] = refresh(store, include_scores=include_scores, include_models=include_models)
+                        except Exception as error:
+                            refresh_state["result"] = {"warnings": [f"Refresh failed: {type(error).__name__}: {error}"]}
+                        finally:
+                            refresh_state["running"] = False
+                            refresh_lock.release()
+                    threading.Thread(target=run, daemon=True).start()
                     return self.send(202, refresh_state)
                 return self.send(404, {"error": "Not found"})
             except (ValueError, TypeError, KeyError, OSError) as error:

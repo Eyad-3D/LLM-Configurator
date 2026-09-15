@@ -112,7 +112,7 @@ def apply_scores(variant, entry, score_cache):
     variant.score_settings = item.get("name", slug)
 
 
-def refresh(store, include_scores=True):
+def refresh(store, include_scores=True, include_models=True):
     errors = []
     score_cache = store.get("scores")
     if include_scores:
@@ -125,11 +125,14 @@ def refresh(store, include_scores=True):
     variants = []
     entries = definitions(store)
     # Only remote reads run concurrently. Cache writes and mappings remain sequential.
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        futures = [pool.submit(fetch_variants, entry) for entry in entries]
+    if include_models:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(fetch_variants, entry) for entry in entries]
+    else:
+        futures = [None] * len(entries)
     for entry, future in zip(entries, futures):
         try:
-            fetched = future.result()
+            fetched = future.result() if future else [Variant(**v) for v in old if v["repo"] == entry["gguf_repo"]]
         except (ValueError, KeyError, TypeError) as error:
             errors.append(f"{entry['base_repo']}: {error}")
             fetched = [Variant(**v) for v in old if v["repo"] == entry["gguf_repo"]]

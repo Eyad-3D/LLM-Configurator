@@ -22,8 +22,13 @@ async function api(path, body) {
   }
   const response = await fetch(path, options);
   const payload = await response.json();
-  if (!response.ok)
-    throw new Error(payload.error || `Request failed: ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(
+      payload.error || `Request failed: ${response.status}`,
+    );
+    error.status = response.status;
+    throw error;
+  }
   return payload;
 }
 function message(text, error = false) {
@@ -241,8 +246,21 @@ $("scan").addEventListener("click", async () => {
   }
 });
 $("show_all").addEventListener("change", renderResults);
-async function refreshMetadata(withScores) {
-  await api("/api/refresh", { include_scores: withScores });
+async function refreshMetadata(withScores, withModels = true) {
+  // A different tab or manual refresh may own the server worker. Wait, then
+  // submit our own scope so a model-only job cannot satisfy a ranking request.
+  for (;;) {
+    try {
+      await api("/api/refresh", {
+        include_scores: withScores,
+        include_models: withModels,
+      });
+      break;
+    } catch (error) {
+      if (error.status !== 409) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  }
   for (;;) {
     await new Promise((resolve) => setTimeout(resolve, 1000));
     const state = await api("/api/refresh");
