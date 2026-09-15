@@ -11,6 +11,8 @@ const esc = (value) =>
       ],
   );
 let report = null;
+let appState = null;
+let includeRankings = false;
 async function api(path, body) {
   const options = { headers: { "X-Session-Token": token } };
   if (body !== undefined) {
@@ -32,6 +34,11 @@ function metric(label, value, sub) {
   return `<div class="metric"><div class="label">${esc(label)}</div><div class="value">${esc(value)}</div><div class="sub" title="${esc(sub)}">${esc(sub)}</div></div>`;
 }
 function hardware(hw) {
+  const selected = new Set(
+    [...$("processes").querySelectorAll("input:checked")].map(
+      (input) => `${input.value}:${input.dataset.created}`,
+    ),
+  );
   const gpu = hw.gpus[0];
   $("hardware").innerHTML =
     metric(
@@ -71,13 +78,14 @@ function hardware(hw) {
     ? hw.processes
         .map(
           (p) =>
-            `<label class="process-row" title="PID ${p.pid}; RSS ${GiB(p.rss)} GiB"><input type="checkbox" value="${p.pid}" ${p.reclaimable == null ? "disabled" : ""}><span class="process-name">${esc(p.name)}</span><span class="process-size">${p.reclaimable == null ? "unknown" : "~" + GiB(p.reclaimable) + " GiB"}</span></label>`,
+            `<label class="process-row" title="PID ${p.pid}; RSS ${GiB(p.rss)} GiB"><input type="checkbox" value="${p.pid}" data-created="${p.created}" ${selected.has(`${p.pid}:${p.created}`) ? "checked" : ""} ${p.reclaimable == null ? "disabled" : ""}><span class="process-name">${esc(p.name)}</span><span class="process-size">${p.reclaimable == null ? "unknown" : "~" + GiB(p.reclaimable) + " GiB"}</span></label>`,
         )
         .join("")
     : '<p class="hint">No sizeable accessible processes found.</p>';
 }
 async function loadState() {
   const state = await api("/api/state");
+  appState = state;
   hardware(state.hardware);
   $("demo").hidden = !state.demo;
   $("catalogue_status").textContent = state.status
@@ -115,6 +123,8 @@ async function loadState() {
 function requirements() {
   return {
     workload: $("workload").value,
+    priority: $("priority").value,
+    include_rankings: includeRankings,
     context: Number($("context").value),
     users: Number($("users").value),
     min_tps: Number($("min_tps").value),
@@ -122,10 +132,28 @@ function requirements() {
     gpu_reserve_gib: Number($("gpu_reserve_gib").value),
     gpu_index: Number($("gpu_index").value),
     strict_speed: $("strict_speed").checked,
-    reclaim_pids: [...$("processes").querySelectorAll("input:checked")].map(
-      (input) => Number(input.value),
-    ),
+    reclaim_pids:
+      $("resource-mode").value === "free"
+        ? [...$("processes").querySelectorAll("input:checked")].map((input) =>
+            Number(input.value),
+          )
+        : [],
   };
+}
+function qualityPanel(c) {
+  if (!report.requirements.include_rankings)
+    return '<p class="hint">Rankings skipped · Comparing resources and available local speed evidence.</p>';
+  const q = c.quality_comparison;
+  const metric =
+    {
+      general: "General intelligence",
+      coding: "Coding",
+      agentic: "Agentic work",
+    }[c.quality_metric] || c.quality_metric;
+  if (!q || q.rank == null) {
+    return `<section class="quality-panel quality-missing"><strong>Not ranked</strong><p>${q?.reason === "incomparable" ? "Benchmark versions or reference scores differ. Refresh and check the model mappings before comparing." : "No comparable benchmark score for this workload. Add your API key, refresh metadata and match the benchmark entry."}</p><button type="button" class="text-button" data-open-rank>Set up benchmark comparison →</button></section>`;
+  }
+  return `<section class="quality-panel"><div class="quality-heading"><div><span class="quality-label">${esc(metric)}</span><strong>${Number(c.quality_score).toFixed(1)} <small>index points</small></strong></div><div class="quality-rank"><strong>${q.tied ? 'Joint ' : ''}#${q.rank} <small>of ${q.rated_models} rated models</small></strong></div></div><p class="hint">Base-model benchmark · Exact quantisation quality is unmeasured.</p></section>`;
 }
 function renderResults() {
   if (!report) return;
@@ -136,6 +164,12 @@ function renderResults() {
     : report.candidates.filter((c) => shortlist.has(c.id));
   $("count").textContent =
     `${report.candidates.length} estimated memory fits · ${items.length} shown`;
+  const comparison = report.quality_comparison;
+  $("comparison-summary").textContent = !report.requirements.include_rankings
+    ? "Rankings are off for this comparison."
+    : comparison
+      ? `${comparison.rated_models} of ${comparison.eligible_models} distinct eligible models have workload scores. ${comparison.comparable ? "Ranks compare rated models across all fits, not just the shortlist. Card order follows your selected priority." : "Reference scores are not comparable; quality ranks are withheld."}`
+      : "";
   $("cards").innerHTML = items.length
     ? items
         .map((c) => {
@@ -144,9 +178,9 @@ function renderResults() {
               ? "No quality score"
               : `Base-model ${c.quality_metric} index: ${c.quality_score.toFixed(1)}`;
           return `<article class="card"><div class="card-top"><div class="card-title"><h3>${esc(c.name)}</h3><span class="quant">${esc(c.quant)}</span></div><span class="tag ${c.speed_meets_target ? "" : "unknown"}">${c.speed_meets_target ? "Speed verified locally" : "Speed unverified"}</span></div>
-      <p class="mode">${esc({ gpu: "GPU-resident estimate", split: "GPU + CPU split", cpu: "CPU execution" }[c.mode])} · ${c.gpu_layers}/${c.total_layers} layers on GPU · ${c.scenario === "now" ? "Current resources" : "After closing selected apps"}</p>
-      <div class="card-metrics"><div><strong>${c.context.toLocaleString()}</strong><span>context tokens / user</span></div><div><strong>${GiB(c.ram_bytes)} GiB</strong><span>estimated system RAM</span></div><div><strong>${GiB(c.vram_bytes)} GiB</strong><span>estimated VRAM</span></div><div><strong>${c.tps == null ? "Not tested" : c.tps.toFixed(1) + " tok/s"}</strong><span>${c.tps == null ? "local benchmark needed" : "synthetic generation speed"}</span></div></div>
-      <div class="card-bottom"><p>${esc(score)}${c.quality_score == null ? ". Memory-only comparison." : ". Exact quantisation quality unknown."}<br>${GiB(c.ram_headroom_bytes)} GiB RAM left beyond your reserve.</p><button class="text-button" data-detail="${esc(c.id)}">View configuration ↗</button></div></article>`;
+      ${qualityPanel(c)}
+      <div class="card-metrics concise"><div><strong>${c.context.toLocaleString()}</strong><span>context tokens per user</span></div><div><strong>${c.tps == null ? "Not measured" : c.tps.toFixed(1) + " tok/s"}</strong><span>local generation speed</span></div><div><strong>${esc({ cpu: "CPU", gpu: "GPU", split: "GPU + CPU" }[c.mode])}</strong><span>${c.scenario === "now" ? "Fits current resources (estimated)" : "May fit after closing apps"}</span></div></div>
+      <div class="card-bottom"><p>${esc(c.explanation)}</p><button class="text-button" data-detail="${esc(c.id)}">View details & setup ↗</button></div></article>`;
         })
         .join("")
     : `<div class="empty"><h3>No qualifying configurations yet.</h3><p>${report.demo ? "Try reducing context or active users, or include unverified speed options." : "Refresh model metadata first. If models are cached, try a shorter context, fewer active users, or include unverified speed options."}</p><p class="hint">Rejections: ${report.rejected.context} context · ${report.rejected.memory} memory · ${report.rejected.speed} speed</p></div>`;
@@ -160,6 +194,9 @@ function renderResults() {
         detail(report.candidates.find((c) => c.id === button.dataset.detail)),
       ),
     );
+  document
+    .querySelectorAll("[data-open-rank]")
+    .forEach((button) => button.addEventListener("click", () => openRanking()));
   $("export").disabled = false;
 }
 function detail(c) {
@@ -178,29 +215,13 @@ function detail(c) {
   const variantArgument = `'${c.variant_id.replace(/'/g, "'\\''")}'`;
   $("detail_content").innerHTML =
     `<p class="eyebrow">DEPLOYMENT DETAILS</p><h3>${esc(c.name)} · ${esc(c.quant)}</h3><p>${esc(c.explanation)}</p>
-    <dl><dt>Memory-only context ceiling</dt><dd>${c.memory_max_context.toLocaleString()} tokens / user</dd><dt>FP16 KV cache, all users</dt><dd>${GiB(c.kv_bytes)} GiB</dd><dt>Weight file size</dt><dd>${GiB(c.file_bytes)} GiB</dd><dt>Quality evidence</dt><dd>${esc(c.quality_evidence)}</dd><dt>Evaluation entry</dt><dd>${esc(c.score_settings || "Unmapped")}</dd><dt>Benchmark version</dt><dd>${esc(c.score_version || "Unavailable")}</dd><dt>Metadata retrieved</dt><dd>${esc(c.metadata_date)}</dd></dl>
+    <dl><dt>Quality rank among rated eligible models</dt><dd>${c.quality_comparison?.rank == null ? "Not ranked" : "#" + c.quality_comparison.rank + " of " + c.quality_comparison.rated_models}</dd><dt>Gap to highest reference score</dt><dd>${c.quality_comparison?.points_behind_best == null ? "Unavailable" : c.quality_comparison.points_behind_best + " index points"}</dd><dt>Estimated system RAM</dt><dd>${GiB(c.ram_bytes)} GiB</dd><dt>Estimated VRAM</dt><dd>${GiB(c.vram_bytes)} GiB</dd><dt>RAM headroom after reserve</dt><dd>${GiB(c.ram_headroom_bytes)} GiB</dd><dt>Memory-only context ceiling</dt><dd>${c.memory_max_context.toLocaleString()} tokens / user</dd><dt>FP16 KV cache, all users</dt><dd>${GiB(c.kv_bytes)} GiB</dd><dt>Weight file size</dt><dd>${GiB(c.file_bytes)} GiB</dd><dt>Quality evidence</dt><dd>${esc(c.quality_evidence)}</dd><dt>Evaluation entry</dt><dd>${esc(c.score_settings || "Unmapped")}</dd><dt>Benchmark version</dt><dd>${esc(c.score_version || "Unavailable")}</dd><dt>Metadata retrieved</dt><dd>${esc(c.metadata_date)}</dd></dl>
     ${c.score_source ? `<p>Source: <a href="${esc(c.score_source)}" target="_blank" rel="noreferrer">Artificial Analysis</a>. Scores apply to the evaluation entry above.</p>` : ""}
     <h3>Runtime settings</h3><pre>${esc(JSON.stringify(settings, null, 2))}</pre><p>Use these settings in your llama.cpp installation. The memory ceiling is an estimate; it is not a validated context or speed guarantee.</p>
     ${c.demo ? "<p>Demo fixtures cannot be downloaded or benchmarked. Start without --demo and refresh metadata for real models.</p>" : `<h3>Download & measure</h3><p>Run these commands locally after installing llama.cpp. Downloads require confirmation. Benchmarking generates 128 tokens near the selected context limit.</p><pre>${esc(`llm-config download ${variantArgument} --directory ./models\n\nllm-config bench ${variantArgument} --model './models/${c.filename.split("/").pop()}' --context ${c.context} --gpu-layers ${c.gpu_layers} --gpu-index ${c.gpu_index ?? 0}`)}</pre><p>Commands use shell quoting compatible with Bash and PowerShell for these model IDs. ${c.users > 1 ? "This benchmark measures one active user only; it will not verify your concurrent speed target." : "Compare again after the benchmark to apply the measured result."}</p>`}`;
   $("detail").showModal();
 }
 $("close_detail").addEventListener("click", () => $("detail").close());
-$("requirements").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  $("compare").disabled = true;
-  message("Scanning current resources and comparing configurations…");
-  try {
-    report = await api("/api/recommend", requirements());
-    renderResults();
-    message(
-      `Comparison updated at ${new Date(report.hardware.timestamp).toLocaleTimeString()}.`,
-    );
-  } catch (error) {
-    message(error.message, true);
-  } finally {
-    $("compare").disabled = false;
-  }
-});
 $("scan").addEventListener("click", async () => {
   try {
     await loadState();
@@ -209,6 +230,7 @@ $("scan").addEventListener("click", async () => {
     $("cards").innerHTML =
       '<div class="empty"><h3>Hardware rescanned.</h3><p>Compare again to update your configurations.</p></div>';
     $("count").textContent = "Hardware updated";
+    $("comparison-summary").textContent = "";
     $("notes").textContent = "";
     message(
       "Hardware updated. Application selections reset to avoid stale process IDs.",
@@ -218,33 +240,29 @@ $("scan").addEventListener("click", async () => {
   }
 });
 $("show_all").addEventListener("change", renderResults);
+async function refreshMetadata(withScores) {
+  await api("/api/refresh", { include_scores: withScores });
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const state = await api("/api/refresh");
+    if (!state.running) {
+      await loadState();
+      return state.result;
+    }
+  }
+}
 $("refresh").addEventListener("click", async () => {
   $("refresh").disabled = true;
   try {
-    await api("/api/refresh", {});
+    message("Refreshing model and benchmark metadata…");
+    const result = await refreshMetadata(true);
     message(
-      "Refreshing metadata from Hugging Face and Artificial Analysis. No weights are downloaded.",
+      (result.warnings || []).join(" · ") ||
+        "Metadata updated. You can now match benchmark entries.",
     );
-    async function poll() {
-      try {
-        const state = await api("/api/refresh");
-        if (state.running) {
-          setTimeout(poll, 1200);
-          return;
-        }
-        await loadState();
-        message(
-          `Metadata refresh finished. ${(state.result?.warnings || []).join(" · ")}`,
-        );
-        $("refresh").disabled = false;
-      } catch (error) {
-        message(error.message, true);
-        $("refresh").disabled = false;
-      }
-    }
-    setTimeout(poll, 1000);
   } catch (error) {
     message(error.message, true);
+  } finally {
     $("refresh").disabled = false;
   }
 });
@@ -264,7 +282,6 @@ $("export").addEventListener("click", () => {
   anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
-loadState().catch((error) => message(error.message, true));
 
 async function credentialStatus() {
   const state = await api("/api/credentials");
@@ -315,7 +332,3 @@ $("api-key-form").addEventListener("submit", (event) => {
 });
 $("test-key").addEventListener("click", () => credentialAction("test"));
 $("remove-key").addEventListener("click", () => credentialAction("remove"));
-credentialStatus().catch(() => {
-  $("key-status").textContent =
-    "Could not read credential status. Try reloading the app.";
-});

@@ -16,3 +16,14 @@ jobs:
       - run: python -m unittest discover -s tests -v
       - run: python -m llm_configurator --help
       - run: python -m llm_configurator recommend --demo --context 2048
+
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm test

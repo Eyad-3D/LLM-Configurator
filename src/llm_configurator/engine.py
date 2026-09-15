@@ -91,12 +91,12 @@ def recommend(variants, hardware, requirements, measurements=()):
                         rejected["speed"] += 1
                         continue
                     metric = req.workload if req.workload != "documents" else "general"
-                    score = variant.scores.get(metric)
+                    score = variant.scores.get(metric) if req.include_rankings else None
                     quality = "Base-model reference; this quantisation has not been evaluated" if score is not None else "No mapped workload benchmark"
                     mode = "cpu" if layers == 0 else "gpu" if layers == variant.layers else "split"
                     results.append({"id": f"{variant.id}|{scenario}|{context}|{layers}", "variant_id": variant.id,
                                     "name": variant.name, "quant": variant.quant, "filename": variant.filename,
-                                    "repo": variant.repo, "revision": variant.revision, "demo": variant.demo,
+                                    "repo": variant.repo, "base_repo": variant.base_repo, "revision": variant.revision, "demo": variant.demo,
                                     "scenario": scenario, "mode": mode, "gpu_layers": layers, "total_layers": variant.layers,
                                     "gpu_index": req.gpu_index if layers else None, "context": context, "users": req.users,
                                     "runtime_gpu_layers": layers + 1 if layers == variant.layers else layers,
@@ -104,8 +104,8 @@ def recommend(variants, hardware, requirements, measurements=()):
                                     "ram_bytes": memory["ram"], "vram_bytes": memory["vram"], "kv_bytes": memory["kv_total"],
                                     "ram_headroom_bytes": int(budget - memory["ram"]), "vram_headroom_bytes": int(gpu_budget - memory["vram"]),
                                     "quality_score": score, "quality_evidence": quality, "quality_metric": metric,
-                                    "score_source": variant.score_source, "score_version": variant.score_version,
-                                    "score_settings": variant.score_settings, "tps": tps, "speed_meets_target": meets_speed,
+                                    "score_source": variant.score_source if req.include_rankings else None, "score_version": variant.score_version if req.include_rankings else None,
+                                    "score_settings": variant.score_settings if req.include_rankings else None, "tps": tps, "speed_meets_target": meets_speed,
                                     "speed_evidence": "Local synthetic generation benchmark; same context and configuration" if measurement else "Unverified — benchmark this configuration",
                                     "benchmark": measurement, "threads": threads, "metadata_date": variant.fetched_at,
                                     "file_bytes": variant.size_bytes,
@@ -115,23 +115,62 @@ def recommend(variants, hardware, requirements, measurements=()):
     # Scores from different index versions must never share a numerical ordering.
     versions = {r["score_version"] for r in results if r["quality_score"] is not None}
     comparable = len(versions) <= 1 and None not in versions
-    results.sort(key=lambda r: (r["speed_meets_target"] is True,
-                               r["quality_score"] if comparable and r["quality_score"] is not None else -1,
-                               r["scenario"] == "now", -abs(r["context"] - req.context),
-                               -(r["ram_bytes"] + r["vram_bytes"])), reverse=True)
-    # Diverse shortlist; all feasible configurations remain inspectable.
+    comparison = add_quality_comparison(results, comparable)
+    comparable = comparison["comparable"]
+    def order(result):
+        quality = result["quality_score"] if comparable and result["quality_score"] is not None else -1
+        speed = result["tps"] if result["tps"] is not None else -1
+        primary = (quality, speed) if req.priority == "quality" else (speed, quality) if req.priority == "speed" else (result["speed_meets_target"] is True, quality)
+        return (*primary, result["scenario"] == "now", -abs(result["context"] - req.context),
+                -(result["ram_bytes"] + result["vram_bytes"]))
+    results.sort(key=order, reverse=True)
+    # Show three distinct models first; fill remaining places with variant trade-offs.
     shortlist, seen = [], set()
     for result in results:
-        key = (result["name"], result["quant"], result["mode"])
-        if key not in seen:
+        if result["base_repo"] not in seen:
             shortlist.append(result["id"])
-            seen.add(key)
-        if len(shortlist) == 5:
+            seen.add(result["base_repo"])
+        if len(shortlist) == 3:
             break
+    configurations = {(r["base_repo"], r["quant"], r["mode"]) for r in results if r["id"] in shortlist}
+    for result in results:
+        if len(shortlist) == 3:
+            break
+        key = (result["base_repo"], result["quant"], result["mode"])
+        if key not in configurations:
+            shortlist.append(result["id"])
+            configurations.add(key)
     return {"requirements": asdict(req), "hardware": hardware, "candidates": results, "shortlist": shortlist,
-            "rejected": rejected, "quality_comparable": comparable, "reclaim_estimate_bytes": reclaim,
+            "rejected": rejected, "quality_comparable": comparable, "quality_comparison": comparison, "reclaim_estimate_bytes": reclaim,
             "notes": ["Memory fit is estimated, not a guarantee; rescan after freeing resources.",
                       "Generation speed is unknown until locally tested. Concurrency speed testing is not supported in v0.1.",
                       "Context includes prompt, conversation, reasoning and generated output. KV cache uses FP16.",
                       "Memory maximum is not a validated usable-context or speed guarantee.",
                       "Document ordering uses general intelligence as a proxy, not a long-context evaluation."]}
+
+
+def add_quality_comparison(results, comparable):
+    """Competition ranks over distinct eligible base models, never over quant/context copies."""
+    models = {}
+    for result in results:
+        models.setdefault(result["base_repo"], set())
+        if result["quality_score"] is not None:
+            models[result["base_repo"]].add(result["quality_score"])
+    # Conflicting reference scores for one model cannot form a fair comparison.
+    comparable = comparable and all(len(scores) <= 1 for scores in models.values())
+    rated = {model: next(iter(scores)) for model, scores in models.items() if len(scores) == 1}
+    for result in results:
+        score = result["quality_score"]
+        rank = None
+        behind = None
+        beaten = None
+        if comparable and score is not None:
+            rank = 1 + sum(other > score for other in rated.values())
+            behind = round(max(rated.values()) - score, 4)
+            beaten = sum(other < score for other in rated.values())
+        result["quality_comparison"] = {"rank": rank, "rated_models": len(rated), "eligible_models": len(models),
+            "points_behind_best": behind, "models_below": beaten,
+            "tied": sum(other == score for other in rated.values()) > 1 if rank else False,
+            "reason": "incomparable" if not comparable else "missing" if score is None else "ranked"}
+    return {"rated_models": len(rated), "eligible_models": len(models), "comparable": comparable,
+            "scope": "Distinct models in eligible configurations, including speed-unverified options when allowed. Quantisations share a base-model reference rank."}

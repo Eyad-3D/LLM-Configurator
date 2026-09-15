@@ -29,7 +29,9 @@ class ServerTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_local_ui_and_demo_recommendation(self):
-        self.assertIn("Find your local fit", self.html)
+        self.assertIn("Find the right AI", self.html)
+        with urlopen(self.url + "/wizard.js") as response:
+            self.assertIn("showScreen", response.read().decode())
         request = Request(self.url + "/api/recommend", data=b'{"context":4096}', headers={"X-Session-Token": self.token})
         with urlopen(request) as response:
             result = json.load(response)

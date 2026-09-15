@@ -112,14 +112,15 @@ def apply_scores(variant, entry, score_cache):
     variant.score_settings = item.get("name", slug)
 
 
-def refresh(store):
+def refresh(store, include_scores=True):
     errors = []
     score_cache = store.get("scores")
-    try:
-        score_cache = fetch_scores()
-        store.put("scores", score_cache)
-    except ValueError as error:
-        errors.append(str(error))
+    if include_scores:
+        try:
+            score_cache = fetch_scores()
+            store.put("scores", score_cache)
+        except ValueError as error:
+            errors.append(str(error))
     old = store.get("variants", [])
     variants = []
     entries = definitions(store)
@@ -150,7 +151,7 @@ def demo_variants():
     result = []
     for name, size, layers, kv_heads in [("Demo Small", 4, 32, 4), ("Demo Medium", 8, 32, 8), ("Demo Large", 14, 40, 8)]:
         for quant, bytes_per_param in [("Q4_K_M", 0.62), ("Q6_K", 0.84), ("Q8_0", 1.1)]:
-            result.append(Variant(id=f"demo:{name}:{quant}", name=name, base_repo="demo/fictional", repo="demo/fictional",
+            result.append(Variant(id=f"demo:{name}:{quant}", name=name, base_repo=f"demo/{name.replace(' ', '-')}", repo="demo/fictional",
                                   revision="demo", base_revision="demo", filename=f"{name}-{quant}.gguf", sha256=None,
                                   quant=quant, size_bytes=int(size * bytes_per_param * GIB), layers=layers,
                                   kv_heads=kv_heads, head_dim=128, max_context=32768, architecture="qwen3", demo=True))

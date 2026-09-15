@@ -21,8 +21,14 @@ class Requirements:
     gpu_index: int = 0
     reclaim_pids: list[int] = field(default_factory=list)
     strict_speed: bool = False
+    priority: str = "balanced"
+    include_rankings: bool = True
 
     def __post_init__(self):
+        if self.priority not in {"balanced", "quality", "speed"}:
+            raise ValueError("Priority must be balanced, quality or speed")
+        if type(self.include_rankings) is not bool:
+            raise ValueError("include_rankings must be a boolean")
         if self.workload not in {"general", "coding", "agentic", "documents"}:
             raise ValueError("Supported workloads: general, coding, agentic, documents")
         for name, low, high in [("context", 256, 1048576), ("users", 1, 64), ("gpu_index", 0, 64)]:

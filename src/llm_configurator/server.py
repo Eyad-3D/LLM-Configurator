@@ -42,10 +42,10 @@ def make_server(store, port=8765, demo=False):
                 return self.send(403, {"error": "Local access only"})
             path = urlparse(self.path).path
             try:
-                if path in {"/", "/app.js", "/style.css"}:
-                    name = {"/": "index.html", "/app.js": "app.js", "/style.css": "style.css"}[path]
+                if path in {"/", "/app.js", "/wizard.js", "/style.css"}:
+                    name = {"/": "index.html", "/app.js": "app.js", "/wizard.js": "wizard.js", "/style.css": "style.css"}[path]
                     data = (static / name).read_bytes().replace(b"__SESSION_TOKEN__", token.encode())
-                    mime = {"/": "text/html; charset=utf-8", "/app.js": "text/javascript; charset=utf-8", "/style.css": "text/css; charset=utf-8"}[path]
+                    mime = {"/": "text/html; charset=utf-8", "/app.js": "text/javascript; charset=utf-8", "/wizard.js": "text/javascript; charset=utf-8", "/style.css": "text/css; charset=utf-8"}[path]
                     return self.send(200, data, mime)
                 if self.headers.get("X-Session-Token") != token:
                     return self.send(403, {"error": "Reload the application to refresh the session"})
@@ -87,11 +87,14 @@ def make_server(store, port=8765, demo=False):
                         return self.send(409, {"error": "Wait for metadata refresh to finish"})
                     return self.send(200, map_benchmark(store, body["base_repo"], body.get("slug")))
                 if path == "/api/refresh":
+                    include_scores = body.get("include_scores", True)
+                    if type(include_scores) is not bool:
+                        raise ValueError("include_scores must be a boolean")
                     if refresh_lock.acquire(blocking=False):
                         refresh_state.update(running=True, result=None)
                         def run():
                             try:
-                                refresh_state["result"] = refresh(store)
+                                refresh_state["result"] = refresh(store, include_scores=include_scores)
                             except Exception as error:
                                 refresh_state["result"] = {"warnings": [f"Refresh failed: {type(error).__name__}: {error}"]}
                             finally:

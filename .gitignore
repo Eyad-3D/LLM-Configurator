@@ -9,3 +9,5 @@ dist/
 *.gguf
 *.part
 .pytest_cache/
+
+node_modules/

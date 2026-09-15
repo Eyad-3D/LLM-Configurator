@@ -7,249 +7,335 @@
     <title>LLM Configurator · Find your local fit</title>
     <link rel="stylesheet" href="/style.css" />
     <script defer src="/app.js"></script>
+    <script defer src="/wizard.js"></script>
   </head>
   <body>
     <header>
-      <div class="brand">
-        <span class="mark">◈</span> LLM Configurator
-        <span class="version">0.1</span>
-      </div>
-      <span class="local"><i></i> Running locally</span>
+      <div class="brand"><span class="mark">◈</span> LLM Configurator</div>
+      <span class="local"><i></i> On your computer</span>
     </header>
-    <main>
-      <section class="intro">
-        <div>
-          <p class="eyebrow">YOUR HARDWARE. YOUR WORKLOAD.</p>
-          <h1>Find your local fit.</h1>
-          <p class="lede">
-            Compare models, precision and context — with room for everything
-            else you run.
-          </p>
-        </div>
-        <button id="scan" class="secondary">↻ Rescan hardware</button>
-      </section>
+    <main class="guided">
       <div id="message" role="status" aria-live="polite"></div>
       <div id="demo" class="banner" hidden>
-        DEMO MODE · Fictional models on your real hardware. Quality and speed
-        scores are not fabricated.
+        DEMO · Fictional models, real hardware. No fabricated performance
+        scores.
       </div>
-      <section id="hardware" class="hardware" aria-label="Hardware summary">
-        <div class="metric">Reading your hardware…</div>
+      <div id="journey" hidden>
+        <span id="step-label"></span
+        ><progress
+          id="step-progress"
+          max="5"
+          value="1"
+          aria-label="Question progress"
+        ></progress>
+      </div>
+      <section data-screen="welcome" class="welcome">
+        <p class="eyebrow">A LITTLE GUIDANCE. A BETTER FIT.</p>
+        <h1 tabindex="-1">Find the right AI<br />for your computer.</h1>
+        <p class="lede">
+          Answer five quick questions. We’ll match local models to your work and
+          the resources you have available.
+        </p>
+        <button id="start">Get started →</button>
+        <p class="hint">
+          No model downloads. Your hardware information stays on this computer.
+        </p>
       </section>
-      <div class="workspace">
-        <aside>
-          <form id="requirements" class="panel">
-            <p class="eyebrow">01 / YOUR REQUIREMENTS</p>
-            <h2>What do you want to run?</h2>
-            <label for="workload">Primary workload</label
-            ><select id="workload" name="workload">
-              <option value="general">General chat & reasoning</option>
-              <option value="coding">Coding assistance</option>
-              <option value="agentic">Agentic & tool-based work</option>
-              <option value="documents">Document analysis</option>
-            </select>
-            <label for="context">Minimum context per user</label
-            ><select id="context" name="context">
-              <option value="2048">2,048 tokens</option>
-              <option value="4096">4,096 tokens</option>
-              <option value="8192" selected>8,192 tokens</option>
-              <option value="16384">16,384 tokens</option>
-              <option value="32768">32,768 tokens</option>
-              <option value="65536">65,536 tokens</option>
-            </select>
+      <form id="requirements" novalidate>
+        <section data-screen="q1" class="question" hidden>
+          <h1 tabindex="-1">What will you mainly use it for?</h1>
+          <p class="lede">Choose the task you care about most.</p>
+          <label for="workload">Primary use</label
+          ><select id="workload">
+            <option value="general">Everyday chat & reasoning</option>
+            <option value="coding">Writing & understanding code</option>
+            <option value="agentic">Agents & automation</option>
+            <option value="documents">Working with documents</option>
+          </select>
+          <p class="hint">
+            This version recommends text models. Image workflows are not
+            available yet.
+          </p>
+        </section>
+        <section data-screen="q2" class="question" hidden>
+          <h1 tabindex="-1">What matters most to you?</h1>
+          <p class="lede">We’ll use this to order your options.</p>
+          <label for="priority">Your priority</label
+          ><select id="priority">
+            <option value="balanced">A balance of quality and speed</option>
+            <option value="quality">The best answer quality</option>
+            <option value="speed">The fastest responses</option>
+          </select>
+          <details>
+            <summary>Set a specific speed target</summary>
+            <label for="min_tps"
+              >Minimum generated tokens per second, per user</label
+            ><input
+              id="min_tps"
+              type="number"
+              min="0"
+              max="100000"
+              value="15"
+              step="1"
+            /><label class="check"
+              ><input id="strict_speed" type="checkbox" />Only show
+              configurations with a matching local speed test</label
+            >
             <p class="hint">
-              Includes input, history, reasoning and generated output.
+              Without a local benchmark, speed remains unverified. Quality
+              ordering requires optional benchmark data.
             </p>
-            <div class="pair">
-              <div>
-                <label for="users">Active users</label
-                ><input
-                  id="users"
-                  type="number"
-                  min="1"
-                  max="64"
-                  value="1"
-                  required
-                />
-              </div>
-              <div>
-                <label for="min_tps">Minimum tok/s</label
-                ><input
-                  id="min_tps"
-                  type="number"
-                  min="0"
-                  max="100000"
-                  step="1"
-                  value="15"
-                  required
-                />
-              </div>
-            </div>
-            <p class="hint">Speed target is per active user.</p>
+          </details>
+        </section>
+        <section data-screen="q3" class="question" hidden>
+          <h1 tabindex="-1">How much will it need to read at once?</h1>
+          <p class="lede">
+            Allow room for your input, conversation history and the answer.
+          </p>
+          <label for="context-preset">Typical amount of information</label
+          ><select id="context-preset">
+            <option value="4096">Short conversations</option>
+            <option value="8192" selected>
+              Several pages or a longer conversation
+            </option>
+            <option value="32768">Long documents or extended tasks</option>
+          </select>
+          <p class="hint">
+            These presets set token budgets, not guaranteed page counts. Text
+            and document formats vary.
+          </p>
+          <details>
+            <summary>Choose an exact context size</summary>
+            <label for="context"
+              >Tokens per user, including generated output</label
+            ><input
+              id="context"
+              type="number"
+              min="256"
+              max="1048576"
+              value="8192"
+              step="1"
+            />
+          </details>
+        </section>
+        <section data-screen="q4" class="question" hidden>
+          <h1 tabindex="-1">How many people will use it at once?</h1>
+          <p class="lede">
+            Count simultaneous requests, rather than everyone with access.
+          </p>
+          <label for="users">Active users</label
+          ><input
+            id="users"
+            type="number"
+            min="1"
+            max="64"
+            value="1"
+            step="1"
+          />
+          <p class="hint">
+            More active users need more memory. Concurrent speed estimates are
+            not yet available.
+          </p>
+        </section>
+        <section data-screen="q5" class="question" hidden>
+          <h1 tabindex="-1">Will other applications stay open?</h1>
+          <p class="lede">We’ll account for the memory they already use.</p>
+          <label for="resource-mode">Your working setup</label
+          ><select id="resource-mode">
+            <option value="keep">Keep my current applications open</option>
+            <option value="free">I could close some applications</option>
+          </select>
+          <div id="resource-choices" hidden>
+            <p class="hint">
+              Select applications you could close. Nothing will be closed
+              automatically.
+            </p>
+            <div id="processes">Scanning applications…</div>
+          </div>
+          <details>
+            <summary>Advanced hardware settings</summary>
             <label for="gpu_index">GPU</label
             ><select id="gpu_index">
               <option value="0">Detecting…</option>
             </select>
-            <details>
-              <summary>Memory headroom</summary>
-              <div class="pair">
-                <div>
-                  <label for="reserve_gib">RAM reserve / GiB</label
-                  ><input
-                    id="reserve_gib"
-                    type="number"
-                    min="0"
-                    max="1024"
-                    step="0.5"
-                    value="2"
-                    required
-                  />
-                </div>
-                <div>
-                  <label for="gpu_reserve_gib">VRAM reserve / GiB</label
-                  ><input
-                    id="gpu_reserve_gib"
-                    type="number"
-                    min="0"
-                    max="1024"
-                    step="0.25"
-                    value="0.5"
-                    required
-                  />
-                </div>
+            <div class="pair">
+              <div>
+                <label for="reserve_gib">Extra RAM headroom / GiB</label
+                ><input
+                  id="reserve_gib"
+                  type="number"
+                  min="0"
+                  max="1024"
+                  step="0.5"
+                  value="2"
+                />
               </div>
-              <p class="hint">
-                Additional headroom beyond what your system already uses.
-              </p>
-            </details>
-            <label class="check"
-              ><input id="strict_speed" type="checkbox" /> Only show locally
-              verified speed fits</label
-            >
-            <button type="submit" id="compare">
-              Compare configurations <span>→</span>
-            </button>
-            <p class="hint">Text models · FP16 KV cache · llama.cpp</p>
-          </form>
-          <section class="panel processes">
-            <p class="eyebrow">02 / RESOURCE SCENARIOS</p>
-            <h2>Make a little room.</h2>
-            <p class="hint">
-              Select applications you could close. We estimate the benefit; you
-              stay in control.
-            </p>
-            <div id="processes">Loading applications…</div>
-            <p class="hint">
-              Estimates use 75% of private memory where available. No processes
-              are closed. Rescan after closing apps.
-            </p>
-          </section>
-        </aside>
-        <section class="results">
+              <div>
+                <label for="gpu_reserve_gib">Extra VRAM headroom / GiB</label
+                ><input
+                  id="gpu_reserve_gib"
+                  type="number"
+                  min="0"
+                  max="1024"
+                  step="0.25"
+                  value="0.5"
+                />
+              </div>
+            </div>
+          </details>
+        </section>
+        <div id="question-nav" class="wizard-nav" hidden>
+          <button id="back" type="button" class="secondary">Back</button
+          ><button id="next" type="submit">Next →</button>
+        </div>
+      </form>
+      <section data-screen="review" class="question" hidden>
+        <p class="eyebrow">YOUR ANSWERS</p>
+        <h1 tabindex="-1">Does this look right?</h1>
+        <p class="lede">Change any answer without starting over.</p>
+        <div id="answer-summary"></div>
+        <details>
+          <summary>Your detected hardware</summary>
+          <div id="hardware" class="hardware"></div>
+          <button id="scan" type="button" class="secondary">
+            Rescan hardware
+          </button>
+        </details>
+        <div class="wizard-nav">
+          <button id="review-back" class="secondary">Back</button
+          ><button id="review-next">Continue →</button>
+        </div>
+      </section>
+      <section data-screen="ranking" class="question" hidden>
+        <section id="benchmark-settings">
           <div class="results-heading">
             <div>
-              <p class="eyebrow">03 / YOUR OPTIONS</p>
-              <h2>Configurations to consider</h2>
+              <p class="eyebrow">OPTIONAL · AFTER YOUR QUESTIONS</p>
+              <h2>Would you like model rankings?</h2>
             </div>
-            <button id="export" class="secondary" disabled>Export JSON</button>
+            <button class="secondary" id="refresh">
+              Refresh model metadata
+            </button>
           </div>
-          <div class="toolbar">
-            <span id="count">Ready when you are</span
-            ><label class="check"
-              ><input id="show_all" type="checkbox" /> Show all fits</label
-            >
-          </div>
-          <div id="cards">
-            <div class="empty">
-              <span class="empty-symbol">◈</span>
-              <h3>A model is only half the answer.</h3>
-              <p>
-                Set your workload and compare the complete configuration:
-                memory, context, precision and speed.
-              </p>
-              <p class="hint">
-                First visit? Refresh model metadata below. No model weights are
-                downloaded.
-              </p>
-            </div>
-          </div>
-          <div id="notes" class="notes"></div>
-        </section>
-      </div>
-      <section class="panel sources">
-        <div class="results-heading">
-          <div>
-            <p class="eyebrow">DATA & EVIDENCE</p>
-            <h2>A transparent recommendation.</h2>
-          </div>
-          <button class="secondary" id="refresh">Refresh model metadata</button>
-        </div>
-        <p id="catalogue_status" class="hint">Loading catalogue status…</p>
-        <p class="hint">
-          Hugging Face supplies pinned model files and architecture metadata.
-          <a
-            href="https://artificialanalysis.ai"
-            target="_blank"
-            rel="noreferrer"
-            >Artificial Analysis</a
-          >
-          supplies base-model evaluation references. Add your key below to
-          enable benchmark retrieval.
-        </p>
-        <form id="api-key-form" class="credential-settings" autocomplete="off">
-          <h3>Benchmark settings</h3>
+          <p id="catalogue_status" class="hint">Loading catalogue status…</p>
           <p class="hint">
+            Hugging Face supplies pinned model files and architecture metadata.
             <a
-              href="https://artificialanalysis.ai/data-api/docs"
+              href="https://artificialanalysis.ai"
               target="_blank"
               rel="noreferrer"
-              >Get an Artificial Analysis API key</a
-            >. Testing sends the key only to Artificial Analysis through this
-            local app.
+              >Artificial Analysis</a
+            >
+            supplies base-model evaluation references. Add your key below to
+            enable benchmark retrieval.
           </p>
-          <p id="key-status" class="hint" role="status" aria-live="polite">
-            Checking credential status…
-          </p>
-          <label for="aa-api-key">Artificial Analysis API key</label>
-          <input
-            id="aa-api-key"
-            type="password"
-            placeholder="Paste your API key"
+          <form
+            id="api-key-form"
+            class="credential-settings"
             autocomplete="off"
-            spellcheck="false"
-            maxlength="4096"
-          />
-          <label class="check"
-            ><input id="remember-key" type="checkbox" checked /> Remember on
-            this computer (OS credential store)</label
           >
-          <p class="hint">
-            Unchecked: use only until the app closes. Saved keys are never
-            returned to the browser.
-          </p>
-          <div class="credential-actions">
-            <button id="test-key" type="button" class="secondary">
-              Test connection
-            </button>
-            <button id="save-key" type="submit">Save key</button>
-            <button id="remove-key" type="button" class="secondary">
-              Remove key
-            </button>
+            <h3>Connect Artificial Analysis</h3>
+            <p class="hint">
+              <a
+                href="https://artificialanalysis.ai/data-api/docs"
+                target="_blank"
+                rel="noreferrer"
+                >Get an Artificial Analysis API key</a
+              >. Testing sends the key only to Artificial Analysis through this
+              local app.
+            </p>
+            <p id="key-status" class="hint" role="status" aria-live="polite">
+              Checking credential status…
+            </p>
+            <label for="aa-api-key">Artificial Analysis API key</label>
+            <input
+              id="aa-api-key"
+              type="password"
+              placeholder="Paste your API key"
+              autocomplete="off"
+              spellcheck="false"
+              maxlength="4096"
+            />
+            <label class="check"
+              ><input id="remember-key" type="checkbox" checked /> Remember on
+              this computer (OS credential store)</label
+            >
+            <p class="hint">
+              Unchecked: use only until the app closes. Saved keys are never
+              returned to the browser.
+            </p>
+            <div class="credential-actions">
+              <button id="test-key" type="button" class="secondary">
+                Test connection
+              </button>
+              <button id="save-key" type="submit">Save key</button>
+              <button id="remove-key" type="button" class="secondary">
+                Remove key
+              </button>
+            </div>
+          </form>
+          <details>
+            <summary>Match benchmark entries</summary>
+            <p class="hint">
+              Select the exact model and reasoning mode. These are base-model
+              references, not scores for each quantisation. Leave uncertain
+              matches unmapped.
+            </p>
+            <div id="mappings"></div>
+          </details>
+        </section>
+        <p class="hint">
+          You can skip this and compare memory, context and available local
+          speed evidence. You can enable rankings later.
+        </p>
+        <div class="wizard-nav">
+          <button id="ranking-back" class="secondary">Back to answers</button
+          ><button id="skip-ranking" class="secondary">
+            Continue without rankings</button
+          ><button id="with-ranking">
+            Find configurations with rankings →
+          </button>
+        </div>
+      </section>
+      <section data-screen="loading" class="question" hidden>
+        <p class="eyebrow">MATCHING YOUR REQUIREMENTS</p>
+        <h1 tabindex="-1">Finding your options…</h1>
+        <p id="loading-text" class="lede" role="status">
+          Checking available resources and model metadata.
+        </p>
+        <button id="loading-back" class="secondary">Back to answers</button>
+      </section>
+      <section data-screen="results" hidden>
+        <div class="results-heading">
+          <div>
+            <p class="eyebrow">YOUR SHORTLIST</p>
+            <h1 tabindex="-1">Your local AI options.</h1>
           </div>
-        </form>
+          <button id="adjust" class="secondary">Adjust my answers</button>
+        </div>
+        <p id="results-answer-summary" class="lede"></p>
+        <div class="toolbar">
+          <span id="count"></span
+          ><label class="check"
+            ><input id="show_all" type="checkbox" />Compare all
+            configurations</label
+          >
+        </div>
+        <p id="comparison-summary" class="comparison-summary"></p>
+        <div id="cards"></div>
+        <div class="wizard-nav">
+          <button id="ranking-settings" class="secondary">
+            Ranking settings</button
+          ><button id="compare">Recalculate</button
+          ><button id="export" class="secondary" disabled>Export JSON</button>
+        </div>
         <details>
-          <summary>Match benchmark entries</summary>
-          <p class="hint">
-            Select the exact model and reasoning mode. These are base-model
-            references, not scores for each quantisation. Leave uncertain
-            matches unmapped.
-          </p>
-          <div id="mappings"></div>
+          <summary>Assumptions & technical notes</summary>
+          <div id="notes" class="notes"></div>
         </details>
       </section>
       <footer>
-        Built for local inference. Memory is estimated; performance is measured
-        when available.<span>LLM Configurator / v0.1</span>
+        Local models. Clear trade-offs.<span>LLM Configurator / v0.2</span>
       </footer>
     </main>
     <dialog id="detail">

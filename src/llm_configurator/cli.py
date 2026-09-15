@@ -39,6 +39,8 @@ def parser():
     rec.add_argument("--gpu-index", type=int, default=0)
     rec.add_argument("--reclaim-pids", type=int, nargs="*", default=[])
     rec.add_argument("--strict-speed", action="store_true")
+    rec.add_argument("--priority", choices=["balanced", "quality", "speed"], default="balanced")
+    rec.add_argument("--no-rankings", dest="include_rankings", action="store_false")
     rec.add_argument("--demo", action="store_true")
     rec.add_argument("--json", action="store_true")
     rec.add_argument("--output", type=Path, help="Save the complete report as JSON")

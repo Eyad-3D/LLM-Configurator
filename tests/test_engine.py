@@ -75,7 +75,7 @@ class MemoryTests(unittest.TestCase):
 
     def test_quality_is_workload_specific(self):
         one = replace(self.model, name="A", scores={"general": 70, "coding": 20}, score_version="4.3")
-        two = replace(self.model, id="other", name="B", scores={"general": 30, "coding": 80}, score_version="4.3")
+        two = replace(self.model, id="other", base_repo="test/model-b", name="B", scores={"general": 30, "coding": 80}, score_version="4.3")
         self.assertEqual(recommend([one, two], hardware(), Requirements(workload="coding"))["candidates"][0]["name"], "B")
         self.assertEqual(recommend([one, two], hardware(), Requirements(workload="general"))["candidates"][0]["name"], "A")
 

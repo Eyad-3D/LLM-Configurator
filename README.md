@@ -2,7 +2,7 @@
 
 A local Python application that compares **model + quantisation + context + CPU/GPU placement** against current resources and workload requirements. Includes a browser interface, CLI, Hugging Face metadata retrieval, Artificial Analysis integration, and an optional local llama.cpp benchmark runner.
 
-This is a working **v0.1 engineering prototype**. Memory estimates require calibration against real inference workloads. Unknown speed and quantisation quality are explicitly labelled; the application does not invent benchmark scores.
+This is a working **v0.2 engineering prototype**. Memory estimates require calibration against real inference workloads. Unknown speed and quantisation quality are explicitly labelled; the application does not invent benchmark scores.
 
 ## Run it
 
@@ -40,12 +40,14 @@ Use the Python executable from your environment. Demo mode uses **fictional mode
 
 ## First real comparison
 
-1. Start the interface and click **Refresh model metadata**. This downloads metadata only, not model weights.
-2. Set workload, minimum context, concurrent users, speed target, and memory reserves.
-3. Optionally select processes you could close. Their private memory is used to estimate a separate hypothetical scenario; the application never terminates them.
-4. Click **Compare configurations**. Inspect the shortlist or select **Show all fits**.
-5. Open **View configuration** for exact model revision, file, memory breakdown, runtime settings, and download/benchmark commands.
-6. Close applications yourself if desired, rescan, and compare again.
+1. Click **Get started**. Hardware detection runs in the background.
+2. Answer one question per screen: main use, quality/speed priority, context needs, active users, and whether other applications will stay open. Exact tokens, tok/s and memory reserves live under advanced controls.
+3. Review your answers. Each **Edit** button opens just that question and returns to the review.
+4. After the review, optionally connect Artificial Analysis. Choose **Continue without rankings** to skip benchmark requests and exclude even previously cached scores from this comparison. You can enable rankings later.
+5. See up to **three recommendations** with distinct models where possible. Cards show workload rank (when available), context, local speed evidence, deployment mode and a brief explanation. **View details & setup** reveals memory breakdown, sources and launch instructions. **Compare all configurations** expands the list.
+6. Use **Adjust my answers** to edit a specific answer and recalculate, keeping your other answers and ranking choice. **Ranking settings** lets you change that choice separately.
+
+The app automatically fetches missing model metadata when generating the first recommendations. No weights are downloaded. A saved key can be reused at the optional ranking step; the key prompt never appears before the questions. Benchmark mappings still require choosing the correct model/evaluation entry under **Match benchmark entries**; missing scores are not fabricated.
 
 The initial curated catalogue covers the dense Qwen3 0.6B, 1.7B, 4B, 8B, 14B and 32B repositories with Q4_K_M, Q5_K_M, Q6_K and Q8_0 variants where single-file artifacts are available. Availability is fetched from Hugging Face rather than hardcoded. Sharded variants are excluded in this release.
 
@@ -60,6 +62,8 @@ The saved key works on subsequent app launches and CLI refreshes. An explicitly 
 The adapter uses the paginated `/api/v2/language/models/free` endpoint. Keys are passed from the local form to the loopback Python server, then to Artificial Analysis over HTTPS. They are never returned by status endpoints, placed in browser storage, or stored in SQLite/logs. Hugging Face public metadata normally needs no token; `HF_TOKEN` remains optional for repositories requiring access.
 
 After refreshing, expand **Match benchmark entries** and choose the exact evaluation entry, including reasoning mode, for each base model. Matches deliberately start empty: similar names are insufficient evidence of identical models/settings. Save the match and compare again. CLI equivalents are `benchmarks` and `map`.
+
+Each recommendation card prominently shows the workload index, **#rank of rated models**, with the gap in index points from the best eligible score available under details. The comparison counts distinct base models across all eligible results, not quantisation/context duplicates or only the displayed shortlist. Ties share competition ranks. Missing scores are labelled **Not ranked**, with a link to benchmark settings; incompatible benchmark versions withhold ranks. Rank is a base-model quality comparison, not local throughput or quantisation quality. The summary reports missing-score coverage. Speed-verified configurations still take priority in card ordering.
 
 Scores are attributed to **[Artificial Analysis](https://artificialanalysis.ai)**. General, coding and agentic indices are used for their corresponding workloads. Documents currently use general intelligence as a proxy. Different index versions are not numerically ranked together. Missing values stay unknown, including a missing quantisation-specific evaluation. API data usage remains subject to Artificial Analysis's terms; no third-party score dataset is bundled in this repository.
 
@@ -85,6 +89,8 @@ The current estimator adds:
 These are **explicit engineering assumptions, not fitted constants or guaranteed upper bounds**. Buffers, non-layer tensors, loading peaks, runtime versions and architecture-specific behaviour can exceed them. GPU layer placement is approximated proportionally; file-backed mappings are not assumed to require a permanent full duplicate of weights in RAM. Test a chosen configuration before relying on it.
 
 Available OS memory already accounts for current usage; OS usage is not subtracted twice. Reclaim scenarios add only 75% of accessible process USS (private memory). RSS is shown for reference but is not summed as reclaimable memory. Missing USS produces no reclaim credit. GPU memory does not receive speculative reclaim credit. Swap is never added to usable RAM.
+
+The quality priority orders by available base-model score; speed priority orders by matching local tok/s measurements; balanced prioritises verified speed fits then quality. Unknown evidence stays unknown.
 
 The search evaluates CPU-only, full GPU, and the largest fitting partial GPU allocation for each context. All intermediate layer allocations are checked for feasibility, but not all are returned. It returns contexts at or above the user's requested minimum, plus a **memory-only context ceiling** per configuration. That ceiling is not a speed guarantee or a measured long-context quality limit.
 
@@ -149,6 +155,9 @@ The HTTP interface is loopback-only, checks Host/Origin/session tokens, and does
 ```bash
 python -m pip install -e .
 python -m unittest discover -s tests -v
+# UI navigation tests (development only; Node.js 20+)
+npm ci
+npm test
 ```
 
 GitHub Actions runs tests on Windows and Linux with Python 3.10 and 3.12. Tests use fixtures for external APIs and do not need a GPU, API key or model download. They cover memory budgets, concurrency, context limits, workload ranking, benchmark identity, sharded-file exclusion, cache behaviour and local HTTP requests.
