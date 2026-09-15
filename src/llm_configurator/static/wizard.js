@@ -27,6 +27,7 @@ function chooseRanking(value) {
   } catch {}
   message("");
   void prepareModels();
+  void prepareCalibration();
   if (value) void prepareRankings();
   if (rankingReturn === "results") void findConfigurations(value);
   else showScreen(rankingReturn);
@@ -35,6 +36,62 @@ document.addEventListener("credentials-changed", () => {
   rankingPreparation = null;
   preparedWithRankings = false;
   generation++;
+});
+let calibrationPreparation = null;
+let calibrationRevision = 0;
+async function refreshVisibleSpeeds() {
+  if (screen !== "results" || busy) return;
+  const request = generation;
+  const answers = JSON.stringify(requirements());
+  const updated = await api("/api/recommend", JSON.parse(answers));
+  if (
+    request !== generation ||
+    screen !== "results" ||
+    answers !== JSON.stringify(requirements())
+  )
+    return;
+  report = updated;
+  renderResults();
+}
+function prepareCalibration(force = false) {
+  if (calibrationPreparation && !force) return calibrationPreparation;
+  $("speed-calibration").hidden = false;
+  $("recalibrate").disabled = true;
+  $("calibration-status").classList.add("is-preparing");
+  $("calibration-status").textContent =
+    "Measuring hardware speed in the background…";
+  calibrationPreparation = (async () => {
+    await startScan;
+    if (appState?.demo) {
+      $("calibration-status").textContent =
+        "Speed calibration is available outside demo mode.";
+      return;
+    }
+    let state = await api("/api/calibrate", { force });
+    while (state.running) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      state = await api("/api/calibrate");
+    }
+    const record = state.result;
+    const usable = record?.cpu || Object.keys(record?.gpus || {}).length;
+    $("calibration-status").textContent = usable
+      ? `${state.cached ? "Saved" : "New"} hardware calibration ready · estimates have low confidence${record.warnings?.length ? " · some measurements unavailable" : ""}`
+      : "Speed calibration unavailable. You can retry or use a local model benchmark.";
+    $("calibration-status").title = (record?.warnings || []).join(" · ");
+    await refreshVisibleSpeeds();
+  })()
+    .catch((error) => {
+      $("calibration-status").textContent =
+        "Speed calibration unavailable: " + error.message;
+    })
+    .finally(() => {
+      $("calibration-status").classList.remove("is-preparing");
+      $("recalibrate").disabled = false;
+    });
+  return calibrationPreparation;
+}
+$("recalibrate").addEventListener("click", () => {
+  void prepareCalibration(true);
 });
 function prepareRankings() {
   if (!rankingPreparation)
@@ -253,6 +310,7 @@ async function findConfigurations(rankings) {
   if (busy) return;
   busy = true;
   const request = ++generation;
+  let calibrationAtComparison = calibrationRevision;
   includeRankings = rankings;
   message("");
   showScreen("loading");
@@ -269,6 +327,7 @@ async function findConfigurations(rankings) {
     if (request !== generation) return;
     $("loading-text").textContent =
       "Comparing configurations against your current resources…";
+    calibrationAtComparison = calibrationRevision;
     const nextReport = await api("/api/recommend", requirements());
     if (request !== generation) return;
     report = nextReport;
@@ -293,7 +352,10 @@ async function findConfigurations(rankings) {
       message(error.message + " Your answers have been kept.", true);
     }
   } finally {
-    if (request === generation) busy = false;
+    if (request === generation) {
+      busy = false;
+      if (calibrationAtComparison !== calibrationRevision) void refreshVisibleSpeeds().catch(() => {});
+    }
   }
 }
 // Refresh scores independently and never overwrite a later comparison or edited answers.

@@ -2,6 +2,7 @@ import json
 import re
 import tempfile
 import threading
+import time
 import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -14,7 +15,8 @@ from llm_configurator.storage import Store
 class ServerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.server = make_server(Store(self.temp.name), port=0, demo=True)
+        self.store = Store(self.temp.name)
+        self.server = make_server(self.store, port=0, demo=True)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.url = f"http://127.0.0.1:{self.server.server_port}"
@@ -62,6 +64,49 @@ class ServerTests(unittest.TestCase):
                 self.assertTrue(callable(job.call_args.kwargs["progress"]))
             finally:
                 release.set()
+
+    def test_real_calibration_endpoint_reuses_cache_and_allows_force(self):
+        from llm_configurator.calibration import VERSION
+        from llm_configurator.domain import now
+        record = {"version": VERSION, "fingerprint": "fixture", "timestamp": now(),
+                  "cpu": {"ram_bytes_s": 1e9, "q4_parameters_s": 1e9}, "gpus": {}, "warnings": []}
+        self.store.put("calibration", record)
+        other = make_server(self.store, port=0, demo=False)
+        thread = threading.Thread(target=other.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{other.server_port}"
+        try:
+            with urlopen(base) as response:
+                token = re.search(r'name="session-token" content="([^"]+)"', response.read().decode())[1]
+            headers = {"X-Session-Token": token}
+            def request(force):
+                with urlopen(Request(base + "/api/calibrate", data=json.dumps({"force": force}).encode(), headers=headers)):
+                    pass
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    with urlopen(Request(base + "/api/calibrate", headers=headers)) as response:
+                        state = json.load(response)
+                    if not state["running"]:
+                        return state
+                    time.sleep(0.01)
+                self.fail("Calibration worker failed to complete")
+            with patch("llm_configurator.server.scan", return_value={"fingerprint": "fixture"}), \
+                 patch("llm_configurator.server.calibrate", return_value=record) as worker:
+                self.assertTrue(request(False)["cached"])
+                worker.assert_not_called()
+                self.assertFalse(request(True)["cached"])
+                worker.assert_called_once()
+        finally:
+            other.shutdown()
+            other.server_close()
+            thread.join()
+
+    def test_demo_calibration_does_not_run_probes(self):
+        with patch("llm_configurator.server.calibrate") as worker:
+            request = Request(self.url + "/api/calibrate", data=b"{}", headers={"X-Session-Token": self.token})
+            with urlopen(request) as response:
+                self.assertTrue(json.load(response)["demo"])
+            worker.assert_not_called()
 
     def test_credential_endpoints_protect_secret(self):
         from llm_configurator import credentials

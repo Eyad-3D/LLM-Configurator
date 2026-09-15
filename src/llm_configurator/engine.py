@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import math
 
 from .domain import GIB, Requirements, Variant
+from .speed import estimate
 
 
 def allocations(variant, context, users, gpu_layers):
@@ -51,7 +52,7 @@ def matching_speed(records, variant, hardware, context, layers, gpu_uuid, thread
     return None
 
 
-def recommend(variants, hardware, requirements, measurements=()):
+def recommend(variants, hardware, requirements, measurements=(), calibration=None):
     req = requirements
     ram_budget = max(0, hardware["ram_available"] - req.reserve_gib * GIB)
     selected = set(req.reclaim_pids)
@@ -107,6 +108,7 @@ def recommend(variants, hardware, requirements, measurements=()):
                                     "score_source": variant.score_source if req.include_rankings else None, "score_version": variant.score_version if req.include_rankings else None,
                                     "score_settings": variant.score_settings if req.include_rankings else None, "tps": tps, "speed_meets_target": meets_speed,
                                     "speed_evidence": "Local synthetic generation benchmark; same context and configuration" if measurement else "Unverified — benchmark this configuration",
+                                    "speed_estimate": estimate(variant, hardware, calibration, context, layers, req.users, gpu, req.min_tps),
                                     "benchmark": measurement, "threads": threads, "metadata_date": variant.fetched_at,
                                     "file_bytes": variant.size_bytes,
                                     "explanation": f"Estimated memory fit at {context:,} tokens per user; {mode} execution. " +
@@ -119,7 +121,7 @@ def recommend(variants, hardware, requirements, measurements=()):
     comparable = comparison["comparable"]
     def order(result):
         quality = result["quality_score"] if comparable and result["quality_score"] is not None else -1
-        speed = result["tps"] if result["tps"] is not None else -1
+        speed = result["tps"] if result["tps"] is not None else result["speed_estimate"].get("low_tps", -1)
         primary = (quality, speed) if req.priority == "quality" else (speed, quality) if req.priority == "speed" else (result["speed_meets_target"] is True, quality)
         return (*primary, result["scenario"] == "now", -abs(result["context"] - req.context),
                 -(result["ram_bytes"] + result["vram_bytes"]))
@@ -143,7 +145,7 @@ def recommend(variants, hardware, requirements, measurements=()):
     return {"requirements": asdict(req), "hardware": hardware, "candidates": results, "shortlist": shortlist,
             "rejected": rejected, "quality_comparable": comparable, "quality_comparison": comparison, "reclaim_estimate_bytes": reclaim,
             "notes": ["Memory fit is estimated, not a guarantee; rescan after freeing resources.",
-                      "Generation speed is unknown until locally tested. Concurrency speed testing is not supported in v0.1.",
+                      "Hardware-calibrated speed ranges are low-confidence estimates; only model benchmarks verify speed. Concurrent speed estimates are unavailable.",
                       "Context includes prompt, conversation, reasoning and generated output. KV cache uses FP16.",
                       "Memory maximum is not a validated usable-context or speed guarantee.",
                       "Document ordering uses general intelligence as a proxy, not a long-context evaluation."]}

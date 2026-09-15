@@ -31,6 +31,12 @@
         ></progress>
       </div>
       <p id="preparation-status" class="hint" role="status" hidden></p>
+      <div id="speed-calibration" class="hint" hidden>
+        <span id="calibration-status" role="status"></span>
+        <button id="recalibrate" class="text-button" type="button">
+          Recalibrate speed
+        </button>
+      </div>
       <button id="change-ranking" class="text-button" type="button">
         Change ranking settings
       </button>
@@ -87,8 +93,9 @@
               configurations with a matching local speed test</label
             >
             <p class="hint">
-              Without a local benchmark, speed remains unverified. Quality
-              ordering requires optional benchmark data.
+              Hardware calibration provides rough speed ranges. Only local model
+              benchmarks verify speed. Quality ordering requires optional
+              benchmark data.
             </p>
           </details>
         </section>

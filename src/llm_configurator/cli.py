@@ -9,6 +9,7 @@ from .app import evaluate, map_benchmark, variants
 from .catalogue import definitions, refresh
 from .domain import GIB, Requirements
 from .hardware import scan
+from .calibration import calibrate
 from .runtime import bench, download
 from .server import serve
 from .storage import Store
@@ -18,6 +19,7 @@ def parser():
     root = argparse.ArgumentParser(description="Choose local model configurations using available hardware and benchmark evidence")
     root.add_argument("--data-dir", help="Override local cache/settings directory")
     commands = root.add_subparsers(dest="command", required=True)
+    commands.add_parser("calibrate", help="Measure synthetic hardware speed and cache it locally; no model download")
     commands.add_parser("scan", help="Print current hardware and process memory as JSON")
     commands.add_parser("refresh", help="Fetch model metadata and optional AA scores; no weight downloads")
     commands.add_parser("models", help="List cached variants and their exact IDs")
@@ -69,6 +71,10 @@ def main(argv=None):
         store = Store(args.data_dir)
         if args.command == "scan":
             print_json(scan())
+        elif args.command == "calibrate":
+            result = calibrate(scan(False))
+            store.put("calibration", result)
+            print_json(result)
         elif args.command == "refresh":
             print_json(refresh(store))
         elif args.command == "models":
@@ -97,6 +103,9 @@ def main(argv=None):
                     if item["id"] not in shortlist:
                         continue
                     speed = f"{item['tps']:.1f} tok/s" if item["tps"] is not None else "speed unverified"
+                    if item["tps"] is None and item["speed_estimate"].get("available"):
+                        estimate = item["speed_estimate"]
+                        speed = f"estimated {estimate['low_tps']:.1f}–{estimate['high_tps']:.1f} tok/s (low confidence)"
                     print(f"{item['name']} / {item['quant']} / {item['mode']} / {item['context']:,} tokens per user / {speed}")
                     print(f"  RAM {item['ram_bytes']/GIB:.2f} GiB | VRAM {item['vram_bytes']/GIB:.2f} GiB | {item['scenario']}")
                     print(f"  {item['quality_evidence']}; reference score: {item['quality_score']}")

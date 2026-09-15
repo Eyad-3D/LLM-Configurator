@@ -11,6 +11,7 @@ from .app import evaluate, map_benchmark
 from .catalogue import definitions, refresh, test_connection
 from . import credentials
 from .hardware import scan
+from .calibration import calibrate, valid
 
 
 def make_server(store, port=8765, demo=False):
@@ -18,6 +19,8 @@ def make_server(store, port=8765, demo=False):
     static = Path(__file__).with_name("static")
     refresh_lock = threading.Lock()
     refresh_state = {"running": False, "result": None}
+    calibration_lock = threading.Lock()
+    calibration_state = {"running": False, "result": None, "cached": False}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):
@@ -55,6 +58,8 @@ def make_server(store, port=8765, demo=False):
                     cache = store.get("scores", {})
                     return self.send(200, {"hardware": scan(), "demo": demo, "status": store.get("refresh_status"),
                                            "definitions": definitions(store), "scores": [{"slug": x["slug"], "name": x["name"]} for x in cache.get("data", [])]})
+                if path == "/api/calibrate":
+                    return self.send(200, calibration_state)
                 if path == "/api/refresh":
                     return self.send(200, refresh_state)
                 return self.send(404, {"error": "Not found"})
@@ -80,6 +85,32 @@ def make_server(store, port=8765, demo=False):
                     return self.send(200, credentials.save(body.get("key"), body.get("remember", True)))
                 if path == "/api/credentials/remove":
                     return self.send(200, credentials.remove())
+                if path == "/api/calibrate":
+                    force = body.get("force", False)
+                    if type(force) is not bool:
+                        raise ValueError("force must be a boolean")
+                    if demo:
+                        return self.send(200, {"running": False, "result": None, "demo": True})
+                    if not calibration_lock.acquire(blocking=False):
+                        return self.send(202, calibration_state)
+                    calibration_state.update(running=True, result=None, cached=False)
+                    def run_calibration():
+                        try:
+                            hardware = scan(False)
+                            cached = store.get("calibration")
+                            if not force and valid(cached, hardware) and (cached.get("cpu") or cached.get("gpus")):
+                                calibration_state.update(result=cached, cached=True)
+                            else:
+                                result = calibrate(hardware)
+                                store.put("calibration", result)
+                                calibration_state["result"] = result
+                        except Exception as error:
+                            calibration_state["result"] = {"warnings": [f"Calibration unavailable: {type(error).__name__}: {error}"]}
+                        finally:
+                            calibration_state["running"] = False
+                            calibration_lock.release()
+                    threading.Thread(target=run_calibration, daemon=True).start()
+                    return self.send(202, calibration_state)
                 if path == "/api/recommend":
                     return self.send(200, evaluate(store, body, demo))
                 if path == "/api/map":

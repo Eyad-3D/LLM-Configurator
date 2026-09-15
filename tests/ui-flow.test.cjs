@@ -13,6 +13,7 @@ function setup({
   preference = null,
   configured = true,
   fastLongWait = false,
+  estimatedSpeed = false,
 } = {}) {
   const dom = new JSDOM(fs.readFileSync(root + "index.html", "utf8"), {
     url: "http://127.0.0.1:8765",
@@ -54,6 +55,12 @@ function setup({
         definitions: [],
         scores: [],
       };
+    else if (path === "/api/calibrate")
+      result = {
+        running: false,
+        cached: true,
+        result: { cpu: { ram_bytes_s: 40e9 }, gpus: {}, warnings: [] },
+      };
     else if (path === "/api/credentials")
       result = { configured, source: configured ? "saved" : "none" };
     else if (path === "/api/refresh") {
@@ -73,6 +80,14 @@ function setup({
         quality_score: null,
         quality_metric: "general",
         tps: null,
+        speed_estimate: estimatedSpeed
+          ? {
+              available: true,
+              low_tps: 12,
+              high_tps: 24,
+              target_status: "borderline",
+            }
+          : { available: false, reason: "Calibration needed" },
         ram_bytes: 2e9,
         vram_bytes: 0,
         ram_headroom_bytes: 4e9,
@@ -521,5 +536,31 @@ test("long waits reveal real stage details and stop showing busy state at result
     s.$("preparation-status").classList.contains("is-preparing"),
     false,
   );
+  await s.close();
+});
+
+test("calibration starts once in the background and cards distinguish estimates from measurements", async () => {
+  const s = setup({ demo: false, estimatedSpeed: true });
+  await tick();
+  s.review();
+  await tick();
+  assert.equal(
+    s.calls.filter((c) => c.path === "/api/calibrate" && c.body).length,
+    1,
+  );
+  s.$("review-next").click();
+  await tick();
+  assert.match(s.$("cards").textContent, /12.0–24.0 tok\/s/);
+  assert.match(s.$("cards").textContent, /low confidence/);
+  assert.match(s.$("cards").textContent, /borderline/);
+  assert.doesNotMatch(s.$("cards").textContent, /Speed verified locally/);
+  s.$("recalibrate").click();
+  await tick();
+  assert.equal(
+    s.calls.filter((c) => c.path === "/api/calibrate" && c.body).at(-1).body
+      .force,
+    true,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 1100));
   await s.close();
 });

@@ -161,6 +161,30 @@ function qualityPanel(c) {
   }
   return `<section class="quality-panel"><div class="quality-heading"><div><span class="quality-label">${esc(metric)}</span><strong>${Number(c.quality_score).toFixed(1)} <small>index points</small></strong></div><div class="quality-rank"><strong>${q.tied ? "Joint " : ""}#${q.rank} <small>of ${q.rated_models} rated models</small></strong></div></div><p class="hint">Base-model benchmark · Exact quantisation quality is unmeasured.</p></section>`;
 }
+function speedPresentation(c) {
+  if (c.tps != null)
+    return {
+      value: `${c.tps.toFixed(1)} tok/s`,
+      label: "Measured local generation speed",
+      tag: "Speed verified locally",
+    };
+  const e = c.speed_estimate;
+  if (e?.available)
+    return {
+      value: `${e.low_tps.toFixed(1)}–${e.high_tps.toFixed(1)} tok/s`,
+      label: "Estimated generation · low confidence",
+      tag: {
+        likely_meets: "Likely meets speed target",
+        borderline: "Speed target borderline",
+        likely_below: "Likely below speed target",
+      }[e.target_status],
+    };
+  return {
+    value: "Unavailable",
+    label: e?.reason || "Hardware calibration or local benchmark needed",
+    tag: "Speed unverified",
+  };
+}
 function renderResults() {
   if (!report) return;
   const all = $("show_all").checked;
@@ -179,13 +203,14 @@ function renderResults() {
   $("cards").innerHTML = items.length
     ? items
         .map((c) => {
+          const speed = speedPresentation(c);
           const score =
             c.quality_score == null
               ? "No quality score"
               : `Base-model ${c.quality_metric} index: ${c.quality_score.toFixed(1)}`;
-          return `<article class="card"><div class="card-top"><div class="card-title"><h3>${esc(c.name)}</h3><span class="quant">${esc(c.quant)}</span></div><span class="tag ${c.speed_meets_target ? "" : "unknown"}">${c.speed_meets_target ? "Speed verified locally" : "Speed unverified"}</span></div>
+          return `<article class="card"><div class="card-top"><div class="card-title"><h3>${esc(c.name)}</h3><span class="quant">${esc(c.quant)}</span></div><span class="tag ${c.speed_meets_target ? "" : "unknown"}">${esc(speed.tag)}</span></div>
       ${qualityPanel(c)}
-      <div class="card-metrics concise"><div><strong>${c.context.toLocaleString()}</strong><span>context tokens per session</span></div><div><strong>${c.tps == null ? "Not measured" : c.tps.toFixed(1) + " tok/s"}</strong><span>local generation speed</span></div><div><strong>${esc({ cpu: "CPU", gpu: "GPU", split: "GPU + CPU" }[c.mode])}</strong><span>${c.scenario === "now" ? "Fits current resources (estimated)" : "May fit after closing apps"}</span></div></div>
+      <div class="card-metrics concise"><div><strong>${c.context.toLocaleString()}</strong><span>context tokens per session</span></div><div><strong>${esc(speed.value)}</strong><span>${esc(speed.label)}</span></div><div><strong>${esc({ cpu: "CPU", gpu: "GPU", split: "GPU + CPU" }[c.mode])}</strong><span>${c.scenario === "now" ? "Fits current resources (estimated)" : "May fit after closing apps"}</span></div></div>
       <div class="card-bottom"><p>${esc(c.explanation)}</p><button class="text-button" data-detail="${esc(c.id)}">View details & setup ↗</button></div></article>`;
         })
         .join("")
@@ -223,6 +248,8 @@ function detail(c) {
     `<p class="eyebrow">DEPLOYMENT DETAILS</p><h3>${esc(c.name)} · ${esc(c.quant)}</h3><p>${esc(c.explanation)}</p>
     <dl><dt>Quality rank among rated eligible models</dt><dd>${c.quality_comparison?.rank == null ? "Not ranked" : "#" + c.quality_comparison.rank + " of " + c.quality_comparison.rated_models}</dd><dt>Gap to highest reference score</dt><dd>${c.quality_comparison?.points_behind_best == null ? "Unavailable" : c.quality_comparison.points_behind_best + " index points"}</dd><dt>Estimated system RAM</dt><dd>${GiB(c.ram_bytes)} GiB</dd><dt>Estimated VRAM</dt><dd>${GiB(c.vram_bytes)} GiB</dd><dt>RAM headroom after reserve</dt><dd>${GiB(c.ram_headroom_bytes)} GiB</dd><dt>Memory-only context ceiling</dt><dd>${c.memory_max_context.toLocaleString()} tokens / session</dd><dt>FP16 KV cache, all users</dt><dd>${GiB(c.kv_bytes)} GiB</dd><dt>Weight file size</dt><dd>${GiB(c.file_bytes)} GiB</dd><dt>Quality evidence</dt><dd>${esc(c.quality_evidence)}</dd><dt>Evaluation entry</dt><dd>${esc(c.score_settings || "Unmapped")}</dd><dt>Benchmark version</dt><dd>${esc(c.score_version || "Unavailable")}</dd><dt>Metadata retrieved</dt><dd>${esc(c.metadata_date)}</dd></dl>
     ${c.score_source ? `<p>Source: <a href="${esc(c.score_source)}" target="_blank" rel="noreferrer">Artificial Analysis</a>. Scores apply to the evaluation entry above.</p>` : ""}
+    <h3>Speed evidence</h3><p>${esc(speedPresentation(c).value)} · ${esc(speedPresentation(c).label)}</p>
+    ${c.speed_estimate?.available ? `<p>${esc(c.speed_estimate.method)}. ${esc(c.speed_estimate.scope)}</p><p>${esc(c.speed_estimate.caveat)}</p><p>Calibrated: ${esc(c.speed_estimate.calibrated_at)}</p>` : ""}
     <h3>Runtime settings</h3><pre>${esc(JSON.stringify(settings, null, 2))}</pre><p>Use these settings in your llama.cpp installation. The memory ceiling is an estimate; it is not a validated context or speed guarantee.</p>
     ${c.demo ? "<p>Demo fixtures cannot be downloaded or benchmarked. Start without --demo and refresh metadata for real models.</p>" : `<h3>Download & measure</h3><p>Run these commands locally after installing llama.cpp. Downloads require confirmation. Benchmarking generates 128 tokens near the selected context limit.</p><pre>${esc(`llm-config download ${variantArgument} --directory ./models\n\nllm-config bench ${variantArgument} --model './models/${c.filename.split("/").pop()}' --context ${c.context} --gpu-layers ${c.gpu_layers} --gpu-index ${c.gpu_index ?? 0}`)}</pre><p>Commands use shell quoting compatible with Bash and PowerShell for these model IDs. ${c.users > 1 ? "This benchmark measures one active session only; it will not verify your concurrent speed target." : "Compare again after the benchmark to apply the measured result."}</p>`}`;
   $("detail").showModal();
