@@ -93,8 +93,11 @@ def bench_args(config, n_prompt=512, n_gen=128, depth=0, repetitions=2, sweep=No
 def run_process(argv, env=None, timeout=DEFAULT_TIMEOUT, cancel=None):
     """Run llama-bench; kills it on cancel (raising Cancelled) or on timeout."""
     started = time.monotonic()
-    process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
-                               errors="replace", creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+    try:
+        process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+                                   errors="replace", creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+    except OSError as error:
+        raise ValueError(f"llama-bench could not be started ({error}). Reinstall the runtime and try again.") from None
     timed_out = False
     while True:
         try:
@@ -236,11 +239,11 @@ def _describe(old, new):
 
 def _gain_text(new, old, goal):
     parts = []
-    if goal in {"generation", "balanced"} and new["tps"] and old["tps"]:
-        parts.append(f"writing {_percent(new['tps'], old['tps']):.0f}% {'faster' if new['tps'] >= old['tps'] else 'slower'}")
-    if goal in {"prompt", "balanced"} and new["pp_tps"] and old["pp_tps"]:
-        parts.append(f"reading {_percent(new['pp_tps'], old['pp_tps']):.0f}% "
-                     f"{'faster' if new['pp_tps'] >= old['pp_tps'] else 'slower'}")
+    for key, word, goals in [("tps", "writing", {"generation", "balanced"}), ("pp_tps", "reading", {"prompt", "balanced"})]:
+        if goal in goals and new[key] and old[key]:
+            change = _percent(new[key], old[key])
+            parts.append(f"{word} about the same" if change < 1 else
+                         f"{word} {change:.0f}% {'faster' if new[key] >= old[key] else 'slower'}")
     return " and ".join(parts) or "things faster"
 
 
@@ -358,6 +361,10 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
                 if not candidates:
                     continue
                 check_cancel(cancel)
+                swept = [k for k in FLAGS if len({c[k] for c in candidates}) > 1]
+                if any(best[k] in {None, "auto"} for k in swept):
+                    # "llama.cpp default" cannot join a comma list; reuse its earlier number, not a whole extra run.
+                    candidates = [c for c in candidates if c != best]
                 unit = per_combo(repetitions)
                 fit = int((remaining() - (per_combo(confirm_repetitions) or 0)) // unit)
                 if fit < len(candidates):
@@ -511,15 +518,16 @@ def _risk(config):
 
 def _groups(configs):
     """Split configs into llama-bench runs: one run when they form a full comma-list product.
-    flash_attn "auto" cannot go in a comma list, so such a config runs on its own."""
+    Unset values and flash_attn "auto" mean "llama.cpp default", which a comma list cannot say,
+    so a config carrying one of them in a swept setting runs on its own."""
     indexes = list(range(len(configs)))
-    if len({c["flash_attn"] for c in configs}) > 1:
-        auto = [i for i in indexes if configs[i]["flash_attn"] == "auto"]
-        rest = [i for i in indexes if i not in auto]
-        return [[i] for i in auto] + [[rest[j] for j in g] for g in _groups([configs[i] for i in rest])]
+    swept = [k for k in FLAGS if len({c[k] for c in configs}) > 1]
+    alone = [i for i in indexes if any(configs[i][k] in {None, "auto"} for k in swept)]
+    if alone:
+        rest = [i for i in indexes if i not in alone]
+        return [[i] for i in alone] + [[rest[j] for j in g] for g in _groups([configs[i] for i in rest])]
     if len(configs) <= 1:
         return [indexes] if configs else []
-    swept = [k for k in FLAGS if len({c[k] for c in configs}) > 1]
     same_rest = all(c[k] == configs[0][k] for c in configs for k in configs[0] if k not in swept)
     values = [list(dict.fromkeys(c[k] for c in configs)) for k in swept]
     have = {tuple(c[k] for k in swept) for c in configs}
