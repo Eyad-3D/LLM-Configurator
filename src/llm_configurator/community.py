@@ -30,6 +30,7 @@ SCHEMA = 1
 REPO = "Eyad-3D/LLM-Configurator"
 DEFAULT_SOURCE = f"https://raw.githubusercontent.com/{REPO}/main/community/results.json"
 LABEL = "community-results"
+TEMPLATE = "community-results.yml"
 MAX_BYTES = 10 * 1024**2
 MAX_ROWS = 50_000
 MAX_URL = 8000  # GitHub rejects much longer "new issue" links; fall back to pasting the JSON.
@@ -439,22 +440,20 @@ def import_records(store, source=None, text=None, progress=None, cancel=None):
 
 # ---------- sharing ----------
 
-def _issue_body(payload, fits):
-    intro = ("These are anonymous speed results from LLM Configurator. Please read the JSON before submitting: "
-             "it contains model names, a rough hardware description (names, memory rounded to 4 GB, OS family), "
-             "settings and speeds. No file paths, user names, computer names or serial numbers.\n\n")
-    if fits:
-        return intro + "```json\n" + payload + "\n```\n"
-    return intro + "The results were too long for a link. Paste the JSON that LLM Configurator showed you below this line.\n\n"
-
-
 def issue_url(payload, count):
-    """(url, fits): a prefilled 'new issue' link; when too long for GitHub, a link that asks for a paste."""
+    """(url, fits): a prefilled 'new issue' link; when too long for GitHub, the empty form asks for a paste.
+
+    The link opens the `community-results` issue form (.github/ISSUE_TEMPLATE/community-results.yml).
+    Forms fill fields from query parameters named after the field id (`results`) and apply their
+    own label even for people without triage rights; `body` is ignored by forms, so it is not sent.
+    """
     title = f"Community results: {count} speed result{'s' if count != 1 else ''}"
 
     def build(fits):
-        query = urlencode({"title": title, "labels": LABEL, "body": _issue_body(payload, fits)}, quote_via=quote)
-        return f"https://github.com/{REPO}/issues/new?{query}"
+        fields = {"template": TEMPLATE, "title": title, "labels": LABEL}
+        if fits:
+            fields["results"] = payload
+        return f"https://github.com/{REPO}/issues/new?{urlencode(fields, quote_via=quote)}"
 
     url = build(True)
     return (url, True) if len(url) <= MAX_URL else (build(False), False)

@@ -40,7 +40,7 @@ Hardware names are cleaned before sharing: brackets, serial-like codes, clock sp
 
 If you share many results at once, the link would be too long for GitHub. The app then opens an issue with a short note and asks you to paste the JSON it showed you.
 
-The link asks for the `community-results` label. GitHub only applies it if you have permission, so maintainers may add it.
+The link opens the "Community speed results" issue form (`.github/ISSUE_TEMPLATE/community-results.yml`). The form adds the `community-results` label for everyone, so maintainers can find it.
 
 ## File format (schema 1)
 
@@ -76,7 +76,7 @@ The app checks every row strictly when it imports this file: types, ranges, allo
 
 Nothing merges automatically. Shared results come from strangers, so a person checks them first.
 
-1. Open issues labelled `community-results` (add the label if GitHub dropped it).
+1. Open issues labelled `community-results`.
 2. Read the JSON. Close the issue without merging if it looks wrong: impossible speeds for the hardware, many near-identical rows, or anything that looks personal.
 3. Copy the JSON into a local file, then check it with the app's own validator:
 

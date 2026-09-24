@@ -391,7 +391,9 @@ class ShareTests(unittest.TestCase):
         query = parse_qs(parts.query)
         self.assertEqual(query["labels"], ["community-results"])
         self.assertIn("2 speed results", query["title"][0])
-        self.assertIn(result["json"], query["body"][0])
+        self.assertEqual(query["template"], ["community-results.yml"])
+        self.assertEqual(query["results"], [result["json"]])  # the issue form's field id
+        self.assertNotIn("body", query)  # issue forms ignore body
         self.assertNotIn(" ", result["issue_url"])
         self.assertNotIn("+", parts.query)  # spaces encoded as %20, not +
         payload = json.loads(result["json"])
@@ -406,7 +408,9 @@ class ShareTests(unittest.TestCase):
         result = community.share_payload(self.store, ids, hardware=hardware())
         self.assertFalse(result["fits_in_url"])
         self.assertLessEqual(len(result["issue_url"]), community.MAX_URL)
-        self.assertIn("Paste", parse_qs(urlsplit(result["issue_url"]).query)["body"][0])
+        query = parse_qs(urlsplit(result["issue_url"]).query)
+        self.assertNotIn("results", query)  # the form asks for a paste
+        self.assertEqual(query["template"], ["community-results.yml"])
         self.assertEqual(len(json.loads(result["json"])["records"]), 40)
 
     def test_refuses_bad_requests(self):
@@ -482,3 +486,18 @@ class EvidenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IssueTemplateTests(unittest.TestCase):
+    def test_template_matches_the_link(self):
+        path = Path(__file__).resolve().parents[1] / ".github" / "ISSUE_TEMPLATE" / community.TEMPLATE
+        text = path.read_text(encoding="utf-8")
+        self.assertIn(community.LABEL, text)
+        self.assertRegex(text, r"(?m)^\s+id: results$")  # issue_url fills this field
+        try:
+            import yaml
+        except ImportError:
+            return
+        form = yaml.safe_load(text)
+        self.assertEqual(form["labels"], [community.LABEL])
+        self.assertIn("results", [item.get("id") for item in form["body"]])
