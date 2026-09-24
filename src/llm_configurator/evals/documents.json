@@ -274,7 +274,7 @@
       "kind": "multi_hop",
       "difficulty": "hard",
       "passage": "p06",
-      "prompt": "Using the manual's rough guide for setting 8, how many grams of coffee does the default Single preset produce at setting 8? Give the exact product as a number.",
+      "prompt": "Using the manual's rough guide for setting 8, how many grams of coffee does the default Single preset produce at setting 8? Give the exact number of grams, without rounding.",
       "answer": "10.45"
     },
     {
@@ -434,7 +434,7 @@
       "prompt": "Who approved this policy? Give the full name.",
       "answer": "Ines Carvalho",
       "accept": [
-        "ines carvalho"
+        "in(e|é)s carvalho"
       ]
     },
     {

@@ -280,7 +280,10 @@
       "prompt": "What does this JavaScript code print to the console? Give the exact printed output.\n\n```javascript\nconsole.log([10, 9, 1].sort());\n```",
       "answer": "[ 1, 10, 9 ]",
       "code": "console.log([10, 9, 1].sort());",
-      "language": "javascript"
+      "language": "javascript",
+      "accept": [
+        "(\\(3\\) ?)?\\[ ?1, ?10, ?9 ?\\]"
+      ]
     },
     {
       "id": "cod-032",
@@ -381,7 +384,7 @@
       "id": "cod-043",
       "kind": "find_bug_line",
       "difficulty": "easy",
-      "prompt": "This Python function is supposed to return the product 1 * 2 * ... * n (the factorial of n) for n >= 1. Exactly one line contains a bug. Which line number is it? Give just the line number.\n\n```python\n1: def factorial(n):\n2:     result = 1\n3:     for k in range(1, n):\n4:         result *= k\n5:     return result\n```",
+      "prompt": "This Python function is supposed to return the product 1 * 2 * ... * n (the factorial of n) for n >= 1. The loop variable k is meant to take every value from 1 to n. Exactly one line contains a bug. Which line number is it? Give just the line number.\n\n```python\n1: def factorial(n):\n2:     result = 1\n3:     for k in range(1, n):\n4:         result *= k\n5:     return result\n```",
       "answer": "3"
     },
     {
@@ -423,7 +426,7 @@
       "id": "cod-049",
       "kind": "find_bug_line",
       "difficulty": "hard",
-      "prompt": "This Python function is supposed to return the n-th Fibonacci number, where fib(0) = 0, fib(1) = 1, fib(2) = 1, fib(3) = 2. Exactly one line contains a bug. Which line number is it? Give just the line number.\n\n```python\n1: def fib(n):\n2:     a, b = 0, 1\n3:     for _ in range(n):\n4:         a, b = b, a + b\n5:     return b\n```",
+      "prompt": "This Python function is supposed to return the n-th Fibonacci number, where fib(0) = 0, fib(1) = 1, fib(2) = 1, fib(3) = 2. After i passes of the loop, a is meant to hold fib(i) and b to hold fib(i + 1). Exactly one line contains a bug. Which line number is it? Give just the line number.\n\n```python\n1: def fib(n):\n2:     a, b = 0, 1\n3:     for _ in range(n):\n4:         a, b = b, a + b\n5:     return b\n```",
       "answer": "5"
     },
     {

@@ -87,7 +87,10 @@
       "answer": {
         "name": "get_weather",
         "arguments": {
-          "city": "Lisbon"
+          "city": {
+            "$regex": "lisbon(, portugal)?",
+            "example": "Lisbon"
+          }
         }
       }
     },
@@ -476,7 +479,10 @@
       "answer": {
         "name": "get_forecast",
         "arguments": {
-          "city": "Oslo",
+          "city": {
+            "$regex": "oslo(, norway)?",
+            "example": "Oslo"
+          },
           "days": 5
         }
       }
@@ -745,7 +751,7 @@
             "example": "the library closes at noon"
           },
           "target_language": {
-            "$regex": "de|german",
+            "$regex": "de|deu|ger|german|deutsch|de-de",
             "example": "de"
           }
         }
@@ -911,7 +917,10 @@
       "answer": {
         "name": "set_light",
         "arguments": {
-          "room": "study",
+          "room": {
+            "$regex": "(the )?study( room)?",
+            "example": "study"
+          },
           "on": true
         }
       }
@@ -1226,8 +1235,14 @@
       "answer": {
         "name": "get_distance",
         "arguments": {
-          "origin": "Lyon",
-          "destination": "Grenoble",
+          "origin": {
+            "$regex": "lyon(, france)?",
+            "example": "Lyon"
+          },
+          "destination": {
+            "$regex": "grenoble(, france)?",
+            "example": "Grenoble"
+          },
           "unit": "km"
         }
       }
@@ -1274,7 +1289,7 @@
         "name": "search_hotels",
         "arguments": {
           "city": {
-            "$regex": "krak(o|ó)w",
+            "$regex": "krak(o|ó)w(, poland)?",
             "example": "Kraków"
           },
           "check_in": "2026-11-03",
@@ -1331,7 +1346,7 @@
         "name": "create_task",
         "arguments": {
           "title": {
-            "$regex": "(renew( the)? car insurance|car insurance renewal)",
+            "$regex": "(renew( the| my)? car insurance( policy)?|car insurance( policy)? renewal)",
             "example": "renew car insurance"
           },
           "priority": "high"
@@ -1374,7 +1389,7 @@
         "name": "play_music",
         "arguments": {
           "query": {
-            "$regex": "(the )?glass orchard( (by|-) (the )?velvet mile)?",
+            "$regex": "('?(the )?glass orchard'?( album)?(,? (by|-|–) (the )?velvet mile)?|(the )?velvet mile,? (-|–)? ?'?glass orchard'?)",
             "example": "Glass Orchard by the Velvet Mile"
           },
           "shuffle": true,
@@ -1422,7 +1437,10 @@
       "answer": {
         "name": "set_light",
         "arguments": {
-          "room": "kitchen",
+          "room": {
+            "$regex": "(the )?kitchen",
+            "example": "kitchen"
+          },
           "on": true,
           "brightness": 40,
           "color": "blue"
@@ -1885,7 +1903,7 @@
         "arguments": {
           "temperature_c": 20,
           "zone": {
-            "$regex": "living ?room",
+            "$regex": "(the )?living ?room",
             "example": "living room"
           }
         }
