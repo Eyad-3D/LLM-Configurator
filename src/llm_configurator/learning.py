@@ -30,7 +30,7 @@ def _fit(ratios):
     centre = statistics.median(logs)
     # Median absolute deviation (in log space) resists one odd test; scale 1.5 ≈ a broad band.
     mad = statistics.median(abs(x - centre) for x in logs)
-    spread = max(MIN_SPREAD, 1.5 * mad, (max(logs) - min(logs)) / 2 if len(logs) == 2 else 0)
+    spread = max(MIN_SPREAD, 1.5 * mad)
     return {"factor": math.exp(centre), "spread": round(spread, 4), "n": len(ratios)}
 
 
@@ -56,11 +56,12 @@ def ratios(measurements, hardware, calibration, variants=()):
                              kv_cache_type=kv, n_cpu_moe=moe, unified=unified)
         except (KeyError, TypeError, ValueError, ZeroDivisionError):
             continue
-        if not guess.get("available"):
+        # The unrounded midpoint: rounded ranges of very slow models could be 0.0.
+        if not guess.get("available") or not guess.get("mid_tps", 0) > 0:
             continue
         moved = moe and variant.moe and layers
         mode = "cpu" if layers == 0 else "gpu" if layers >= variant.layers and not moved else "split"
-        result.append((mode, record["tps"] / math.sqrt(guess["low_tps"] * guess["high_tps"])))
+        result.append((mode, record["tps"] / guess["mid_tps"]))
     return result
 
 

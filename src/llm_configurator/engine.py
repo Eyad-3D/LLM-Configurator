@@ -51,7 +51,7 @@ def allocations(variant, context, users, gpu_layers, kv_cache_type="f16", n_cpu_
     ram = weights_ram + kv * (1 - fraction) + buffer
     vram = 0
     if gpu_layers:
-        vram = weights_vram + kv * fraction + buffer
+        vram = weights_vram + kv * fraction + buffer  # the GPU keeps its own compute buffer, separate from the CPU's
         if unified:
             ram += vram  # one physical pool: GPU work lives inside RAM, no staging copy
         else:
@@ -113,15 +113,11 @@ def placements(variant, context, users, budget, gpu_budget, has_gpu, kv_cache_ty
 
 
 def maximum_context(variant, users, layers, ram_budget, vram_budget, kv_cache_type="f16", n_cpu_moe=0, unified=False):
-    low, high, best = 256, variant.max_context, 0
-    while low <= high:
-        context = (low + high) // 2
-        use = allocations(variant, context, users, layers, kv_cache_type, n_cpu_moe, unified)
-        if use["ram"] <= ram_budget and use["vram"] <= vram_budget:
-            best, low = context, context + 1
-        else:
-            high = context - 1
-    return best // 256 * 256
+    # Memory grows with context, so searching whole 256-token steps gives the same rounded answer.
+    def fits(steps):
+        use = allocations(variant, steps * 256, users, layers, kv_cache_type, n_cpu_moe, unified)
+        return use["ram"] <= ram_budget and use["vram"] <= vram_budget
+    return (_boundary(1, variant.max_context // 256, fits, largest=True) or 0) * 256
 
 
 def _recent(record, key="timestamp"):
@@ -191,7 +187,7 @@ def interpolated_speed(records, variant, hardware, context, layers, gpu_uuid, th
             "measurement_ids": [points[c].get("id") for c in used if points[c].get("id")]}
 
 
-def matching_tuned(tuned, variant, hardware, context, layers, kv_cache_type="f16", n_cpu_moe=0):
+def matching_tuned(tuned, variant, hardware, context, layers, kv_cache_type="f16", n_cpu_moe=0, gpu_uuid=None):
     """Most recent tune result whose best settings use this exact context and placement."""
     for record in reversed(list(tuned or ())):
         if not isinstance(record, dict):
@@ -200,6 +196,7 @@ def matching_tuned(tuned, variant, hardware, context, layers, kv_cache_type="f16
         if (record.get("variant_id") != variant.id or record.get("fingerprint") != hardware.get("fingerprint")
                 or (variant.sha256 and record.get("sha256") not in (None, variant.sha256))
                 or best.get("context") != context or best.get("gpu_layers") != layers or (best.get("parallel") or 1) != 1
+                or (layers and best.get("gpu_uuid") not in (None, gpu_uuid))
                 or (best.get("n_cpu_moe") or 0) != n_cpu_moe or (best.get("cache_type_k") or "f16") != kv_cache_type
                 or not _recent(record) or not _speed(result.get("tps"))):
             continue
@@ -334,7 +331,7 @@ def recommend(variants, hardware, requirements, measurements=(), calibration=Non
                     gpu_uuid = gpu["uuid"] if layers else None
                     single = req.users == 1
                     measurement = matching_speed(records, variant, hardware, context, layers, gpu_uuid, threads, kv, moe) if single else None
-                    tune = matching_tuned(tuned, variant, hardware, context, layers, kv, moe) if single else None
+                    tune = matching_tuned(tuned, variant, hardware, context, layers, kv, moe, gpu_uuid) if single else None
                     launch = _launch(context, req.users, layers, variant.layers, threads, kv, moe, gpu, tune)
                     tps = measurement["tps"] if measurement else tune["tps"] if tune else None
                     meets_speed = tps >= req.min_tps if tps is not None else None

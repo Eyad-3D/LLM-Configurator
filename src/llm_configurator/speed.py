@@ -101,17 +101,21 @@ def estimate(variant, hardware, calibration, context, layers, users, gpu, target
     if not positive(slow) or not positive(fast):
         return missing('Calibration cannot produce a finite estimate.')
     low, high = 1 / slow, 1 / fast
-    result = {'available': True, 'low_tps': round(low, 2), 'high_tps': round(high, 2),
+    result = {'available': True, 'low_tps': round(low, 2), 'high_tps': round(high, 2), 'mid_tps': math.sqrt(low * high),
               'confidence': 'low', 'method': '; '.join(methods), 'calibrated_at': calibration['timestamp'],
               'scope': 'Single-session token generation at the selected context; not prompt processing or TTFT.',
               'caveat': 'Unvalidated heuristic range. Synthetic probes are not llama.cpp kernels; actual speed can fall outside this range.'}
     if efficiency:
         mode = 'cpu' if layers == 0 else 'gpu' if layers == total and not moved else 'split'
-        fit = (efficiency.get('by_mode') or {}).get(mode) or efficiency
+        fit = (efficiency.get('by_mode') or {}).get(mode)
+        spread = fit['spread'] if fit else None
+        if not fit:
+            # No tests in this placement: shift by the machine-wide factor but keep the full raw width.
+            fit, spread = efficiency, max(efficiency.get('spread') or 0, math.log(high / low) / 2)
         if fit.get('factor'):
             middle = math.sqrt(low * high) * fit['factor']
-            low, high = middle * math.exp(-fit['spread']), middle * math.exp(fit['spread'])
-            result.update(low_tps=round(low, 2), high_tps=round(high, 2), raw_low_tps=round(1 / slow, 2), raw_high_tps=round(1 / fast, 2),
+            low, high = middle * math.exp(-spread), middle * math.exp(spread)
+            result.update(low_tps=round(low, 2), high_tps=round(high, 2), mid_tps=middle, raw_low_tps=round(1 / slow, 2), raw_high_tps=round(1 / fast, 2),
                           adjusted={'n': fit['n'], 'factor': round(fit['factor'], 3)},
                           method=result['method'] + f"; adjusted from {fit['n']} local measurements",
                           caveat='Range corrected using speed tests on this computer; still an estimate for this exact setup.')
