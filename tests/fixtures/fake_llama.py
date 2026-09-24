@@ -822,6 +822,9 @@ def run_server(args):
     time.sleep(max(0.0, env_float("FAKE_LLAMA_LOAD_SECONDS", 0.2)))
 
     def load_failed(lines, what="load model"):
+        # Stop serve_forever before closing its socket: on Windows closing it under the running
+        # thread raises there and appends a traceback after llama.cpp's last line.
+        httpd.shutdown()
         httpd.server_close()
         for line in lines:
             stamp("E", line)
