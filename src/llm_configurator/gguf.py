@@ -37,11 +37,11 @@ FILE_TYPES = {
 
 # ggml_type -> (values per block, bytes per block); used only to weigh expert tensors against the rest.
 TENSOR_TYPES = {
-    0: (1, 4), 1: (1, 2), 2: (32, 18), 3: (32, 20), 6: (32, 22), 7: (32, 24), 8: (32, 34), 9: (32, 40),
+    0: (1, 4), 1: (1, 2), 2: (32, 18), 3: (32, 20), 6: (32, 22), 7: (32, 24), 8: (32, 34), 9: (32, 36),
     10: (256, 84), 11: (256, 110), 12: (256, 144), 13: (256, 176), 14: (256, 210), 15: (256, 292),
     16: (256, 66), 17: (256, 74), 18: (256, 98), 19: (256, 50), 20: (32, 18), 21: (256, 110),
     22: (256, 82), 23: (256, 136), 24: (1, 1), 25: (1, 2), 26: (1, 4), 27: (1, 8), 28: (1, 8),
-    29: (256, 56), 30: (1, 2), 34: (256, 54), 35: (256, 66), 39: (32, 17), 40: (64, 36), 41: (128, 18),
+    29: (256, 56), 30: (1, 2), 34: (256, 54), 35: (256, 66), 39: (32, 17), 40: (64, 36), 41: (128, 18), 42: (64, 18),
 }
 
 # GGUF architecture name -> domain.ARCHITECTURES name. Plain "llama" with experts is Mixtral's layout.
@@ -65,6 +65,7 @@ def _bad(message):
 class _Reader:
     def __init__(self, handle, size, limit):
         self.handle, self.size, self.limit, self.pos = handle, size, min(size, limit), 0
+        self.last_count = None  # item count of the last top-level list, kept even when its items are skipped
 
     def check(self, count, what="the header is cut off (the file looks truncated)"):
         """Refuses before reading or seeking when `count` more bytes cannot fit in the file or the cap."""
@@ -134,6 +135,8 @@ def _value(reader, kind, depth=0):
     if depth >= MAX_NESTING:
         raise _bad("lists are nested too deeply")
     item_kind, count = reader.unpack("I"), reader.unpack("Q")
+    if depth == 0:
+        reader.last_count = count
     if item_kind in _SCALARS:
         width = struct.calcsize(_SCALARS[item_kind])
         if count > MAX_KEPT_ARRAY:
@@ -198,19 +201,21 @@ def _parse(path, tensors=False):
         tensor_count, kv_count = reader.unpack("Q"), reader.unpack("Q")
         if kv_count > MAX_KV or tensor_count > MAX_TENSORS:
             raise _bad("the header claims an impossible number of entries")
-        values, skipped = {}, []
+        values, skipped, lengths = {}, [], {}
         for _ in range(kv_count):
             key = reader.string()
             if key is None:
                 raise _bad("a setting name is impossibly long")
             kind = reader.unpack("I")
             value = _value(reader, kind)
+            if kind == _ARRAY:
+                lengths[key] = reader.last_count
             if value is None:
                 skipped.append(key)
             else:
                 values[key] = value
         table = _tensor_infos(reader, tensor_count) if tensors else None
-    return version, tensor_count, values, skipped, table
+    return version, tensor_count, values, skipped, table, lengths
 
 
 def quant_name(file_type=None, filename=""):
@@ -244,11 +249,11 @@ def _sliding_layers(arch, values, layers):
     if isinstance(pattern, list):  # one flag per layer
         return window, min(layers, sum(1 for flag in pattern if flag))
     if type(pattern) is int and pattern > 0:
-        return window, sum(1 for layer in range(layers) if layer % pattern < pattern - 1)
+        return window, layers - layers // pattern  # layer % n == n - 1 is the full-attention one
     return window, 0  # unknown pattern: count every layer as full attention (never under-estimates memory)
 
 
-def _summary(values, filename):
+def _summary(values, filename, lengths=None):
     arch = values.get("general.architecture") if isinstance(values.get("general.architecture"), str) else None
     get = (lambda key: values.get(f"{arch}.{key}")) if arch else (lambda key: None)
     layers = _int(get("block_count"))
@@ -259,6 +264,8 @@ def _summary(values, filename):
         head_dim = get("embedding_length") // heads
     window, sliding = _sliding_layers(arch, values, layers) if arch else (None, 0)
     file_type = _int(values.get("general.file_type"))
+    if file_type is not None:
+        file_type &= ~1024  # LLAMA_FTYPE_GUESSED: a flag, not a type
     split = _int(values.get("split.count"))
     return {
         "name": values.get("general.name") if isinstance(values.get("general.name"), str) else None,
@@ -268,6 +275,8 @@ def _summary(values, filename):
         "sliding_window": window, "sliding_layers": sliding,
         "file_type": file_type, "quant": quant_name(file_type, filename),
         "split_count": split if split else 1,
+        # llama.cpp's n_vocab is the token list's length; the list is stepped over, only its count is kept
+        "vocab_size": (lengths or {}).get("tokenizer.ggml.tokens") or _int(get("vocab_size")) or None,
     }
 
 
@@ -276,10 +285,12 @@ def read_metadata(path, tensors=False):
 
     `tensors=True` also reads the weight table to count parameters and expert bytes.
     """
-    version, tensor_count, values, skipped, table = _parse(path, tensors)
+    version, tensor_count, values, skipped, table, lengths = _parse(path, tensors)
     scalars = {k: v for k, v in values.items() if not isinstance(v, list)}
+    summary = _summary(values, Path(path).name, lengths)
     result = {"version": version, "tensor_count": tensor_count, "metadata": scalars,
-              "architecture": scalars.get("general.architecture"), "summary": _summary(values, Path(path).name),
+              "architecture": scalars.get("general.architecture") if isinstance(scalars.get("general.architecture"), str) else None,
+              "summary": summary,
               "skipped_keys": skipped}
     if table is not None:
         result["tensors"] = table
@@ -319,8 +330,13 @@ def variant_from_file(path, sha256=None):
     Split models are read from every part; the first part is the file llama.cpp loads.
     """
     parts = shard_paths(path)
+    if parts[0].name != Path(path).name:
+        sha256 = None  # the fingerprint given belongs to another part, not to the first one the id is built from
     first = read_metadata(parts[0], tensors=True)
     summary, meta = first["summary"], first["metadata"]
+    if summary["split_count"] != len(parts):
+        raise ValueError(f"{parts[0].name} says the model is split into {summary['split_count']} parts, but the file names "
+                         f"say {len(parts)}. Keep the original part names (…-00001-of-0000N.gguf) in one folder.")
     gguf_arch = first["architecture"]
     arch = ARCH_MAP.get(gguf_arch)
     if gguf_arch == "llama" and summary["experts"]:

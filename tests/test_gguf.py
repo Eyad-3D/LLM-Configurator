@@ -77,7 +77,7 @@ class GGUFTest(unittest.TestCase):
         self.assertEqual(result["summary"], {
             "name": "Tiny Test", "layers": 4, "kv_heads": 2, "head_dim": 32, "context_length": 4096, "experts": 0,
             "active_experts": 0, "sliding_window": None, "sliding_layers": 0, "file_type": 15, "quant": "Q4_K_M",
-            "split_count": 1})
+            "split_count": 1, "vocab_size": 5000})
 
     def test_all_value_types_and_nested_arrays_version_2(self):
         kvs = [("general.architecture", STR, "qwen3"), ("a.u8", U8, 255), ("a.i8", I8, -3), ("a.u16", U16, 65535),
