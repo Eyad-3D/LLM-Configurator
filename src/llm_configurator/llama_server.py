@@ -6,6 +6,7 @@ and failures are reported as plain reasons. Timings come from llama.cpp itself; 
 stay None rather than being guessed.
 """
 import atexit
+import http.client
 import json
 import os
 from pathlib import Path
@@ -17,7 +18,6 @@ import threading
 import time
 import urllib.error
 import urllib.request
-import weakref
 
 import psutil
 
@@ -27,7 +27,9 @@ from .domain import Cancelled, check_cancel, now
 TIMING_KEYS = ["prompt_n", "prompt_ms", "prompt_per_second", "predicted_n", "predicted_ms", "predicted_per_second"]
 # Loopback only: a system proxy must never see local traffic.
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-_LIVE = weakref.WeakSet()
+_LIVE = set()                 # every started, not yet stopped server (strong refs: a dropped server still gets stopped)
+_LIVE_LOCK = threading.Lock()
+_SHUTTING_DOWN = threading.Event()
 
 # Ordered: the first match wins, so specific causes come before generic ones. Lines come from real llama.cpp
 # logs (tests/integration/samples/error-*.txt); a CPU-only build prints "no usable GPU found" on every start, so
@@ -152,6 +154,9 @@ class LlamaServer:
     def __init__(self, command, config, log_path=None):
         self.command = argv(command)
         self.config = launch.normalize(config)
+        # "localhost" may resolve to ::1 first, where another program could answer; the server and our requests
+        # both use the IPv4 loopback address instead.
+        self.config["host"] = "127.0.0.1"
         if not self.config["model_path"]:
             raise ValueError("A downloaded model file is required")
         self.log_path = Path(log_path) if log_path else None
@@ -199,6 +204,8 @@ class LlamaServer:
                 raise
 
     def _spawn(self, port):
+        if _SHUTTING_DOWN.is_set():  # the app is exiting: a server started now would outlive it
+            raise Cancelled()
         self.port = port
         config = {**self.config, "port": port}
         args = self.command + launch.server_args(config)
@@ -225,7 +232,8 @@ class LlamaServer:
             raise ValueError(f"Could not run llama-server ({error.strerror or error}). Check the llama.cpp install.") from None
         _kill_with_parent(self.process)
         self.started_at = now()
-        _LIVE.add(self)
+        with _LIVE_LOCK:
+            _LIVE.add(self)
 
     def _wait_ready(self, timeout, progress, cancel):
         begin = time.monotonic()
@@ -259,7 +267,7 @@ class LlamaServer:
         except urllib.error.HTTPError as error:
             error.close()
             return "loading" if error.code == 503 else "error"
-        except (OSError, ValueError):
+        except (OSError, ValueError, http.client.HTTPException):
             return "starting"
 
     def ready(self):
@@ -274,16 +282,19 @@ class LlamaServer:
                                          headers={"Content-Type": "application/json"})
         try:
             with _OPENER.open(request, timeout=timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
+                answer = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as error:
             raise ValueError(self._http_error(error)) from None
         except (socket.timeout, TimeoutError):
             raise ValueError(f"The model server took longer than {int(timeout)} seconds to answer.") from None
-        except (OSError, urllib.error.URLError):
+        except (OSError, urllib.error.URLError, http.client.HTTPException):
             raise ValueError(self._dead_message() if not self.running() else
                              "The model server is not responding. Try stopping and starting it again.") from None
         except ValueError:
             raise ValueError("The model server sent an unreadable answer.") from None
+        if not isinstance(answer, dict):
+            raise ValueError("The model server sent an unreadable answer.")
+        return answer
 
     def _http_error(self, error):
         try:
@@ -324,11 +335,11 @@ class LlamaServer:
         body.update(extra or {})
         begin = time.monotonic()
         raw = self.request("/v1/chat/completions", body, timeout)
-        try:
-            choice = raw["choices"][0]
-            message = choice.get("message") or {}
-        except (KeyError, IndexError, TypeError):
-            raise ValueError("The model server sent an answer without any text.") from None
+        choices = raw.get("choices")
+        choice = choices[0] if isinstance(choices, list) and choices else None
+        message = choice.get("message") if isinstance(choice, dict) else None
+        if not isinstance(message, dict):
+            raise ValueError("The model server sent an answer without any text.")
         return {"text": message.get("content") or "", "reasoning": message.get("reasoning_content"),
                 "finish_reason": choice.get("finish_reason"), "timings": _normalize_timings(raw.get("timings")),
                 "usage": raw.get("usage") or {}, "seconds": round(time.monotonic() - begin, 4)}
@@ -342,8 +353,6 @@ class LlamaServer:
         body.update(extra or {})
         begin = time.monotonic()
         raw = self.request("/completion", body, timeout)
-        if not isinstance(raw, dict):
-            raise ValueError("The model server sent an unreadable answer.")
         stop_type = raw.get("stop_type")
         finish = {"eos": "stop", "word": "stop", "limit": "length"}.get(stop_type)
         evaluated, predicted = raw.get("tokens_evaluated"), raw.get("tokens_predicted")
@@ -384,12 +393,9 @@ class LlamaServer:
         code = None
         if self.process is not None and not self._stopped:
             if self.process.poll() is None:
-                kill_tree(self.process.pid, timeout)
-            try:
-                code = self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                code = self.process.wait(timeout=5)
+                code = self._stop_tree(timeout)
+            else:
+                code = self.process.returncode
             self._stopped = True
         elif self.process is not None:
             code = self.process.returncode
@@ -397,11 +403,46 @@ class LlamaServer:
             self._log.close()
         if self._own_log and self.log_path and self.log_path.exists():
             self._final_tail = self.log_tail(20000)
+            for attempt in range(5):  # Windows: a status() reading the log at this moment blocks the delete
+                try:
+                    self.log_path.unlink()
+                    break
+                except FileNotFoundError:
+                    break
+                except OSError:
+                    time.sleep(0.1)
+        with _LIVE_LOCK:
+            _LIVE.discard(self)
+        return code
+
+    def _stop_tree(self, timeout):
+        """Terminate the children and our process, then force-kill what is left. Our own process is waited on with
+        Popen (not psutil), so Popen keeps the real exit code and the PID is never reaped behind its back."""
+        try:
+            children = psutil.Process(self.process.pid).children(recursive=True)
+        except psutil.Error:
+            children = []
+        for process in children:
             try:
-                self.log_path.unlink()
-            except OSError:
+                process.terminate()
+            except psutil.Error:
                 pass
-        _LIVE.discard(self)
+        try:
+            self.process.terminate()
+        except OSError:
+            pass
+        try:
+            code = self.process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            code = self.process.wait(timeout=5)
+        _, alive = psutil.wait_procs(children, timeout=min(timeout, 5))
+        for process in alive:
+            try:
+                process.kill()
+            except psutil.Error:
+                pass
+        psutil.wait_procs(alive, timeout=5)
         return code
 
     def __enter__(self):
@@ -425,7 +466,10 @@ def _kill_with_parent(process):
         from ctypes import wintypes
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.CreateJobObjectW.restype = wintypes.HANDLE
-        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         if _JOB is None:
             job = kernel32.CreateJobObjectW(None, None)
             if not job:
@@ -449,10 +493,7 @@ def _kill_with_parent(process):
                 kernel32.CloseHandle(job)
                 return
             _JOB = job  # kept open for the app's lifetime; Windows closes it (and the servers) when the app ends
-        handle = kernel32.OpenProcess(0x0100 | 0x0001, False, process.pid)  # SET_QUOTA | TERMINATE
-        if handle:
-            kernel32.AssignProcessToJobObject(_JOB, handle)
-            kernel32.CloseHandle(handle)
+        kernel32.AssignProcessToJobObject(_JOB, int(process._handle))  # Popen's handle has PROCESS_ALL_ACCESS
     except Exception:
         pass
 
@@ -462,13 +503,14 @@ _JOB = None
 
 def install_exit_handlers():
     """Turn SIGTERM/SIGHUP (and SIGBREAK on Windows) into a normal exit so atexit stops every server. Call once from
-    the main thread (the CLI and the app do); elsewhere it does nothing."""
+    the main thread of a program (the CLI's main and the app's serve); from another thread it does nothing."""
     import signal
     import sys
     if threading.current_thread() is not threading.main_thread():
         return
 
     def handler(signum, _frame):
+        signal.signal(signum, signal.SIG_IGN)  # a second signal must not interrupt the clean-up below
         sys.exit(128 + signum)
 
     for name in ("SIGTERM", "SIGHUP", "SIGBREAK"):
@@ -482,10 +524,13 @@ def install_exit_handlers():
 
 @atexit.register
 def _stop_all():
-    for server in list(_LIVE):
+    _SHUTTING_DOWN.set()
+    with _LIVE_LOCK:
+        servers = list(_LIVE)
+    for server in servers:
         try:
             server.stop(timeout=3)
-        except Exception:
+        except BaseException:
             pass
 
 

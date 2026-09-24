@@ -616,6 +616,47 @@ class SeamTests(Base):
         plain = self.server().start().complete("The quick brown fox", max_tokens=16)["timings"]
         self.assertNotIn("draft_n", plain)
 
+    @unittest.skipIf(os.name == "nt", "POSIX exit codes")
+    def test_stop_keeps_the_real_exit_code_and_dropped_servers_are_still_tracked(self):
+        server = self.server().start()
+        self.assertEqual(server.stop(), -15)
+        dropped = self.server().start()
+        pid = dropped.pid
+        self.servers.remove(dropped)
+        del dropped
+        import gc
+        gc.collect()
+        live = [s for s in llama_server._LIVE if s.pid == pid]
+        self.assertEqual(len(live), 1, "atexit must still know about a server nobody holds any more")
+        live[0].stop()
+
+    def test_odd_answers_become_plain_errors(self):
+        server = self.server(host="localhost").start()
+        self.assertTrue(server.base_url.startswith("http://127.0.0.1:"))
+        for reply in [[1, 2], {"choices": [None]}, {"choices": [{"message": "text"}]}, {"choices": "x"}]:
+            with self.subTest(reply=reply), mock.patch.object(server, "request", return_value=reply
+                                                              if isinstance(reply, dict) else {"tokens": None}):
+                with self.assertRaises(ValueError):
+                    server.chat([{"role": "user", "content": "hi"}]) if isinstance(reply, dict) else server.tokenize("hi")
+        garbage = socket.socket()
+        garbage.bind(("127.0.0.1", 0))
+        garbage.listen()
+
+        def answer():
+            connection, _ = garbage.accept()
+            connection.recv(65536)
+            connection.sendall(b"this is not HTTP\r\n\r\n")
+            connection.close()
+        thread = threading.Thread(target=answer, daemon=True)
+        thread.start()
+        real_port, server.port = server.port, garbage.getsockname()[1]
+        try:
+            with self.assertRaisesRegex(ValueError, "not responding"):
+                server.request("/v1/models", timeout=5)
+        finally:
+            server.port = real_port
+            garbage.close()
+
     @unittest.skipIf(os.name == "nt", "POSIX signals")
     def test_exit_handlers_stop_servers_when_the_app_is_terminated(self):
         import signal
