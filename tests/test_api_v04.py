@@ -284,8 +284,14 @@ class ScrubTests(unittest.TestCase):
         self.assertEqual(scrub("loading /home/me/models/x.gguf now"), "loading x.gguf now")
         self.assertEqual(scrub(r"C:\Users\me\m.gguf"), "m.gguf")
         self.assertEqual(scrub({"a": [f"{SECRET}/llama-server"]}), {"a": ["llama-server"]})
+        self.assertEqual(scrub(r"\\server\share\m.gguf"), "m.gguf")
+        self.assertEqual(scrub(r"C:\Users\Eyad Abu\m\x.gguf", roots=(r"C:\Users\Eyad Abu",)), "x.gguf")
+        self.assertEqual(scrub("/home/A B/models/x.gguf and ~/y/z.gguf", roots=("/home/A B",)), "x.gguf and z.gguf")
+        self.assertEqual(scrub({"got": "cd /usr/local/bin", "log": "cd /usr/local/bin"}, keep={"got"}),
+                         {"got": "cd /usr/local/bin", "log": "cd bin"})
+        self.assertEqual(scrub({"n": float("nan"), "p": Path("/a/b/c.gguf"), "s": {1}}), {"n": None, "p": "c.gguf", "s": [1]})
         for kept in ["https://huggingface.co/Qwen/x", "Q4_K_M/model.gguf", "org/repo@rev:file.gguf", "12 MB/s",
-                     "~/.cache/huggingface/hub", "/api/jobs/job-1", "http://127.0.0.1:8081/v1", "2026/09/24", "and/or"]:
+                     "/api/jobs/job-1", "http://127.0.0.1:8081/v1", "2026/09/24", "and/or"]:
             self.assertEqual(scrub(kept), kept)
 
 
@@ -487,7 +493,7 @@ class JobTests(ApiCase):
         self.assertEqual(status, 202)
         done = self.wait(job["id"])
         self.assertEqual(done["state"], "done", done["error"])
-        self.assertEqual(done["result"]["best"]["model_path"], Path(self.variant.filename).name)
+        self.assertNotIn("model_path", done["result"]["best"])
         record = self.store.get("tuned")[-1]
         for key in ["variant_id", "context", "placement", "fingerprint", "timestamp"]:
             self.assertIn(key, record)
@@ -574,6 +580,45 @@ class JobTests(ApiCase):
         self.wait(self.server.jobs.list()[0]["id"])
         self.server.server_close()
         self.assertEqual(self.fakes.calls[-1], ("serve_stop",))
+
+    def test_queued_compute_job_rechecks_the_server_and_remove_respects_it(self):
+        c = candidate(self.variant)
+        self.remember(c)
+        self.downloaded()
+        from llm_configurator import server as server_module
+        with patch.object(server_module, "MAX_ACTIVE_JOBS", 2):
+            gate = threading.Event()
+            self.server.jobs.submit("hold", "hold", lambda p, cancel: gate.wait(5), exclusive="compute")
+            test = self.call("/api/test", {"candidate_id": c["id"]})[1]
+            self.assertEqual(self.call("/api/tune", {"candidate_id": c["id"], "budget_seconds": 60})[0], 409)  # job cap
+            registry = self.fakes.modules["llama_server"].ServerRegistry()
+            registry.start(["x"], {"model_path": "m.gguf"})
+            self.server.registry = registry  # a server came up while the test waited for the compute slot
+            gate.set()
+            failed = self.wait(test["id"])
+        self.assertEqual(failed["state"], "failed")
+        self.assertIn("Stop the running model server first", failed["error"])
+        self.server.registry = None
+        self.wait(self.call("/api/serve/start", {"candidate_id": c["id"]})[1]["id"])
+        self.assertEqual(self.call("/api/downloads/remove", {"variant_id": self.variant.id})[0], 409)
+        self.call("/api/serve/stop", {})
+        self.assertEqual(self.call("/api/downloads/remove", {"variant_id": self.variant.id})[0], 200)
+
+    def test_odd_job_results_never_break_the_job_list(self):
+        job = self.server.jobs.submit("x", "x", lambda p, c: {"nan": float("nan"), "path": Path(SECRET) / "m.gguf"})
+        self.server.jobs.wait(job["id"], 2)
+        status, listing, raw = self.call("/api/jobs")
+        self.assertEqual((status, listing["jobs"][0]["result"]), (200, {"nan": None, "path": "m.gguf"}))
+
+    def test_refresh_during_comparison_discards_the_old_report(self):
+        c = candidate(self.variant)
+        report = {"candidates": [c], "hardware": {}, "requirements": {}, "shortlist": [], "notes": []}
+        def slow_evaluate(*args):
+            self.server.latest["generation"] += 1  # as if a refresh finished meanwhile
+            return report
+        with patch("llm_configurator.server.evaluate", side_effect=slow_evaluate):
+            self.assertEqual(self.call("/api/recommend", {})[0], 200)
+        self.assertEqual(self.call("/api/test", {"candidate_id": c["id"]})[0], 409)
 
     def test_local_models_hide_folders(self):
         status, result, raw = self.call("/api/local-models")

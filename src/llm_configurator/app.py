@@ -249,7 +249,8 @@ def tune_job(store, variant, candidate, hardware, budget_seconds=300, goal="gene
                   "trials": len(result.get("trials") or [])}
         if result.get("stopped") != "cancelled":
             store.append("tuned", record)
-        return {**result, "record_id": record["id"]}
+        # Paths stay on this computer: the page gets the tuned settings, not the model's folder.
+        return {**result, "best": best, "record_id": record["id"]}
     return run
 
 

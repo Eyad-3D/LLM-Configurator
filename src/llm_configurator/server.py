@@ -10,6 +10,7 @@ never contain absolute file paths (only file names), except the export text the 
 """
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import math
 from pathlib import Path
 import re
 import secrets
@@ -37,8 +38,12 @@ DEMO_MESSAGE = ("Demo mode uses fictional models, so nothing can be downloaded, 
 IDLE = {"running": False, "base_url": None, "openai_base_url": None, "pid": None, "config": None,
         "started_at": None, "model": None, "log_tail": ""}
 STALE_MESSAGE = "Compare again first. That option is not in the latest comparison."
-# Absolute POSIX or Windows paths inside text; replaced with their last part before reaching the page.
-PATH = re.compile(r"(?<![\w.:/~\\-])(?:[A-Za-z]:[\\/]|/)(?:[^\s/\\\"'<>|:*?]+[\\/])+([^\s/\\\"'<>|:*?]*)")
+# Absolute POSIX, Windows or UNC paths inside text; replaced with their last part before reaching the page.
+PATH = re.compile(r"(?<![\w.:/~\\-])(?:[A-Za-z]:[\\/]|\\\\|~?[\\/])(?:[^\s/\\\"'<>|:*?]+[\\/])+([^\s/\\\"'<>|:*?]*)")
+# Model-written text is shown as written (a quiz answer like "cd /usr/bin" is not a leak), and
+# folder labels are built by app.page_location as "~/..." on purpose.
+MODEL_TEXT = {"got", "expected", "text", "prompt", "prompts", "reply", "content", "label"}
+MAX_ACTIVE_JOBS = 12
 
 
 class Conflict(Exception):
@@ -49,15 +54,27 @@ class NotFound(Exception):
     """Maps to 404."""
 
 
-def scrub(value):
-    """Replace absolute paths in every string with their file name; the page never learns folder layouts."""
+def scrub(value, roots=(), keep=frozenset()):
+    """JSON-safe copy with absolute paths reduced to file names, so the page never learns folder layouts.
+
+    `roots` (for example the home folder, which may contain spaces or the user's name) are replaced
+    literally with "~" first. Keys in `keep` hold text that is passed through unchanged.
+    """
     if isinstance(value, str):
-        return PATH.sub(lambda m: m[0] if m[0].startswith(("/api/", "/v1/")) else (m[1] or "…"), value) if "/" in value or "\\" in value else value
+        for root in roots:
+            value = value.replace(root, "~")
+        if "/" not in value and "\\" not in value:
+            return value
+        return PATH.sub(lambda m: m[0] if m[0].startswith(("/api/", "/v1/")) else (m[1] or "…"), value)
     if isinstance(value, dict):
-        return {k: scrub(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [scrub(v) for v in value]
-    return value
+        return {str(k): v if k in keep else scrub(v, roots, keep) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [scrub(v, roots, keep) for v in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return scrub(str(value), roots, keep)  # Paths and other objects never break the JSON reply
 
 
 def fields(body, required=(), optional=()):
@@ -128,16 +145,25 @@ def make_server(store, port=8765, demo=False):
     calibration_state = {"running": False, "result": None, "cached": False}
     jobs = JobManager()
     latest_lock = threading.Lock()
-    latest = {"candidates": {}, "hardware": None, "workload": "general"}
+    latest = {"candidates": {}, "hardware": None, "workload": "general", "generation": 0}
+    # Longest first, so the data folder is hidden even when it sits outside the home folder.
+    roots = tuple(sorted({str(p) for p in [store.directory.resolve(), Path.home()] if len(str(p)) > 1}, key=len, reverse=True))
+    served = {"variant_id": None}
 
-    def remember(report):
+    def generation():
         with latest_lock:
+            return latest["generation"]
+
+    def remember(report, seen):
+        with latest_lock:
+            if seen != latest["generation"]:
+                return  # the catalogue changed while this comparison ran; its IDs may be stale
             latest.update(candidates={c["id"]: c for c in report.get("candidates", [])}, hardware=report.get("hardware"),
                           workload=(report.get("requirements") or {}).get("workload", "general"))
 
     def forget():
         with latest_lock:
-            latest.update(candidates={}, hardware=None)
+            latest.update(candidates={}, hardware=None, generation=latest["generation"] + 1)
 
     def no_demo():
         if demo:
@@ -182,12 +208,28 @@ def make_server(store, port=8765, demo=False):
             raise Conflict("Stop the running model server first. Two models at once may not fit in memory.")
 
     def submit(kind, title, fn, subject=None, exclusive=None):
+        if len(jobs.active()) >= MAX_ACTIVE_JOBS:
+            raise Conflict("Too many tasks are waiting. Let some finish or cancel them first.")
+        if exclusive == "compute" and kind != "serve":
+            work = fn
+            def fn(progress, cancel):
+                # Checked again once the compute slot is ours: a server may have started while this job waited.
+                if serving():
+                    raise ValueError("Stop the running model server first. Two models at once may not fit in memory.")
+                return work(progress, cancel)
         return 202, jobs.submit(kind, title, fn, subject=subject, exclusive=exclusive)
+
+    def busy(variant_id):
+        in_jobs = any(variant_id == j["subject"].get("variant_id") or variant_id in (j["subject"].get("variant_ids") or [])
+                      for j in jobs.active())
+        return in_jobs or (served["variant_id"] == variant_id and serving())
 
     def serve_start(progress, cancel, chosen, found, hardware, tuned):
         server_registry = registry()
         config = app.launch_config(store, chosen, hardware, app.require_model(store, found), tuned)
-        return server_registry.start(app.binary(store, "llama-server"), config, progress=progress, cancel=cancel)
+        status = server_registry.start(app.binary(store, "llama-server"), config, progress=progress, cancel=cancel)
+        served["variant_id"] = found.id
+        return status
 
     def get_route(path):
         if path == "/api/credentials":
@@ -216,7 +258,7 @@ def make_server(store, port=8765, demo=False):
             return 200, {"files": [app.page_file(f) for f in store.get("local_files", [])],
                          "locations": [app.page_location(l) for l in discover.locations()]}
         if path == "/api/quality/results":
-            return 200, {"results": store.get("quality_results", [])}
+            return 200, {"results": store.get("quality_results", [])[-200:]}
         if path.startswith("/api/quality/compare/"):
             comparison_id = path.removeprefix("/api/quality/compare/")
             if not SAFE_ID.fullmatch(comparison_id):
@@ -227,7 +269,7 @@ def make_server(store, port=8765, demo=False):
             return 200, IDLE if server.registry is None else registry().status()
         if path == "/api/community":
             saved = store.get("community") or {}
-            return 200, {"records": saved.get("records", []), "source": saved.get("source"), "fetched_at": saved.get("fetched_at")}
+            return 200, {"records": (saved.get("records") or [])[-5000:], "source": saved.get("source"), "fetched_at": saved.get("fetched_at")}
         raise NotFound("Not found")
 
     def post_route(path, body):
@@ -266,8 +308,8 @@ def make_server(store, port=8765, demo=False):
             fields(body, ["variant_id"])
             no_demo()
             found = variant(body["variant_id"])
-            if jobs.active(subject_key="variant_id", subject_value=found.id):
-                raise Conflict("This model is busy. Cancel its download or test first.")
+            if busy(found.id):
+                raise Conflict("This model is in use. Cancel its tasks or stop the server first.")
             return 200, {"freed_bytes": app.remove_download(store, found)}
         if path == "/api/test":
             fields(body, ["candidate_id"], ["kind", "tuned"])
@@ -318,7 +360,7 @@ def make_server(store, port=8765, demo=False):
                 entries.append((label, found, chosen))
             compute_free()
             return submit("compare", "Blind comparison", app.compare_job(store, entries, hardware, prompts),
-                          subject={"candidate_ids": ids}, exclusive="compute")
+                          subject={"candidate_ids": ids, "variant_ids": [e[1].id for e in entries]}, exclusive="compute")
         if path == "/api/quality/vote":
             fields(body, ["comparison_id", "item", "slot"])
             comparison_id = text(body, "comparison_id", 64)
@@ -355,7 +397,7 @@ def make_server(store, port=8765, demo=False):
             tuned = boolean(body, "tuned")
             chosen, found, hardware = candidate(body["candidate_id"])
             # The export text is what the user copies into a terminal, so it keeps the real model path.
-            return 200, app.export_config(store, found, chosen, hardware, fmt, platform, tuned), False
+            return 200, app.export_config(store, found, chosen, hardware, fmt, platform, tuned), {"content"}
         if path == "/api/serve/start":
             fields(body, ["candidate_id"], ["tuned"])
             no_demo()
@@ -394,9 +436,9 @@ def make_server(store, port=8765, demo=False):
         def log_message(self, format, *args):
             pass
 
-        def send(self, status, payload, mime="application/json", private=True):
+        def send(self, status, payload, mime="application/json", keep=frozenset()):
             if mime == "application/json":
-                data = json.dumps(scrub(payload) if private else payload, allow_nan=False).encode()
+                data = json.dumps(scrub(payload, roots, MODEL_TEXT | keep), allow_nan=False).encode()
             else:
                 data = payload
             self.send_response(status)
@@ -413,8 +455,8 @@ def make_server(store, port=8765, demo=False):
 
         def reply(self, route, *args):
             try:
-                status, payload, *private = route(*args)
-                self.send(status, payload, private=private[0] if private else True)
+                status, payload, *keep = route(*args)
+                self.send(status, payload, keep=keep[0] if keep else frozenset())
             except Conflict as error:
                 self.send(409, {"error": str(error)})
             except NotFound as error:
@@ -487,13 +529,19 @@ def make_server(store, port=8765, demo=False):
                     threading.Thread(target=run_calibration, daemon=True).start()
                     return self.send(202, calibration_state)
                 if path == "/api/recommend":
+                    seen = generation()
                     report = evaluate(store, body, demo)
-                    remember(report)
+                    remember(report, seen)
                     return self.send(200, report)
                 if path == "/api/map":
-                    if refresh_state["running"]:
+                    if not refresh_lock.acquire(blocking=False):
                         return self.send(409, {"error": "Wait for metadata refresh to finish"})
-                    return self.send(200, map_benchmark(store, body["base_repo"], body.get("slug")))
+                    try:
+                        mapped = map_benchmark(store, body["base_repo"], body.get("slug"))
+                    finally:
+                        refresh_lock.release()
+                    forget()
+                    return self.send(200, mapped)
                 if path == "/api/refresh":
                     include_scores = body.get("include_scores", True)
                     if type(include_scores) is not bool:
@@ -519,6 +567,8 @@ def make_server(store, port=8765, demo=False):
                     return self.send(202, refresh_state)
             except (ValueError, TypeError, KeyError, OSError) as error:
                 return self.send(400, {"error": str(error)})
+            except Exception as error:
+                return self.send(500, {"error": f"Unexpected error: {type(error).__name__}"})
             return self.reply(post_route, path, body)
 
     server = AppServer(("127.0.0.1", port), Handler)
