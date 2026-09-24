@@ -81,6 +81,13 @@ function hardware(hw) {
           ? `${others[0].name || "A graphics chip"} found — free memory can’t be read, so estimates use RAM`
           : "No graphics card found — estimates use RAM",
       );
+  // Graphics chips we can name but can't measure: say which, and why, so "uses RAM" isn't a mystery.
+  const unread = others
+    .map(
+      (g) =>
+        `<p class="hint">${gpus.length ? "Also found " : ""}${esc(g?.name || (gpus.length ? "a graphics chip" : "A graphics chip"))} (not counted in memory estimates): ${esc(g?.reason || "its free memory can’t be read.")}</p>`,
+    )
+    .join("");
   const warnings = (Array.isArray(hw.warnings) ? hw.warnings : [])
     .map((w) => `<p class="hint">${esc(w)}</p>`)
     .join("");
@@ -101,6 +108,7 @@ function hardware(hw) {
       `${GiB(hw.disk_free)} GiB`,
       "Home drive · checked again before downloading",
     ) +
+    unread +
     warnings;
   const previousGPU = $("gpu_index").value;
   $("gpu_index").innerHTML = gpus.length
@@ -219,6 +227,14 @@ function speedPresentation(c) {
       label: c.evidence === "tuned" ? "Measured after tuning" : "Measured local generation speed",
       tag: "Speed verified locally",
     };
+  // A short tune ran near the start of a conversation only, so it is not this length's speed.
+  const quick = c.tuned?.tps;
+  if (c.evidence === "tuned" && Number.isFinite(quick))
+    return {
+      value: `~${quick.toFixed(1)} tok/s`,
+      label: "Tuned with a short test · not checked at this length yet",
+      tag: "Speed not tested at this length",
+    };
   const nearby = c.speed_interpolated?.tps;
   if (c.evidence === "interpolated" && Number.isFinite(nearby))
     return {
@@ -250,6 +266,35 @@ function speedPresentation(c) {
     tag: "Speed unverified",
   };
 }
+// Every speed number we have for this card, each with where it came from, so a test, a tune,
+// a guess from other lengths and other people's results never read the same.
+function speedEvidence(c) {
+  const n = (v) => Number.isFinite(v);
+  const rows = [];
+  if (n(c.tps))
+    rows.push([
+      c.evidence === "tuned" ? "Measured after tuning, on this computer" : "Measured on this computer",
+      `${c.tps.toFixed(1)} tok/s`,
+    ]);
+  if (n(c.tuned?.tps) && !(c.evidence === "tuned" && n(c.tps)))
+    rows.push([
+      c.tuned.verified
+        ? "Tuning run on this computer"
+        : "Tuning run with a short test (near the start of a conversation)",
+      `${c.tuned.tps.toFixed(1)} tok/s`,
+    ]);
+  if (n(c.speed_interpolated?.tps))
+    rows.push(["Estimated from your tests at other lengths (not a test at this length)", `~${c.speed_interpolated.tps.toFixed(1)} tok/s`]);
+  if (n(c.community?.median_tps)) {
+    const count = Number.isInteger(c.community.n) ? c.community.n : null;
+    rows.push([
+      `Other people’s results: middle value from ${count ?? "several"} similar computer${count === 1 ? "" : "s"} (not this one)`,
+      `~${c.community.median_tps.toFixed(1)} tok/s`,
+    ]);
+  }
+  if (rows.length < 2) return "";
+  return `<dl>${rows.map(([label, value]) => `<dt>${esc(label)}</dt><dd>${esc(value)}</dd>`).join("")}</dl>`;
+}
 // Plain verdicts from the engine; older reports fall back to measured speed only.
 const VERDICTS = {
   runs_well: ["good", "Runs well"],
@@ -260,6 +305,7 @@ const VERDICTS = {
 const EVIDENCE = {
   measured: "measured on this computer",
   tuned: "measured after tuning",
+  short_tune: "tuned with a short test",
   interpolated: "estimated from nearby tests",
   community: "based on other people’s results",
   estimated: "estimate",
@@ -277,7 +323,9 @@ function verdictBadge(c) {
     verdict === "unknown"
       ? ["interpolated", "community"].includes(c.evidence)
         ? c.evidence
-        : null
+        : c.evidence === "tuned" && c.tps == null
+          ? "short_tune"
+          : null
       : c.verdict
         ? c.evidence
         : "measured";
@@ -367,7 +415,7 @@ function detail(c) {
     `<p class="eyebrow">DEPLOYMENT DETAILS</p><h3>${esc(c.name)} · ${esc(c.quant)}</h3><p>${esc(c.explanation)}</p>
     <dl><dt>Quality rank among rated eligible models</dt><dd>${c.quality_comparison?.rank == null ? "Not ranked" : "#" + esc(c.quality_comparison.rank) + " of " + esc(c.quality_comparison.rated_models)}</dd><dt>Gap to highest reference score</dt><dd>${c.quality_comparison?.points_behind_best == null ? "Unavailable" : esc(c.quality_comparison.points_behind_best) + " index points"}</dd>${c.memory_total_bytes != null ? `<dt>Estimated memory in total</dt><dd>${GiB(c.memory_total_bytes)} GiB</dd>` : ""}<dt>Estimated system RAM</dt><dd>${GiB(c.ram_bytes)} GiB</dd><dt>${c.unified_memory ? "Of which the graphics chip uses (shared with RAM)" : "Estimated VRAM"}</dt><dd>${GiB(c.vram_bytes)} GiB</dd><dt>RAM headroom after reserve</dt><dd>${GiB(c.ram_headroom_bytes)} GiB</dd><dt>Memory-only context ceiling</dt><dd>${c.memory_max_context.toLocaleString()} tokens / session</dd><dt>Conversation memory (${esc({ f16: "full size", q8_0: "half size", q4_0: "quarter size" }[c.kv_cache_type] || "full size")}), all users</dt><dd>${GiB(c.kv_bytes)} GiB</dd><dt>Weight file size</dt><dd>${GiB(c.file_bytes)} GiB</dd><dt>Quality evidence</dt><dd>${esc(c.quality_evidence)}</dd><dt>Evaluation entry</dt><dd>${esc(c.score_settings || "Unmapped")}</dd><dt>Benchmark version</dt><dd>${esc(c.score_version || "Unavailable")}</dd><dt>Model details downloaded</dt><dd>${esc(when(c.metadata_date))}</dd></dl>
     ${/^https:\/\//.test(c.score_source || "") ? `<p>Source: <a href="${esc(c.score_source)}" target="_blank" rel="noreferrer">Artificial Analysis</a>. Scores apply to the evaluation entry above.</p>` : ""}
-    <h3>Speed evidence</h3><p>${esc(speedPresentation(c).value)} · ${esc(speedPresentation(c).label)}</p>
+    <h3>Speed evidence</h3><p>${esc(speedPresentation(c).value)} · ${esc(speedPresentation(c).label)}</p>${speedEvidence(c)}
     ${c.speed_estimate?.available ? `<p>${esc(c.speed_estimate.method)}. ${esc(c.speed_estimate.scope)}</p><p>${esc(c.speed_estimate.caveat)}</p><p>Calibrated: ${esc(c.speed_estimate.calibrated_at)}</p>` : ""}
     <h3>Runtime settings</h3><pre>${esc(JSON.stringify(settings, null, 2))}</pre><p>Use these settings in your llama.cpp installation. The memory ceiling is an estimate; it is not a validated context or speed guarantee.</p>
     ${c.demo ? "<p>Demo fixtures cannot be downloaded or benchmarked. Start without --demo and refresh metadata for real models.</p>" : `<h3>Download & measure</h3><p>Run these commands locally after installing llama.cpp. Downloads require confirmation. Benchmarking generates 128 tokens near the selected context limit.</p><pre>${esc(`llm-config download ${variantArgument} --directory ./models\n\nllm-config bench ${variantArgument} --model './models/${c.filename.split("/").pop()}' --context ${c.context} --gpu-layers ${c.gpu_layers} --gpu-index ${c.gpu_index ?? 0}`)}</pre><p>Commands use shell quoting compatible with Bash and PowerShell for these model IDs. ${c.users > 1 ? "This benchmark measures one active session only; it will not verify your concurrent speed target." : "Compare again after the benchmark to apply the measured result."}</p>`}`;

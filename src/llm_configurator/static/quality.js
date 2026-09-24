@@ -803,7 +803,10 @@
     );
     session.get("/api/local-models").then((data) => {
       if (!session.alive) return;
-      for (const f of (data && data.files) || []) if (f.variant_id) onDisk.add(f.variant_id);
+      for (const f of (data && data.files) || []) {
+        const id = f.variant_id || f.local_variant_id;
+        if (id) onDisk.add(id);
+      }
       if (!onDisk.size) return;
       // Re-rendering replaces the controls; put focus back where it was.
       const focused = panel.contains(document.activeElement) ? document.activeElement.id : null;
@@ -848,7 +851,7 @@
       // Result keys are quant labels (e.g. "Q4_K_M"); `variant_ids` maps them back to files.
       const idOf = (key) => (out.variant_ids && out.variant_ids[key]) || key;
       const nameFor = (key) => (seen.get(idOf(key)) ? label(seen.get(idOf(key))) : modelName(ctx, idOf(key)));
-      const refName = seen.get(reference.value) ? label(seen.get(reference.value)) : seen.get(out.reference) ? label(seen.get(out.reference)) : typeof out.reference === "string" ? out.reference : "the reference";
+      const refName = seen.get(reference.value) ? label(seen.get(reference.value)) : seen.get(out.reference) ? label(seen.get(out.reference)) : typeof out.reference_quant === "string" ? out.reference_quant : typeof out.reference === "string" ? out.reference : "the reference";
       const row = (term, explain, value) => [h("dt", {}, term, h("span", { class: "hint", text: ` (${explain})` })), h("dd", { text: value })];
       fill(result, 
         h("h4", { text: `Compared with ${refName}` }),
@@ -945,10 +948,14 @@
             return h("li", {},
               h("div", { class: "qp-file-head" },
                 h("strong", { class: "qp-file-name", text: g.name || f.filename || basename(f.path) || "Unnamed file" }),
-                h("span", { class: f.variant_id ? "tag" : "tag unknown", text: f.variant_id ? "Known model" : "Not in the catalogue" })),
+                h("span", {
+                class: f.variant_id ? "tag" : "tag unknown",
+                // A file the catalogue doesn't know still gets its own id, so it can be tested and compared.
+                text: f.variant_id ? "Known model" : f.local_variant_id ? "Your own file" : "Not in the catalogue",
+              })),
               h("div", { class: "hint", text: facts.join(" · ") }),
               f.filename || f.path ? h("div", { class: "hint", text: f.filename || basename(f.path) }) : null,
-              h("div", { class: "hint", text: f.match_note || (f.verified ? "Checked: the file's fingerprint matches." : f.variant_id ? "Matched by name and size (not fingerprint-checked yet)." : "Not checked.") }));
+              h("div", { class: "hint", text: f.match_note || (f.verified ? "Checked: the file's fingerprint matches." : f.variant_id ? "Matched by name and size (not fingerprint-checked yet)." : f.local_variant_id ? "Not in our list of models, but you can still use it here." : "Not checked.") }));
           }))
         : h("p", { class: "qp-empty", text: "No model files found yet. Click Scan my disk to look." }));
       const locations = (data && data.locations) || [];

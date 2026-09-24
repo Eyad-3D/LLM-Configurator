@@ -485,7 +485,10 @@ test("tuning takes a time budget and shows before and after", async () => {
             improvement: 1.25,
             trials: [{ status: "ok" }, { status: "ok" }, { status: "skipped_memory" }],
             stopped: "converged",
-            notes: ["Compressed notes were not tried because you did not allow them."],
+            notes: [
+              "Compressed notes were not tried because you did not allow them.",
+              "Stopped early: another round found nothing faster.",
+            ],
           },
         }),
     },
@@ -513,8 +516,43 @@ test("tuning takes a time budget and shows before and after", async () => {
   assert.match(text, /Reading speed400 → 480 tokens\/s20% faster/);
   assert.match(text, /CPU threads: 4 → 8/);
   assert.match(text, /Flash attention.*automatic → on/);
-  assert.match(text, /Tried 2 settings\. Stopped early/);
+  assert.match(text, /Tried 2 settings\./);
+  assert.equal((text.match(/Stopped/g) || []).length, 1, "the stop reason appears once, from the tuner");
   assert.match(text, /Compressed notes were not tried/);
+  assert.match(text, /The best settings are saved/);
+  await s.close();
+});
+
+test("a tune that wasn't saved never says it was, and the page adds no stop sentence of its own", async () => {
+  const s = await setup({
+    routes: {
+      "GET /api/runtime": installed,
+      "POST /api/downloads/plan": downloadedPlan,
+      "POST /api/tune": (body, s) =>
+        s.job("tune", "Tune Model A", {
+          state: "done",
+          result: {
+            best: { threads: 4 },
+            baseline: { tps: 20, pp_tps: 400 },
+            best_result: { tps: 20, pp_tps: 400 },
+            improvement: 1,
+            trials: [],
+            stopped: "cancelled",
+            notes: [],
+            saved: false,
+          },
+        }),
+    },
+  });
+  await s.open();
+  s.expand("tune");
+  await until(() => s.buttonIn("tune", "Start tuning"), "tune button");
+  s.buttonIn("tune", "Start tuning").click();
+  await until(() => /Tried 0 settings/.test(s.stepText("tune")), "tune result");
+  const text = s.stepText("tune");
+  assert.match(text, /These settings were not saved/);
+  assert.doesNotMatch(text, /are saved on this computer/);
+  assert.doesNotMatch(text, /Stopped/);
   await s.close();
 });
 
@@ -1112,5 +1150,147 @@ test("many 'couldn't reach' warnings become one plain sentence", async () => {
   assert.match(text, /Couldn’t get the latest details for 44 models/);
   assert.match(text, /Scores need a key/);
   assert.doesNotMatch(text, /URLError|org\/model-3/);
+  await s.close();
+});
+
+// ---- round 3 ----
+
+function shareSetup(share) {
+  return setup({
+    routes: {
+      "GET /api/runtime": installed,
+      "POST /api/downloads/plan": downloadedPlan,
+      "POST /api/test": (body, s) =>
+        s.job("test", "Test", {
+          state: "done",
+          result: { verdict: "works", smoke: { ok: true, checks: [] }, speed: { measurement: { id: "abcd1234" }, summary: {}, memory: {} } },
+        }),
+      "POST /api/community/share": share,
+    },
+  });
+}
+async function openShare(s) {
+  await s.open();
+  await until(() => s.buttonIn("test", "Run the full test"), "test button");
+  s.buttonIn("test", "Run the full test").click();
+  await until(() => s.buttonIn("test", "Show what would be shared"), "share offer");
+  s.buttonIn("test", "Show what would be shared").click();
+  await until(() => !/Preparing/.test(s.stepText("test")) && !s.buttonIn("test", "Show what would be shared"), "share shown");
+}
+
+test("sharing says how many results were left out for being from different hardware", async () => {
+  const s = await shareSetup({ json: "{}", issue_url: "https://github.com/x/y/issues/new", fits_in_url: true, records: 1, skipped: 2 });
+  await openShare(s);
+  await until(() => s.step("test").querySelector(".share-json"), "json shown");
+  assert.match(s.stepText("test"), /2 results were measured on different hardware and were left out\./);
+  await s.close();
+  const t = await shareSetup({ json: "{}", issue_url: "https://github.com/x/y/issues/new", fits_in_url: true, records: 1, skipped: 0 });
+  await openShare(t);
+  await until(() => t.step("test").querySelector(".share-json"), "json shown");
+  assert.doesNotMatch(t.stepText("test"), /left out/);
+  await t.close();
+});
+
+test("when every result is left out there is nothing to copy or post", async () => {
+  const s = await shareSetup({ json: "", issue_url: "https://github.com/x/y/issues/new", fits_in_url: true, records: 0, skipped: 1 });
+  await openShare(s);
+  await until(() => /nothing to share/.test(s.stepText("test")), "nothing");
+  assert.match(s.stepText("test"), /different hardware/);
+  assert.equal(s.step("test").querySelector("a"), null);
+  assert.equal(s.step("test").querySelector(".share-json"), null);
+  await s.close();
+});
+
+test("a model from the person's own disk is never offered as a download", async () => {
+  const s = await setup({
+    routes: {
+      "GET /api/runtime": installed,
+      "POST /api/downloads/plan": { ...downloadedPlan, remaining_bytes: 4 * GiB, local: true, local_copy: false },
+    },
+  });
+  await s.open();
+  s.expand("download");
+  await until(() => /isn’t where it was found/.test(s.stepText("download")), "missing file");
+  assert.equal(s.buttonIn("download", "Download"), undefined);
+  assert.ok(s.buttonIn("download", "Check again"));
+  assert.match(s.stepText("download"), /Your file is missing/);
+  await s.close();
+});
+
+test("a short tune reads as a short tune, not a measurement or a plain 'not tested'", async () => {
+  const s = await setup({
+    candidates: [
+      candidate({
+        id: "a",
+        verdict: "unknown",
+        evidence: "tuned",
+        tps: null,
+        tuned: { tps: 31.04, verified: false, same_placement: true },
+      }),
+    ],
+  });
+  const text = s.$("cards").textContent;
+  assert.match(text, /~31\.0 tok\/s/);
+  assert.match(text, /Tuned with a short test/);
+  assert.match(text, /Not tested yet · tuned with a short test/);
+  assert.doesNotMatch(text, /Measured/);
+  assert.doesNotMatch(text, /Speed verified locally/);
+  await s.close();
+});
+
+test("details list every speed number with its own honest label", async () => {
+  const s = await setup({
+    candidates: [
+      candidate({
+        verdict: "runs_well",
+        evidence: "tuned",
+        tps: 25,
+        tuned: { tps: 25, verified: true },
+        speed_interpolated: { tps: 18 },
+        community: { median_tps: 30, n: 1 },
+        ram_headroom_bytes: GiB,
+        kv_bytes: GiB,
+        file_bytes: GiB,
+        memory_max_context: 8192,
+      }),
+    ],
+  });
+  assert.match(s.$("cards").textContent, /Measured after tuning/);
+  s.w.document.querySelector("[data-detail]").click();
+  const text = s.$("detail_content").textContent;
+  assert.match(text, /Measured after tuning, on this computer25\.0 tok\/s/);
+  assert.match(text, /Estimated from your tests at other lengths \(not a test at this length\)~18\.0 tok\/s/);
+  assert.match(text, /Other people’s results: middle value from 1 similar computer \(not this one\)~30\.0 tok\/s/);
+  assert.doesNotMatch(text, /Tuning run/, "a verified tune isn't listed twice");
+  await s.close();
+});
+
+test("every unreadable graphics chip is listed with its reason, and names stay text", async () => {
+  const s = await setup({
+    routes: {
+      "GET /api/state": () => ({
+        hardware: {
+          ram_available: 16e9, ram_total: 32e9, cpu_percent: 1, cores: 8, threads: 16, disk_free: 100e9, processes: [],
+          cpu: "x86_64",
+          gpus: [{ index: 0, name: '<img src=x onerror="window.pwned=1">', available: 8 * GiB, total: 12 * GiB }],
+          other_gpus: [
+            { name: "Intel Arc A380", reason: "Intel drivers do not report free graphics memory in a way we can read." },
+            { name: "<b>Radeon</b>" },
+          ],
+          warnings: [],
+        },
+        demo: false,
+        status: { variants: 1, timestamp: new Date().toISOString(), warnings: [] },
+        definitions: [],
+        scores: [],
+      }),
+    },
+  });
+  const box = s.$("hardware");
+  assert.match(box.textContent, /Also found Intel Arc A380 \(not counted in memory estimates\): Intel drivers do not report/);
+  assert.match(box.textContent, /Also found <b>Radeon<\/b> .*free memory can’t be read/);
+  assert.equal(box.querySelector("img, b"), null);
+  assert.match(box.textContent, /<img src=x/);
+  assert.equal(s.w.pwned, undefined);
   await s.close();
 });

@@ -658,3 +658,21 @@ test("quiz history falls back to the saved model name", async () => {
   assert.match(t.$("#q").textContent, /Old Model · Q5_K_M/);
   assert.ok(!t.$("#q").textContent.includes("gone-1"));
 });
+
+test("a file the catalogue doesn't know is labelled as the person's own file, by its local id", async () => {
+  const t = setup({
+    "GET /api/local-models": {
+      files: [
+        { filename: "my-finetune.gguf", size_bytes: 2e9, source: "custom", variant_id: null, local_variant_id: "local-abc123", gguf: {}, verified: false },
+        { filename: "unknown.gguf", size_bytes: 1e9, source: "custom", variant_id: null, gguf: {}, verified: false },
+      ],
+      locations: [],
+    },
+  });
+  t.w.LocalModels.mount(t.$("#l"), t.ctx);
+  await until(() => t.$$(".qp-file-name").length === 2, "list");
+  const [mine, unknown] = t.$$(".qp-files li");
+  assert.match(mine.textContent, /Your own file/);
+  assert.match(mine.textContent, /you can still use it here/);
+  assert.match(unknown.textContent, /Not in the catalogue/);
+});
