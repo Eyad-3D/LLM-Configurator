@@ -70,34 +70,43 @@ class Fakes:
             "disk_free": 10**12, "enough_space": True}
         m["downloads"].download_variant = self.download
         m["downloads"].remove_variant = lambda variant, directory: self.calls.append(("remove", variant.id, directory)) or 123
-        m["discover"].find_for_variant = lambda store, variant, verify=True: self.local.get(variant.id)
+        m["discover"].find_for_variant = lambda store, variant, verify=True, progress=None, cancel=None: self.local.get(variant.id)
         m["discover"].locations = lambda store=None, extra_dirs=(): [{"source": "hf_cache", "path": str(Path.home() / ".cache/huggingface/hub"), "exists": True},
                                            {"source": "custom", "path": f"{SECRET}/elsewhere", "exists": False}]
         m["discover"].scan = self.scan
         m["discover"].hash_cached = lambda store, path, progress=None, cancel=None: "cd" * 32
+        m["discover"].local_variants = lambda store: [Variant(**r["local_variant"]) for r in store.get("local_files") or []
+                                                      if r.get("local_variant")]
+        m["discover"].add_file = self.add_file
+        m["discover"].remember_hash = lambda store, path, sha256: self.calls.append(("remember_hash", str(path), sha256))
         m["gguf"].variant_from_file = lambda path, sha256=None: Variant(**{**real_variant().to_dict(), "id": f"local:{sha256[:12]}",
                                                                             "source": "local", "sha256": sha256})
+        m["gguf"].shard_paths = lambda path: [Path(path)]
         m["testing"].run_tests = self.run_tests
         m["tuner"].tune = self.tune
         m["llama_server"].LlamaServer = self.server_class()
         m["llama_server"].ServerRegistry = self.registry_class()
-        m["evals"].run_quiz = lambda chat, workload, limit=None, progress=None, cancel=None: {
+        m["evals"].run_quiz = lambda chat, workload, limit=None, progress=None, cancel=None, max_tokens=512: {
             "workload": workload, "correct": 3, "total": 4, "score": 0.75, "ci_low": 0.3, "ci_high": 0.95,
             "items": [{"id": "g1", "ok": True, "expected": "4", "got": chat([{"role": "user", "content": "2+2"}], 16)["text"]}],
             "seconds": 1.0, "note": "Small sample"}
-        m["evals"].needle_test = lambda chat, tokenize, context_tokens, progress=None, cancel=None: {"context_tokens": context_tokens, "found": 3, "total": 3}
+        m["evals"].needle_test = lambda chat, tokenize, context_tokens, positions=(0.1, 0.5, 0.9), progress=None, cancel=None, max_tokens=96, seed=7: {
+            "context_tokens": context_tokens, "found": 3, "total": 3}
         m["evals"].run_comparison = self.run_comparison
         m["evals"].blinded = lambda store, cid: {"items": [{"prompt": "hi", "outputs": [{"slot": "A", "text": "x"}, {"slot": "B", "text": "y"}]}]}
         m["evals"].vote = lambda store, cid, item, slot: {"votes": {slot: 1}, "item": item}
         m["evals"].reveal = lambda store, cid: {"mapping": {"A": "one"}, "tallies": {"one": 1}}
         m["quantcheck"].kl_check = self.kl_check
+        m["quantcheck"].quant_label = lambda path: (re.search(r"(Q\d\w*|F16|BF16)", Path(path).name) or [None])[0]
         m["export"].formats = lambda: [{"id": "llama-server", "label": "Script", "description": "d"}, {"id": "ollama", "label": "Ollama", "description": "d"}]
         m["export"].export = lambda config, variant, fmt, platform="posix", server_command=None: {
             "format": fmt, "filename": "run.sh", "content": f"{server_command} -m {config['model_path']} -t {config['threads']}", "instructions": [], "notes": []}
         m["community"].import_records = lambda store, source=None, text=None, progress=None, cancel=None: (
             store.put("community", {"source": source or "default", "fetched_at": "2026-09", "records": [{"tps": 1}]})
             or {"source": source or "default", "fetched_at": "2026-09", "records": [{"tps": 1}], "rejected": 2})
-        m["community"].share_payload = lambda store, ids: {"json": json.dumps(ids), "issue_url": "https://github.com/Eyad-3D/LLM-Configurator/issues/new"}
+        m["community"].share_payload = lambda store, measurement_ids, hardware=None, variants=None: {
+            "json": json.dumps(measurement_ids), "issue_url": "https://github.com/Eyad-3D/LLM-Configurator/issues/new",
+            "fits_in_url": True, "records": len(measurement_ids), "skipped": 0}
 
     def install(self, store, hardware, progress=None, cancel=None, release=None, allow_unverified=False):
         self.calls.append(("install", allow_unverified))
@@ -124,7 +133,16 @@ class Fakes:
         store.put("local_files", files)
         return files
 
-    def run_tests(self, store, variant, config, commands, kind="full", hardware=None, progress=None, cancel=None):
+    def add_file(self, store, path):
+        record = {"path": str(path), "filename": Path(path).name, "size_bytes": 5, "sha256": "cd" * 32, "source": "custom",
+                  "variant_id": None, "match_note": None, "local_variant_id": "local:cdcdcdcdcdcd", "gguf": {"layers": 2},
+                  "local_variant": {**real_variant().to_dict(), "id": "local:cdcdcdcdcdcd", "source": "local", "sha256": "cd" * 32},
+                  "mtime": 1.0, "verified": False, "added": True}
+        store.update("local_files", lambda items: [r for r in items or [] if r["path"] != record["path"]] + [record], [])
+        return record
+
+    def run_tests(self, store, variant, config, commands, kind="full", hardware=None, progress=None, cancel=None, min_tps=None,
+                  server_factory=None, peak_factory=None, allocations=None):
         self.calls.append(("test", variant.id, config, commands, kind))
         progress({"stage": "smoke", "done": 1, "total": 2, "message": f"Loading {config['model_path']}"})
         store.append("measurements", {"id": "a1b2c3", "variant_id": variant.id, "kind": "speed_test", "tps": 12.0})
@@ -132,7 +150,8 @@ class Fakes:
                 "speed": None, "verdict": "works", "verdict_text": "It works."}
 
     def tune(self, bench_command, variant, base_config, hardware, budget_seconds=300, goal="generation",
-             memory_check=None, progress=None, cancel=None, allow_kv_compression=False):
+             memory_check=None, progress=None, cancel=None, allow_kv_compression=False, run_bench=None, clock=time.monotonic,
+             n_prompt=512, n_gen=128, depth=None, repetitions=2, confirm_repetitions=5, min_gain=0.03, timeout=900):
         self.calls.append(("tune", bench_command, base_config, budget_seconds, goal))
         return {"best": {**base_config, "threads": 8, "flash_attn": "on"}, "baseline": {"tps": 10.0, "pp_tps": 100.0},
                 "best_result": {"tps": 12.0, "pp_tps": 110.0}, "improvement": 1.2,
@@ -161,14 +180,30 @@ class Fakes:
                     LlamaServer.live -= 1
                     self.pid = None
 
-            def chat(self, messages, max_tokens=256, **options):
+            def chat(self, messages, max_tokens=256, temperature=0.0, seed=1, stop=None, timeout=300, cache_prompt=False,
+                     enable_thinking=None, extra=None, chat_template_kwargs=None):
                 return {"text": "4", "finish_reason": "stop", "timings": {}, "usage": {}}
 
-            def tokenize(self, text):
+            def complete(self, prompt, max_tokens=256, temperature=0.0, seed=1, stop=None, timeout=300, cache_prompt=False, extra=None):
+                return {"text": "4", "finish_reason": "stop", "timings": {}, "usage": {}}
+
+            def tokenize(self, text, add_special=False, timeout=60):
                 return list(range(len(text.split())))
+
+            def request(self, path, body=None, timeout=300):
+                return {}
 
             def ready(self):
                 return fakes.release.is_set() is False
+
+            def running(self):
+                return self.pid is not None
+
+            def warnings(self):
+                return []
+
+            def log_tail(self, chars=4000):
+                return ""
 
             def failure_reason(self):
                 return "The model ran out of memory."
@@ -182,7 +217,7 @@ class Fakes:
                 self.state = {"running": False, "base_url": None, "openai_base_url": None, "pid": None, "config": None,
                               "started_at": None, "model": None, "log_tail": ""}
 
-            def start(self, command, config, progress=None, cancel=None):
+            def start(self, command, config, progress=None, cancel=None, timeout=300):
                 fakes.calls.append(("serve", command, config))
                 self.state = {**self.state, "running": True, "base_url": "http://127.0.0.1:8081",
                               "openai_base_url": "http://127.0.0.1:8081/v1", "pid": 7, "config": config,
@@ -198,7 +233,7 @@ class Fakes:
                 return dict(self.state)
         return ServerRegistry
 
-    def run_comparison(self, store, prompts, runners, max_tokens=512, progress=None, cancel=None):
+    def run_comparison(self, store, prompts, runners, max_tokens=512, progress=None, cancel=None, names=None):
         self.calls.append(("compare", sorted(runners), prompts))
         for label, factory in runners.items():
             with factory() as chat:
@@ -206,7 +241,7 @@ class Fakes:
         return "cmp_1"
 
     def kl_check(self, perplexity_command, reference_path, candidates, corpus_path=None, context=512, chunks=None,
-                 config=None, progress=None, cancel=None):
+                 config=None, progress=None, cancel=None, reference_label=None, vocab_size=None, work_dir=None, timeout=3600, run=None):
         self.calls.append(("kl", perplexity_command, reference_path, candidates))
         return {"reference": reference_path, "results": {label: {"mean_kld": 0.01, "plain": "Nearly identical."} for label in candidates},
                 "corpus": "built-in", "notes": [f"Temporary files in {SECRET}/tmp were deleted."]}
@@ -574,7 +609,8 @@ class JobTests(ApiCase):
         done = self.wait(job["id"])
         self.assertTrue(done["result"]["running"], done["error"])
         status, state, raw = self.call("/api/serve")
-        self.assertEqual((state["openai_base_url"], state["config"]["model_path"]), ("http://127.0.0.1:8081/v1", Path(self.variant.filename).name))
+        self.assertEqual((state["openai_base_url"], state["model"]), ("http://127.0.0.1:8081/v1", Path(self.variant.filename).name))
+        self.assertNotIn("model_path", state["config"])
         self.assertNotIn(self.temp.name, raw)
         # No second model load while the server holds memory.
         self.assertEqual(self.call("/api/test", {"candidate_id": c["id"]})[0], 409)
@@ -803,7 +839,8 @@ class FixupTests(ApiCase):
         calls = []
         catalogue = types.ModuleType("llm_configurator.catalogue_fake")
         with patch("llm_configurator.catalogue.add_entry", lambda store, b, g: calls.append(("add", b, g))), \
-             patch("llm_configurator.catalogue.refresh_entry", lambda store, b: calls.append(("refresh", b)) or {"base_repo": b, "variants": 3}), \
+             patch("llm_configurator.catalogue.refresh_entry", lambda store, b, cancel=None: calls.append(("refresh", b, isinstance(cancel, threading.Event)))
+                   or {"base_repo": b, "variants": 3}), \
              patch("llm_configurator.catalogue.remove_entry", lambda store, b: calls.append(("remove", b)) or {"base_repo": b, "removed": True}):
             for body in [{"base_repo": "../x", "gguf_repo": "a/b"}, {"base_repo": "a/b", "gguf_repo": "https://x/y"},
                          {"base_repo": "a/b"}, {"base_repo": "a/b", "gguf_repo": "c/d", "url": "x"}]:
@@ -812,7 +849,7 @@ class FixupTests(ApiCase):
             self.assertEqual((status, job["kind"]), (202, "catalogue_refresh"))
             self.assertEqual(self.wait(job["id"])["result"], {"base_repo": "Org/Model-1", "variants": 3})
             self.assertEqual(self.call("/api/catalogue/remove", {"base_repo": "Org/Model-1"})[1]["removed"], True)
-        self.assertEqual(calls, [("add", "Org/Model-1", "Org/Model-1-GGUF"), ("refresh", "Org/Model-1"), ("remove", "Org/Model-1")])
+        self.assertEqual(calls, [("add", "Org/Model-1", "Org/Model-1-GGUF"), ("refresh", "Org/Model-1", True), ("remove", "Org/Model-1")])
 
     def test_failed_restart_keeps_naming_the_running_model(self):
         first, second = candidate(self.variant), candidate(self.other)
@@ -845,7 +882,7 @@ class FixupTests(ApiCase):
 
     def test_community_share_accepts_up_to_fifty_ids(self):
         seen = []
-        self.fakes.modules["community"].share_payload = lambda store, ids: seen.append(ids) or {"json": "{}", "issue_url": "https://github.com/o/r/issues/new?body=%2Fhome"}
+        self.fakes.modules["community"].share_payload = lambda store, measurement_ids, hardware=None, variants=None: seen.append(measurement_ids) or {"json": "{}", "issue_url": "https://github.com/o/r/issues/new?body=%2Fhome"}
         ids = [f"id_{i}" for i in range(50)]
         status, out, _ = self.call("/api/community/share", {"measurement_ids": ids})
         self.assertEqual((status, seen[-1], out["issue_url"]), (200, ids, "https://github.com/o/r/issues/new?body=%2Fhome"))
@@ -867,6 +904,141 @@ class FixupTests(ApiCase):
         time.sleep(0.05)
         self.server.server_close()
         self.assertTrue(stopped.is_set())
+
+
+class Round3Tests(ApiCase):
+    """docs/v0.4/ROUND3.md, r3-server."""
+
+    def test_fakes_accept_every_argument_of_the_real_modules(self):
+        """The stand-ins must not hide a call that the real module would reject (or a keyword it would get)."""
+        import importlib
+        import inspect
+        stubs = {"llama_server": ["LlamaServer", "ServerRegistry"]}
+        for name, module in self.fakes.modules.items():
+            real = importlib.import_module(f"llm_configurator.{name}")
+            for attr in stubs.get(name) or [a for a in vars(module) if not a.startswith("_")]:
+                fake_obj, real_obj = getattr(module, attr), getattr(real, attr, None)
+                self.assertIsNotNone(real_obj, f"{name}.{attr} does not exist in the real module")
+                pairs = [(attr, fake_obj, real_obj)]
+                if inspect.isclass(real_obj):
+                    pairs = [(f"{attr}.{m}", getattr(fake_obj, m), f) for m, f in vars(real_obj).items()
+                             if inspect.isfunction(f) and (not m.startswith("_") or m == "__init__") and hasattr(fake_obj, m)]
+                for label, fake_fn, real_fn in pairs:
+                    fake_params = inspect.signature(fake_fn).parameters
+                    real_params = inspect.signature(real_fn).parameters
+                    fake_names = [p for p in fake_params if p != "self"]
+                    real_names = [p for p in real_params if p != "self"]
+                    self.assertEqual(fake_names, real_names, f"{name}.{label}")
+                    required = lambda params: {p for p, v in params.items() if v.default is v.empty and v.kind not in (v.VAR_POSITIONAL, v.VAR_KEYWORD)}
+                    self.assertEqual(required(fake_params) - {"self"}, required(real_params) - {"self"}, f"{name}.{label} required arguments")
+
+    def test_favicon_is_an_empty_answer_not_an_error(self):
+        with urlopen(Request(self.url + "/favicon.ico")) as response:
+            self.assertEqual((response.status, response.read()), (204, b""))
+        self.assertEqual(self.call("/favicon.ico", headers={"Host": "evil.example"}, token=False)[0], 403)
+
+    def test_quant_check_gets_the_comparison_hardware(self):
+        seen = {}
+        original = app.quant_check_job
+        def spy(store, reference, others, hardware=None):
+            seen["hardware"] = hardware
+            return original(store, reference, others, hardware)
+        self.remember(candidate(self.variant))
+        self.downloaded(self.variant)
+        self.downloaded(self.other)
+        with patch("llm_configurator.app.quant_check_job", spy):
+            job = self.call("/api/quality/quant-check", {"reference_variant_id": self.other.id, "variant_ids": [self.variant.id]})[1]
+            self.assertEqual(self.wait(job["id"])["state"], "done")
+        self.assertEqual(seen["hardware"]["fingerprint"], "fp")
+
+    def test_local_models_carry_the_local_variant_id_and_never_a_path(self):
+        self.fakes.add_file(self.store, f"{SECRET}/My Models/mine.gguf")
+        status, result, raw = self.call("/api/local-models")
+        self.assertEqual(status, 200)
+        mine = result["files"][0]
+        self.assertEqual((mine["filename"], mine["local_variant_id"], mine["match_note"]), ("mine.gguf", "local:cdcdcdcdcdcd", None))
+        self.assertNotIn(SECRET, raw)
+        self.assertNotIn("My Models", raw)
+        self.assertNotIn("path", mine)
+        self.assertEqual([l["source"] for l in result["locations"]], ["hf_cache", "custom"])
+        done = self.wait(self.call("/api/local-models/scan", {})[1]["id"])
+        self.assertIn("local_variant_id", done["result"][0])
+
+    def test_refresh_passes_cancel_and_shows_standard_progress(self):
+        started, seen = threading.Event(), {}
+        def refresh(store, include_scores=True, include_models=True, progress=None, cancel=None):
+            seen["cancel"] = cancel
+            progress({"stage": "metadata", "done": 1, "total": 3, "message": f"Reading {SECRET}/x"})
+            started.set()
+            while not cancel.wait(0.01):
+                pass
+            check_cancel(cancel)
+        with patch("llm_configurator.server.refresh", refresh):
+            self.assertEqual(self.call("/api/refresh", {})[0], 202)
+            self.assertTrue(started.wait(5))
+            status, state, raw = self.call("/api/refresh")
+            self.assertEqual(state["progress"], {"stage": "metadata", "done": 1, "total": 3, "message": "Reading x"})
+            self.assertEqual(self.call("/api/refresh/cancel", {})[0], 200)
+            deadline = time.monotonic() + 5
+            while self.call("/api/refresh")[1]["running"] and time.monotonic() < deadline:
+                time.sleep(0.02)
+            state = self.call("/api/refresh")[1]
+        self.assertTrue(seen["cancel"].is_set())
+        self.assertEqual((state["running"], state["result"]["cancelled"]), (False, True))
+        self.assertEqual(self.call("/api/refresh/cancel", {"x": 1})[0], 400)
+
+    def test_shutdown_cancels_a_running_refresh(self):
+        self.server.server_close()
+        self.assertTrue(self.server.refresh_cancel["event"].is_set())
+
+    def test_community_share_passes_skipped_through(self):
+        self.fakes.modules["community"].share_payload = lambda store, measurement_ids, hardware=None, variants=None: {
+            "json": "{}", "issue_url": "https://github.com/o/r/issues/new", "fits_in_url": False, "records": 1, "skipped": 2}
+        status, shared, _ = self.call("/api/community/share", {"measurement_ids": ["a1", "b2", "c3"]})
+        self.assertEqual((status, shared["skipped"], shared["fits_in_url"], shared["records"]), (200, 2, False, 1))
+
+    def test_serve_status_has_no_model_or_draft_path(self):
+        c = candidate(self.variant)
+        self.remember(c)
+        self.downloaded()
+        registry = self.fakes.modules["llama_server"].ServerRegistry
+        original = registry.start
+        def with_draft(this, command, config, **options):
+            return original(this, command, {**config, "draft_model_path": f"{SECRET}/draft.gguf"}, **options)
+        with patch.object(registry, "start", with_draft):
+            done = self.wait(self.call("/api/serve/start", {"candidate_id": c["id"]})[1]["id"])
+        status, state, raw = self.call("/api/serve")
+        for shown in (state, done["result"]):
+            self.assertFalse([k for k in shown["config"] if k.endswith("_path")], shown["config"])
+            self.assertEqual(shown["model"], Path(self.variant.filename).name)
+        self.assertNotIn("draft.gguf", raw)
+
+    def test_launch_configs_get_the_runtime_backend(self):
+        seen = []
+        original = app.launch_config
+        def spy(store, chosen, hardware, model_path=None, tuned=False, **overrides):
+            seen.append(overrides.get("runtime_backend"))
+            return original(store, chosen, hardware, model_path, tuned, **overrides)
+        c = candidate(self.variant)
+        self.remember(c)
+        self.downloaded()
+        self.store.put("runtime", {"installed": True, "backend": "vulkan"})
+        with patch("llm_configurator.app.launch_config", spy):
+            done = self.wait(self.call("/api/serve/start", {"candidate_id": c["id"]})[1]["id"])
+        self.assertEqual(done["state"], "done", done["error"])
+        # The saved-tune probe uses the cached build; the launch itself checks the runtime again (the fake says cpu).
+        self.assertEqual(seen, ["vulkan", "cpu"])
+
+    def test_an_app_that_finds_the_backend_itself_is_called_without_it(self):
+        from llm_configurator import launch
+        def finds_it_itself(store, chosen, hardware, model_path=None, tuned=False, **overrides):
+            return launch.from_candidate(chosen, model_path, hardware, runtime_backend="cpu", **overrides)
+        c = candidate(self.variant)
+        self.remember(c)
+        self.downloaded()
+        with patch("llm_configurator.app.launch_config", finds_it_itself):
+            done = self.wait(self.call("/api/serve/start", {"candidate_id": c["id"]})[1]["id"])
+        self.assertEqual(done["state"], "done", done["error"])
 
 
 class ServeProcessTests(unittest.TestCase):
@@ -938,7 +1110,8 @@ class RealRuntimeHttpTests(unittest.TestCase):
                 started = job("/api/serve/start", {"candidate_id": chosen["id"]})
                 self.assertTrue(started["result"]["running"], started["error"])
                 status = call("/api/serve")
-                self.assertEqual((status["candidate_id"], status["config"]["model_path"]), (chosen["id"], model.name))
+                self.assertEqual((status["candidate_id"], status["model"]), (chosen["id"], model.name))
+                self.assertNotIn("model_path", status["config"])
                 with urlopen(status["base_url"] + "/health", timeout=10) as response:
                     self.assertEqual(response.status, 200)
                 self.assertFalse(call("/api/serve/stop", {})["running"])

@@ -31,7 +31,7 @@ from .catalogue import definitions, refresh, test_connection
 from . import credentials
 from .hardware import scan
 from .calibration import calibrate, valid
-from .domain import check_cancel
+from .domain import Cancelled, check_cancel
 from .jobs import JobManager
 from .storage import models_dir, runtime_dir
 
@@ -188,6 +188,8 @@ class AppServer(ThreadingHTTPServer):
         llama-perplexity child before the interpreter exits.
         """
         try:
+            if getattr(self, "refresh_cancel", None) is not None:
+                self.refresh_cancel["event"].set()  # a model list refresh must not keep fetching after the app closes
             jobs = getattr(self, "jobs", None)
             cancelled = []
             for job in jobs.list() if jobs else []:
@@ -219,6 +221,9 @@ def make_server(store, port=8765, demo=False):
     served = {"variant_id": None, "candidate_id": None}
     comparisons = {}  # comparison_id -> {label: candidate_id}, so reveal can name candidates
     catalogue_lock = threading.Lock()
+    # One Event per refresh, so a late cancel of the previous refresh can't stop the next one. Set by
+    # POST /api/refresh/cancel and at shutdown.
+    refresh_cancel = {"event": threading.Event()}
 
     def roots():
         # Discovered folders and settings can change while the app runs; refresh the list now and then.
@@ -280,12 +285,34 @@ def make_server(store, port=8765, demo=False):
             raise Conflict("This model came from a file on your computer, and the file is no longer there. "
                            "Put it back, or scan for models again.")
 
+    def runtime_backend(fresh=False):
+        """Backend of the installed llama.cpp build ("cuda", "vulkan", ...), so a Vulkan build on an NVIDIA
+        card never gets CUDA settings. The cached detect() result is enough except right before a launch."""
+        cached = store.get("runtime") or {}
+        if not fresh:
+            return cached.get("backend")
+        try:
+            from . import runtime_install
+            return (runtime_install.detect(store) or {}).get("backend")
+        except Exception:
+            return cached.get("backend")
+
+    def launch_config(chosen, hardware, path, tuned, fresh=False, **overrides):
+        """app.launch_config with the runtime backend. An app version that finds the backend itself
+        (and so already passes it on) gets called without it."""
+        try:
+            return app.launch_config(store, chosen, hardware, path, tuned, runtime_backend=runtime_backend(fresh), **overrides)
+        except TypeError as error:
+            if "runtime_backend" not in str(error):
+                raise
+            return app.launch_config(store, chosen, hardware, path, tuned, **overrides)
+
     def use_tune(body, chosen, hardware):
         """An explicit `tuned` wins; otherwise use the saved tune for this candidate when one exists."""
         if "tuned" in body:
             return boolean(body, "tuned")
         try:
-            app.launch_config(store, chosen, hardware or {}, None, True)
+            launch_config(chosen, hardware or {}, None, True)
             return True
         except (ValueError, KeyError, TypeError):
             return False
@@ -307,8 +334,8 @@ def make_server(store, port=8765, demo=False):
             status = IDLE if current is None else current.status()
         status = {**IDLE, **status}
         if isinstance(status.get("config"), dict):
-            status["config"] = {k: (PureWindowsPath(v).name if k.endswith("_path") and isinstance(v, str) else v)
-                                for k, v in status["config"].items()}
+            # No model or draft path at all (not even its file name): `model` already names what runs.
+            status["config"] = {k: v for k, v in status["config"].items() if not k.endswith("_path")}
         active = status.get("running") or status.get("starting")
         return {**status, "candidate_id": served["candidate_id"] if active else None,
                 "variant_id": served["variant_id"] if active else None}
@@ -365,7 +392,7 @@ def make_server(store, port=8765, demo=False):
         server_registry = registry()
         path = app.require_model(store, found)
         port = preferred_port()
-        config = app.launch_config(store, chosen, hardware, path, tuned, **({"port": port} if port else {}))
+        config = launch_config(chosen, hardware, path, tuned, fresh=True, **({"port": port} if port else {}))
         command = app.binary(store, "llama-server")
         previous = dict(served)
         served.update(variant_id=found.id, candidate_id=chosen["id"])
@@ -430,6 +457,14 @@ def make_server(store, port=8765, demo=False):
                 "speed": {name(l): v for l, v in (out.get("speed") or {}).items()},
                 "labels": {name(l): l for l in ids}}
 
+    def page_file(record):
+        """app.page_file plus the ids the page needs to use a scanned model (never its folder)."""
+        shown = dict(app.page_file(record))
+        for key in ("local_variant_id", "match_note"):
+            if key not in shown and isinstance(record.get(key), (str, type(None))):
+                shown[key] = record.get(key)
+        return shown
+
     def get_route(path):
         if path == "/api/credentials":
             return 200, credentials.status()
@@ -459,7 +494,7 @@ def make_server(store, port=8765, demo=False):
             return 200, runtime_install.detect(store)
         if path == "/api/local-models":
             from . import discover
-            return 200, {"files": [app.page_file(f) for f in store.get("local_files", [])],
+            return 200, {"files": [page_file(f) for f in store.get("local_files", [])],
                          "locations": [app.page_location(l) for l in discover.locations(store)]}
         if path == "/api/quality/results":
             return 200, {"results": store.get("quality_results", [])[-200:]}
@@ -496,7 +531,7 @@ def make_server(store, port=8765, demo=False):
             if active:
                 return 202, active[0]
             scan_files = app.scan_job(store)
-            return submit("local_scan", "Look for models on this computer", lambda p, c: [app.page_file(f) for f in scan_files(p, c)], exclusive="scan")
+            return submit("local_scan", "Look for models on this computer", lambda p, c: [page_file(f) for f in scan_files(p, c)], exclusive="scan")
         if path == "/api/downloads/plan":
             fields(body, ["variant_id"])
             no_demo()
@@ -601,7 +636,10 @@ def make_server(store, port=8765, demo=False):
             if reference.id in {v.id for v in others}:
                 raise ValueError("Pick a different reference than the models you check")
             compute_free()
-            return submit("quant_check", f"Compression check for {reference.name}", app.quant_check_job(store, reference, others),
+            with latest_lock:
+                hardware = latest["hardware"]
+            # The latest comparison's hardware scan saves the job a second scan; without one, the job scans itself.
+            return submit("quant_check", f"Compression check for {reference.name}", app.quant_check_job(store, reference, others, hardware),
                           subject={"variant_id": reference.id, "variant_ids": [v.id for v in others]}, exclusive="compute")
         if path == "/api/export":
             fields(body, ["candidate_id", "format"], ["platform", "tuned"])
@@ -664,7 +702,7 @@ def make_server(store, port=8765, demo=False):
                         raise ValueError("A model list refresh is still running. Try again when it finishes.")
                 try:
                     progress({"stage": "fetching", "done": 0, "total": None, "message": f"Reading {base_repo} from Hugging Face…"})
-                    return catalogue.refresh_entry(store, base_repo)
+                    return app._call(catalogue.refresh_entry, store, base_repo, cancel=cancel)
                 finally:
                     forget()
                     refresh_lock.release()
@@ -729,6 +767,11 @@ def make_server(store, port=8765, demo=False):
             if not self.local_host():
                 return self.send(403, {"error": "Local access only"})
             path = urlparse(self.path).path
+            if path == "/favicon.ico":  # browsers ask on every page load; answer with no icon rather than an error
+                self.send_response(204)
+                self.send_header("Cache-Control", "max-age=86400")
+                self.end_headers()
+                return
             if path in STATIC:
                 name, mime = STATIC[path]
                 try:
@@ -811,12 +854,16 @@ def make_server(store, port=8765, demo=False):
                         raise ValueError("include_models must be a boolean")
                     if not refresh_lock.acquire(blocking=False):
                         return self.send(409, {"error": "Metadata refresh already running"})
+                    cancel = refresh_cancel["event"] = threading.Event()
                     refresh_state.update(running=True, result=None, progress=None)
                     def progress(value):
-                        refresh_state["progress"] = value
+                        refresh_state["progress"] = value  # {stage, done, total, message}; scrubbed when sent
                     def run():
                         try:
-                            refresh_state["result"] = refresh(store, include_scores=include_scores, include_models=include_models, progress=progress)
+                            refresh_state["result"] = app._call(refresh, store, include_scores=include_scores, include_models=include_models,
+                                                                progress=progress, cancel=cancel)
+                        except Cancelled:
+                            refresh_state["result"] = {"warnings": ["Refresh cancelled. The model list keeps what it had."], "cancelled": True}
                         except Exception as error:
                             refresh_state["result"] = {"warnings": [f"Refresh failed: {type(error).__name__}: {error}"]}
                         finally:
@@ -825,6 +872,11 @@ def make_server(store, port=8765, demo=False):
                             refresh_lock.release()
                     threading.Thread(target=run, daemon=True).start()
                     return self.send(202, refresh_state)
+                if path == "/api/refresh/cancel":
+                    fields(body)
+                    if refresh_state["running"]:
+                        refresh_cancel["event"].set()
+                    return self.send(200, refresh_state)
             except (ValueError, TypeError, KeyError, OSError) as error:
                 return self.send(400, {"error": str(error)})
             except Exception as error:
@@ -833,6 +885,7 @@ def make_server(store, port=8765, demo=False):
 
     server = AppServer(("127.0.0.1", port), Handler)
     server.jobs, server.registry, server.registry_lock = jobs, None, threading.Lock()
+    server.refresh_cancel = refresh_cancel
     server.latest = latest
     return server
 
@@ -840,13 +893,11 @@ def make_server(store, port=8765, demo=False):
 def serve(store, port=8765, demo=False, open_browser=True):
     server = make_server(store, port, demo)
     url = f"http://127.0.0.1:{server.server_port}"
-    print(f"LLM Configurator: {url}\nPress Ctrl+C to stop. Runs on this computer only.", flush=True)
-    if open_browser:
-        webbrowser.open(url)
     def stop(*_):
         raise KeyboardInterrupt
     # Closing the terminal or `kill` must take the same clean path as Ctrl+C: the user's llama-server
     # runs in its own process group and would otherwise keep its memory and port with no owner.
+    # Installed before the address is printed, so a stop right after start-up is clean too.
     if threading.current_thread() is threading.main_thread():
         for name in ("SIGTERM", "SIGHUP", "SIGBREAK"):
             number = getattr(signal, name, None)
@@ -856,6 +907,9 @@ def serve(store, port=8765, demo=False, open_browser=True):
                 except (OSError, ValueError):
                     pass
     try:
+        print(f"LLM Configurator: {url}\nPress Ctrl+C to stop. Runs on this computer only.", flush=True)
+        if open_browser:
+            webbrowser.open(url)
         server.serve_forever()
     except KeyboardInterrupt:
         pass
