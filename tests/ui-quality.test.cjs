@@ -314,7 +314,7 @@ test("blind compare: validation, voting, no labels before reveal, then reveal an
   const reveal = t.byText("Reveal which model wrote each answer", panel);
   assert.equal(reveal.disabled, true, "reveal waits for votes or skip");
   t.byText("A is best", panel).click();
-  await until(() => panel.textContent.includes("You picked answer A."), "vote recorded");
+  await until(() => panel.textContent.includes("Vote saved: answer A."), "vote recorded");
   assert.deepEqual(votes, [{ comparison_id: "cmp-1", item: 0, slot: "A" }]);
   assert.deepEqual(leaks(), [], "vote response is not shown");
   assert.equal(reveal.disabled, true);
@@ -329,6 +329,8 @@ test("blind compare: validation, voting, no labels before reveal, then reveal an
     "Written by Beta 3B · Q4_K_M", "Written by Alpha 8B · Q4_K_M", "Written by Alpha 8B · Q8_0",
   ]);
   assert.match(panel.textContent, /Alpha 8B · Q4_K_M: 1 vote/);
+  assert.match(panel.textContent, /Too close to call: the top two are within one vote/);
+  assert.equal(t.w.document.activeElement.textContent, "Your votes", "focus moves to the result");
   assert.equal(votes.length, 1, "skipped prompts send no vote");
   t.byText("Start a new comparison", panel).click();
   assert.ok(t.byText("Run the models", panel));
@@ -339,7 +341,7 @@ test("blind compare needs two options and reports job errors", async () => {
   t.ctx.candidates = [candidates[0]];
   t.ctx.candidate = candidates[0];
   t.w.QualityPanel.mount(t.$("#q"), t.ctx);
-  assert.match(tabPanel(t, "Try my prompts").textContent, /at least two options/);
+  assert.match(tabPanel(t, "Try my prompts").textContent, /at least two models to compare/);
 
   const f = setup({
     "POST /api/quality/compare": () => {
@@ -475,4 +477,64 @@ test("static assets keep the strict CSP rules", () => {
   assert.ok(!/setAttribute\(\s*["']on/.test(js));
   assert.match(css, /prefers-reduced-motion: reduce/);
   assert.match(css, /prefers-color-scheme: dark/);
+});
+
+test("reveal waits for a vote still being saved, even after skipping the rest", async () => {
+  let release;
+  const gate = new Promise((resolve) => (release = resolve));
+  const t = setup(
+    {
+      "POST /api/quality/compare": job("v", "done", { result: { comparison_id: "v1" } }),
+      "GET /api/quality/compare/v1": { items: [0, 1].map((i) => ({ prompt: "p" + i, outputs: [{ slot: "A", text: "a" }, { slot: "B", text: "b" }] })) },
+      "POST /api/quality/vote": async () => {
+        await gate;
+        return {};
+      },
+    },
+  );
+  t.w.QualityPanel.mount(t.$("#q"), t.ctx);
+  const panel = tabPanel(t, "Try my prompts");
+  t.$$('fieldset input[type="checkbox"]', panel)[0].click();
+  t.$("textarea", panel).value = "hi";
+  t.byText("Run the models", panel).click();
+  await until(() => panel.textContent.includes("Prompt 1 of 2"), "blind view");
+  t.byText("A is best", panel).click();
+  t.byText("Skip voting on the rest", panel).click();
+  const reveal = t.byText("Reveal which model wrote each answer", panel);
+  assert.equal(reveal.disabled, true, "still saving the first vote");
+  const pressed = t.$$('[aria-pressed="true"]', panel).map((b) => b.textContent);
+  assert.deepEqual(pressed, ["No preference"], "only the skipped prompt is marked skipped");
+  release();
+  await until(() => !reveal.disabled, "vote saved");
+  assert.deepEqual(t.$$('[aria-pressed="true"]', panel).map((b) => b.textContent), ["A is best", "No preference"]);
+  assert.equal(t.$(".qp-answer-text", panel).getAttribute("tabindex"), "0", "long answers are keyboard-scrollable");
+});
+
+test("a failed poll is retried instead of abandoning the job", async () => {
+  let n = 0;
+  const t = setup({ "POST /api/local-models/scan": job("r1", "running") });
+  t.ctx.api = ((inner) => async (path, o) => {
+    if (path === "/api/jobs/r1") {
+      n++;
+      if (n === 1) throw new Error("Failed to fetch");
+      return job("r1", "done", { result: [] });
+    }
+    return inner(path, o);
+  })(t.ctx.api);
+  t.w.LocalModels.mount(t.$("#l"), t.ctx);
+  t.byText("Scan my disk").click();
+  await until(() => t.$("#l .qp-status").textContent.includes("Scan finished"), "retry then done");
+  assert.equal(n, 2);
+});
+
+test("local models replaces Loading with a message when the list fails", async () => {
+  const t = setup({
+    "GET /api/local-models": () => {
+      throw new Error("Demo mode has no local files.");
+    },
+  });
+  t.w.LocalModels.mount(t.$("#l"), t.ctx);
+  await until(() => t.$("#l").textContent.includes("Couldn't load the list"), "error state");
+  assert.ok(!t.$("#l").textContent.includes("Loading…"));
+  assert.match(t.$("#l .qp-status").textContent, /Demo mode has no local files/);
 });

@@ -6,10 +6,10 @@ Branch: `claude/v04-ui-quality`. Files: `src/llm_configurator/static/quality.js`
 
 - **`window.QualityPanel.mount(container, ctx)`**: a panel with three tabs.
   - **Quick quiz**: pick a model (from `ctx.candidates`, default `ctx.candidate`) and a question type (default `ctx.workload`). There's an optional long-document recall test. It runs a job and shows "7 of 10 right · 70%", the likely range (`ci_low`–`ci_high`) as text and as a bar, and each question in a `<details>`. It also shows "Scores so far" (latest quiz per variant for the chosen workload, from `/api/quality/results`). When the top two ranges overlap it says **"Too close to call"**. It only names a clear winner when the ranges don't overlap.
-  - **Try my prompts** (blind compare): pick 2–3 models. Type 1–5 prompts (each ≤ 4000 characters, counted in code points like Python's `len`, with a live counter; there's also a `maxlength`). Then run the job. The view then switches to a blind voting screen: the prompt, answers "Answer A/B/C" in the order the server gives, and buttons "A is best", "B is best", "C is best" and "No preference", plus "Skip voting on the rest". **Reveal** stays disabled until every prompt has a vote or a skip. After reveal, each answer shows "Written by <model>", then vote tallies and a "treat a one-vote lead as a tie" hint.
+  - **Try my prompts** (blind compare): pick 2–3 models. Type 1–5 prompts (each ≤ 4000 characters, counted in code points like Python's `len`, with a live counter; there's also a `maxlength`). Then run the job. The view then switches to a blind voting screen: the prompt, answers "Answer A/B/C" in the order the server gives, and buttons "A is best", "B is best", "C is best" and "No preference", plus "Skip voting on the rest". **Reveal** stays disabled until every prompt has a vote or a skip, and while any vote is still being saved. Focus moves to the next prompt after a vote and to the results after reveal. Long answers scroll and can be focused with the keyboard. After reveal, each answer shows "Written by <model>", then vote tallies. "Too close to call" appears when the top two are within one vote.
   - **Compression check**: the reference defaults to the **largest file of the same model** as `ctx.candidate`. If `/api/local-models` knows about on-disk copies, the largest on-disk one wins. The candidates list shows only other files of the same model (same `repo`, else `name`), 1–3 of them, with the current candidate pre-ticked. A warning covers disk space and time. Each result shows a plain sentence (the server's `plain`, or built from `same_top_p`). A "Show the numbers" `<details>` lists same top word %, mean/median/99% KL, perplexity reference → file, and mean Δp, each with a plain explanation. It also shows the server's `notes`.
 - **`window.LocalModels.mount(container, ctx)`**: lists `/api/local-models` files. Each row shows the name (GGUF name or file name), size, quant, layers and the friendly source folder. It also shows a "Known model" or "Not in the catalogue" chip and how the file was checked (fingerprint vs name+size). A "Where we looked" `<details>` lists each folder, and a **Scan my disk** button runs the scan job and reloads the list.
-- **Jobs**: each long job gets a live status line (`role=status`, `aria-live=polite`), a `<progress>` (with a value when `progress.total` is known, indeterminate otherwise) and a **Stop** button (`POST /api/jobs/<id>/cancel`). Failed jobs show `job.error`. Cancelled jobs show "Stopped before it finished". API errors (400/404/409, including demo mode and "Compare again first") show the server's plain `error` text. Network failures get a "check the app is still running" message.
+- **Jobs**: each long job gets a status line (live, but it only announces start, each new `progress.stage` and the end; the per-poll `message` goes in a separate non-live line) (`role=status`, `aria-live=polite`), a `<progress>` (with a value when `progress.total` is known, indeterminate otherwise) and a **Stop** button (`POST /api/jobs/<id>/cancel`). Up to 4 failed polls in a row are retried before giving up. Failed jobs show `job.error`. Cancelled jobs show "Stopped before it finished". API errors (400/404/409, including demo mode and "Compare again first") show the server's plain `error` text. Network failures get a "check the app is still running" message.
 - **Safety and honesty**:
   - All text goes in via `textContent` (a small `h()` DOM builder). There's no `innerHTML`, no inline handlers and no inline styles in markup (CSP-safe). The range bars set `element.style.left/width` through the CSSOM, which CSP allows even without `'unsafe-inline'`.
   - The blind view keeps only slot letters and answer text. No model id, name, variant or quant appears in its DOM text or attributes until reveal. A test checks the whole panel's `outerHTML`. The `/api/quality/vote` response (tallies, possibly keyed by model) is deliberately ignored before reveal.
@@ -70,6 +70,10 @@ A POST that returns a non-job object (no `id`/`state`) is treated as an immediat
 
 ## Known gaps
 
+- If the panel is unmounted while a comparison runs (or before voting finishes), the `comparison_id` lives only in memory, so the user can't return to that vote. A later version could list open comparisons via a `GET /api/quality/compare` listing.
+- A vote can't be changed once saved. The UI says "Vote saved" and moves focus to the next prompt.
+- Job progress `message` text is shown as-is (in a non-live line; the live region announces only start, stage changes and the end). **The compare job's progress messages must not say which model is in which slot.** Naming the model currently answering is fine, because slots are shuffled per item.
+
 - The reveal and needle result shapes aren't pinned in the contract. I accept several shapes (above). If `api`/`evals` choose another one, `slotLabel()` or `renderNeedle()` in `quality.js` needs a line.
 - Unit assumptions:
   - `score`, `ci_low`, `ci_high` and `same_top_p` are treated as fractions when ≤ 1, otherwise as percentages.
@@ -94,7 +98,7 @@ A POST that returns a non-job object (no `id`/`state`) is treated as an immediat
 
 ## How I tested
 
-- `node --test tests/ui-quality.test.cjs`: 13 tests in jsdom with a mocked `ctx.api` and job sequences. They cover:
+- `node --test tests/ui-quality.test.cjs`: 16 tests in jsdom with a mocked `ctx.api` and job sequences. They cover:
   - mount/unmount (polling stops, the DOM is cleared, a second mount replaces the first)
   - tab keyboard navigation
   - the quiz job flow, with the range text and bar, the tie and clear-winner verdicts, and model output rendered as text, not HTML
@@ -102,8 +106,10 @@ A POST that returns a non-job object (no `id`/`state`) is treated as an immediat
   - the full blind compare: validation of model count, empty prompts, the 4001-character counter and error, and the 5-prompt cap. The request body; **no label leakage in `outerHTML` before reveal**, even after a vote whose response contains labels; the reveal mapping and tallies; and restarting
   - compression defaults, same-model filtering, on-disk marks, results and numbers, and validation
   - the local models list, scan job and empty state, plus the built-in fetch fallback sending `X-Session-Token`
+  - a vote still being saved blocks Reveal even after "Skip the rest"; a failed poll is retried; a failed list load replaces "Loading…"
   - a static check for CSP-unsafe APIs
 - `npm test` (existing ui-flow, 18 tests) and `python3 -m unittest discover -s tests` (72 tests) pass. The keyring panic needed `pip install --ignore-installed cryptography`.
+- A review subagent checked accessibility, race conditions and copy. I fixed its findings (vote race, poll retry, focus handling, noisy live region, unlabelled progress bar, keyboard-scrollable answers, tie rule, jargon), except the ones listed under Known gaps.
 - Playwright screenshots of a standalone harness (host `style.css` + `quality.css`) at 360 px and 1280 px, light and simulated dark, for every tab state. I fixed the issues they showed: tab labels clipped at 360 px, low-contrast reveal text in dark mode, and Δp units.
 
 ## llama.cpp facts assumed

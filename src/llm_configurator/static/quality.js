@@ -115,19 +115,25 @@
       },
       watch(job, onUpdate) {
         return new Promise((resolve, reject) => {
-          const step = (current) => {
-            if (!alive) return;
-            onUpdate(current);
-            if (FINAL.has(current.state)) return resolve(current);
+          let misses = 0;
+          const later = (fn, ms) => {
             const timer = setTimeout(() => {
               timers.delete(timer);
-              if (!alive) return;
-              api(`/api/jobs/${encodeURIComponent(job.id)}`).then(
-                step,
-                reject,
-              );
-            }, pollMs);
+              if (alive) fn();
+            }, ms);
             timers.add(timer);
+          };
+          // A single failed poll is not a failed job: retry a few times first.
+          const poll = () =>
+            api(`/api/jobs/${encodeURIComponent(job.id)}`).then(step, (error) =>
+              ++misses >= 5 ? reject(error) : later(poll, pollMs * 2),
+            );
+          const step = (current) => {
+            if (!alive) return;
+            misses = 0;
+            onUpdate(current);
+            if (FINAL.has(current.state)) return resolve(current);
+            later(poll, pollMs);
           };
           step(job);
         });
@@ -144,10 +150,13 @@
   // A status line, progress bar and Stop button for one long job.
   function jobBox(session) {
     const text = h("p", { class: "qp-status", role: "status", "aria-live": "polite" });
-    const bar = h("progress", { class: "qp-progress", max: "1", hidden: true });
+    // Per-poll detail ("Question 3 of 10") is not live, so screen readers aren't flooded.
+    const detail = h("p", { class: "hint qp-detail" });
+    const bar = h("progress", { class: "qp-progress", max: "1", hidden: true, "aria-label": "Progress" });
     const stop = h("button", { type: "button", class: "secondary", hidden: true, text: "Stop" });
-    const root = h("div", { class: "qp-job" }, text, h("div", { class: "qp-job-row" }, bar, stop));
+    const root = h("div", { class: "qp-job" }, text, detail, h("div", { class: "qp-job-row" }, bar, stop));
     let current = null;
+    let stage = null;
     stop.addEventListener("click", async () => {
       if (!current) return;
       stop.disabled = true;
@@ -168,7 +177,12 @@
         bar.removeAttribute("value");
         return;
       }
-      text.textContent = p.message || p.stage || "Working…";
+      const key = `${job.state}|${p.stage || ""}`;
+      if (key !== stage) {
+        stage = key;
+        text.textContent = p.stage ? `Working: ${String(p.stage).replace(/_/g, " ")}…` : "Working…";
+      }
+      detail.textContent = p.message || "";
       bar.hidden = false;
       if (total > 0) {
         bar.max = total;
@@ -184,6 +198,8 @@
       async run(start, labels) {
         text.classList.remove("qp-error");
         text.textContent = labels.starting;
+        detail.textContent = "";
+        stage = null;
         bar.hidden = true;
         const first = await start();
         const job = first && first.job ? first.job : first;
@@ -204,8 +220,10 @@
           throw new Error(final.error || "The check failed without saying why. Try again.");
         } finally {
           current = null;
+          if (stop.contains(document.activeElement)) text.focus?.();
           stop.hidden = true;
           bar.hidden = true;
+          detail.textContent = "";
         }
       },
     };
@@ -271,7 +289,7 @@
         h("div", {}, h("label", { for: workload.id, text: "Type of questions" }), workload),
       ),
       h("label", { class: "check qp-check", for: needle.id }, needle,
-        " Also test long-document recall (we hide one fact in a long text and ask for it back)"),
+        " Also test memory for long documents. We hide one fact in a long text and ask for it back."),
       h("div", { class: "qp-actions" }, start),
       job.root,
       result,
@@ -334,11 +352,11 @@
           rows.map((row) => h("li", {},
             h("span", { class: "qp-score-name", text: modelName(ctx, row.key) }),
             h("span", { text: `${fmtPct(row.r.score)} (${rangeText(row.r)})` }),
-            rangeBar(row.r)))),
+            row.r.ci_low == null || row.r.ci_high == null ? null : rangeBar(row.r)))),
       );
     }
     function renderResult(r, needleResult) {
-      const others = quizRows().filter((row) => row.key !== r.variant_id);
+      const others = quizRows().filter((row) => row.key !== r.variant_id && row.key !== r.candidate_id);
       const tie = others.find((row) => overlaps(row.r, r));
       const items = r.items || [];
       fill(result, 
@@ -348,7 +366,7 @@
             ? "The likely range for this score is unknown."
             : `The true score is likely between ${fmtPct(r.ci_low)} and ${fmtPct(r.ci_high)}. The quiz is small, so the real score could be anywhere in that range.`,
         }),
-        rangeBar(r),
+        r.ci_low == null || r.ci_high == null ? null : rangeBar(r),
         tie ? h("p", { class: "qp-verdict", text: `Too close to call against ${modelName(ctx, tie.key)}: the ranges overlap.` }) : null,
         r.note ? h("p", { class: "hint", text: r.note }) : null,
         needleResult ? renderNeedle(needleResult) : null,
@@ -370,7 +388,7 @@
         h("h4", { text: "Long-document recall" }),
         h("p", {
           text: rows.length
-            ? `Found the hidden fact ${found} of ${rows.length} times${n.context_tokens ? ` in about ${Number(n.context_tokens).toLocaleString()} tokens of text` : ""}.`
+            ? `Found the hidden fact ${found} of ${rows.length} times${n.context_tokens ? ` in about ${Number(n.context_tokens).toLocaleString()} tokens (word pieces) of text` : ""}.`
             : n.note || "No recall result was returned.",
         }),
         rows.length
@@ -393,6 +411,7 @@
         const quiz = out && out.quiz ? out.quiz : out || {};
         const picked = list.find((c) => c.id === model.value);
         quiz.variant_id = quiz.variant_id || (picked && picked.variant_id);
+        quiz.candidate_id = model.value;
         await loadHistory();
         renderResult(quiz, out && out.needle);
         job.say(`Quiz finished: ${quiz.correct ?? "?"} of ${quiz.total ?? "?"} right.`);
@@ -419,7 +438,7 @@
     function setup() {
       fill(panel, intro);
       if (list.length < 2) {
-        panel.append(h("p", { class: "qp-empty", text: "You need at least two options to compare. Tick “Compare all configurations” on the results page, or change your answers." }));
+        panel.append(h("p", { class: "qp-empty", text: "You need at least two models to compare. Tick “Compare all configurations” on the results page, or change your answers." }));
         return;
       }
       const selected = new Set([(ctx.candidate || list[0]).id]);
@@ -431,8 +450,10 @@
         });
         return { c, box, row: h("label", { class: "check qp-check", for: box.id }, box, ` ${candidateLabel(c, list)}`) };
       });
+      const limit = h("p", { class: "hint", "aria-live": "polite" });
       function syncBoxes() {
         for (const { box } of boxes) box.disabled = !box.checked && selected.size >= 3;
+        limit.textContent = selected.size >= 3 ? "That's the maximum of three. Untick one to pick another." : "";
       }
       syncBoxes();
       const promptList = h("ol", { class: "qp-prompts" });
@@ -478,7 +499,7 @@
       const start = h("button", { type: "button", text: "Run the models" });
       const job = jobBox(session);
       panel.append(
-        h("fieldset", {}, h("legend", { text: "Models to compare (pick 2 or 3)" }), boxes.map((b) => b.row)),
+        h("fieldset", {}, h("legend", { text: "Models to compare (pick 2 or 3)" }), boxes.map((b) => b.row), limit),
         h("fieldset", {}, h("legend", { text: `Your prompts (1 to ${MAX_PROMPTS})` }), promptList, add),
         h("p", { class: "hint", text: "Models answer one at a time to save memory, so this can take a few minutes." }),
         problem,
@@ -514,7 +535,11 @@
           const id = out && out.comparison_id;
           if (!id) throw new Error("The comparison finished but returned no answers. Try again.");
           const blind = await session.get(`/api/quality/compare/${encodeURIComponent(id)}`);
-          if (session.alive) vote(id, (blind && blind.items) || []);
+          if (session.alive) {
+            vote(id, (blind && blind.items) || []);
+            panel.querySelector("h4, .qp-empty")?.setAttribute("tabindex", "-1");
+            panel.querySelector("h4, .qp-empty")?.focus();
+          }
         } catch (error) {
           job.say(errorText(error), true);
           start.disabled = false;
@@ -524,6 +549,7 @@
     // The blind view only ever holds slot letters and answer text.
     function vote(comparisonId, items) {
       const decided = new Array(items.length).fill(null);
+      const pending = new Set();
       // Screen-reader announcements; it only becomes visible to show an error.
       const status = h("p", { class: "qp-status qp-sr-only", role: "status", "aria-live": "polite" });
       const tell = (text, isError = false) => {
@@ -543,7 +569,7 @@
           revealSlots.push({ index, slot, who });
           return h("article", { class: "qp-answer" },
             h("h5", { text: `Answer ${slot}` }),
-            h("div", { class: "qp-answer-text", text: o.text ?? "" }),
+            h("div", { class: "qp-answer-text", tabindex: "0", role: "region", "aria-label": `Answer ${slot}, prompt ${index + 1}`, text: o.text ?? "" }),
             who);
         });
         const choice = h("p", { class: "hint" });
@@ -552,22 +578,28 @@
         const all = [...buttons, none];
         const pick = async (button, slot) => {
           all.forEach((b) => (b.disabled = true));
+          pending.add(index);
+          sync();
           try {
             if (slot) await session.post("/api/quality/vote", { comparison_id: comparisonId, item: index, slot });
             if (!session.alive) return;
             button.setAttribute("aria-pressed", "true");
             decided[index] = slot || "skip";
-            choice.textContent = slot ? `You picked answer ${slot}.` : "Skipped: no preference.";
+            choice.textContent = slot ? `Vote saved: answer ${slot}.` : "Skipped: no preference.";
             tell(`Prompt ${index + 1}: ${choice.textContent}`);
-            sync();
+            focusNext(index);
           } catch (error) {
             tell(errorText(error), true);
             all.forEach((b) => (b.disabled = false));
+          } finally {
+            pending.delete(index);
+            sync();
           }
         };
         buttons.forEach((b, i) => b.addEventListener("click", () => pick(b, String(outputs[i].slot))));
         none.addEventListener("click", () => pick(none, null));
         itemControls.push({ all, none, choice, index });
+        // Long answers scroll, so the box itself must be reachable by keyboard.
         return h("section", { class: "qp-item", "aria-labelledby": ids(`cmp-i${index}`) },
           h("h4", { id: ids(`cmp-i${index}`), text: `Prompt ${index + 1} of ${items.length}` }),
           h("blockquote", { class: "qp-prompt-text", text: item.prompt ?? "" }),
@@ -577,19 +609,25 @@
       });
       function sync() {
         const open = decided.filter((d) => d == null).length;
-        reveal.disabled = open > 0;
+        reveal.disabled = open > 0 || pending.size > 0;
         skipRest.hidden = open === 0;
+      }
+      // After a vote the pressed button is disabled, so move focus somewhere useful.
+      function focusNext(index) {
+        const next = itemControls.find((c) => c.index > index && decided[c.index] == null && !pending.has(c.index));
+        (next ? next.all[0] : reveal.disabled ? skipRest : reveal).focus();
       }
       skipRest.addEventListener("click", () => {
         for (const c of itemControls) {
-          if (decided[c.index] != null) continue;
+          if (decided[c.index] != null || pending.has(c.index)) continue;
           decided[c.index] = "skip";
           c.all.forEach((b) => (b.disabled = true));
           c.none.setAttribute("aria-pressed", "true");
           c.choice.textContent = "Skipped: no preference.";
         }
-        tell("Skipped the remaining prompts. You can reveal now.");
+        tell(pending.size ? "Skipped the rest. Waiting for your last vote to save." : "Skipped the remaining prompts. You can reveal now.");
         sync();
+        reveal.focus();
       });
       const summary = h("div", { class: "qp-result" });
       reveal.addEventListener("click", async () => {
@@ -599,10 +637,11 @@
           if (!session.alive) return;
           for (const r of revealSlots) {
             const label = slotLabel(out, items, r.index, r.slot);
-            r.who.textContent = label == null ? "Written by: unknown" : `Written by ${modelName(ctx, label)}`;
+            r.who.textContent = label == null ? "Written by an unknown model" : `Written by ${modelName(ctx, label)}`;
             r.who.hidden = false;
           }
           renderTallies(out);
+          summary.querySelector("h4").focus();
           reveal.hidden = true;
           skipRest.hidden = true;
           tell("Revealed. Each answer now shows which model wrote it.");
@@ -615,14 +654,17 @@
         const tallies = (out && (out.tallies || out.votes)) || {};
         const rows = Object.entries(tallies).filter(([, n]) => typeof n === "number").sort((a, b) => b[1] - a[1]);
         const again = h("button", { type: "button", class: "secondary", text: "Start a new comparison" });
-        again.addEventListener("click", setup);
-        const lead = rows.length > 1 && rows[0][1] === rows[1][1];
+        again.addEventListener("click", () => {
+          setup();
+          panel.querySelector("input, textarea")?.focus();
+        });
+        const lead = rows.length > 1 && rows[0][1] - rows[1][1] <= 1 && rows[0][1] > 0;
         fill(summary, 
-          h("h4", { text: "Your votes" }),
+          h("h4", { text: "Your votes", tabindex: "-1" }),
           rows.length
             ? h("ul", {}, rows.map(([label, n]) => h("li", { text: `${modelName(ctx, label)}: ${n} ${n === 1 ? "vote" : "votes"}` })))
             : h("p", { text: "No votes were recorded." }),
-          lead ? h("p", { class: "qp-verdict", text: "A tie at the top: neither model clearly won on these prompts." }) : null,
+          lead ? h("p", { class: "qp-verdict", text: "Too close to call: the top two are within one vote of each other." }) : null,
           h("p", { class: "hint", text: "A handful of prompts is a small sample. Treat a one-vote lead as a tie." }),
           again,
         );
@@ -745,8 +787,11 @@
       if (!session.alive) return;
       for (const f of (data && data.files) || []) if (f.variant_id) onDisk.add(f.variant_id);
       if (!onDisk.size) return;
+      // Re-rendering replaces the controls; put focus back where it was.
+      const focused = panel.contains(document.activeElement) ? document.activeElement.id : null;
       fillReference(reference.value);
       fillChoices(false);
+      if (focused) panel.querySelector(`[id="${focused}"]`)?.focus();
     }, () => {});
     start.addEventListener("click", async () => {
       const issue = selected.size < 1 ? "Pick at least one file to check." : selected.size > 3 ? "Pick at most three files." : null;
@@ -786,10 +831,10 @@
                 h("summary", { text: "Show the numbers" }),
                 h("dl", { class: "qp-numbers" },
                   row("Same top word", "how often both files pick the same next word", fmtPct(r.same_top_p, 1)),
-                  row("Average difference", "KL divergence: 0 means identical guesses", num(r.mean_kld, 4)),
+                  row("Average difference", "KL divergence: how far apart the two files' word guesses are; 0 means identical", num(r.mean_kld, 4)),
                   row("Median difference", "the typical word", num(r.median_kld, 4)),
-                  row("Worst 1% difference", "99th percentile KL divergence", num(r.kld_99, 4)),
-                  row("Surprise score", "perplexity, reference → this file; lower is better", `${num(r.ppl_base, 2)} → ${num(r.ppl, 2)}`),
+                  row("Worst 1% difference", "the same, for the hardest 1 in 100 words", num(r.kld_99, 4)),
+                  row("Surprise score", "perplexity: how surprised the model is by real text; reference → this file, lower is better", `${num(r.ppl_base, 2)} → ${num(r.ppl, 2)}`),
                   row("Change in confidence", "average change in the top word's probability, in percentage points", r.mean_delta_p == null ? "unknown" : `${num(r.mean_delta_p, 2)} points`)))))
           : h("p", { text: "The check finished but returned no results." }),
         (out.notes || []).length ? h("ul", { class: "hint qp-notes" }, out.notes.map((n) => h("li", { text: n }))) : null,
@@ -885,7 +930,9 @@
         const data = await session.get("/api/local-models");
         if (session.alive) render(data);
       } catch (error) {
-        if (session.alive) job.say(errorText(error), true);
+        if (!session.alive) return;
+        fill(list, h("p", { class: "qp-empty", text: "Couldn't load the list of model files. Try Scan my disk." }));
+        job.say(errorText(error), true);
       }
     }
     scan.addEventListener("click", async () => {
