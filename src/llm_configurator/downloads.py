@@ -233,9 +233,14 @@ def _fetch(url, entry, target, partial, token, tracker, cancel):
                         hasher.update(chunk)
                         have += len(chunk)
                         tracker.received(len(chunk))
-                finally:
-                    # The last chunk usually sits in the write buffer until close; a full disk shows up here.
-                    _save(output.close, None, name)
+                except BaseException:
+                    try:  # already failing (cancel, too large, network): keep that reason
+                        output.close()
+                    except OSError:
+                        pass
+                    raise
+                # The last chunk usually sits in the write buffer until close; a full disk shows up here.
+                _save(output.close, None, name)
             if have < size:
                 raise ConnectionError("connection closed early")
         except (Cancelled, ValueError):

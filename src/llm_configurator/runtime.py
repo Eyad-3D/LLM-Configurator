@@ -101,7 +101,8 @@ def bench(variant, model_path, executable, context, layers, gpu_index=0, timeout
     # llama-bench has no --version; its rows carry the build. "b<N>" matches runtime_install.detect()["version"].
     number = row.get("build_number")
     version = f"b{number}" if isinstance(number, int) and not isinstance(number, bool) else row.get("build_commit")
-    backend = (devices[0]["backend"] if devices else None) if layers else "cpu"
+    chosen = device_args[1] if len(device_args) == 2 else None
+    backend = next((d["backend"] for d in devices or [] if d["name"] == chosen), None) if layers else "cpu"
     return {"variant_id": variant.id, "sha256": variant.sha256, "fingerprint": hardware["fingerprint"], "timestamp": now(),
             "context": context, "users": 1, "gpu_layers": layers, "gpu_uuid": gpu["uuid"] if layers else None,
             "threads": threads, "tps": tps, "runtime_build": version, "raw": row,

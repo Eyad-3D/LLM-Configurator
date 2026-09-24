@@ -340,6 +340,8 @@ class VersionParsingTests(unittest.TestCase):
         info = ri.parse_version("load_backend: loaded CUDA backend from /x/libggml-cuda.so\n"
                                 "version: 0.5.0 (build 11158, commit d2e5458)\n")
         self.assertEqual((info["version"], info["build"], info["backend"]), ("b11158", 11158, "cuda"))
+        info = ri.parse_version("version: 0.1.0-dev (build 0, commit unknown)\n")   # source build without git
+        self.assertEqual((info["version"], info["build"], info["commit"]), ("b0", 0, None))
 
 
 class DeviceListTests(unittest.TestCase):

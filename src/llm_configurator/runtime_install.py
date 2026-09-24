@@ -557,7 +557,7 @@ def _run_devices(argv, env=None):
 
 
 # Current builds: `version: 0.1.0-dev (build 1234, commit abc1234)`; older ones: `version: 1234 (abc1234)`.
-_NEW_VERSION = re.compile(r"^\s*version:\s*(\S+)\s+\(build\s+(\d+),\s*commit\s+([0-9a-fA-F]+)\)", re.M)
+_NEW_VERSION = re.compile(r"^\s*version:\s*(\S+)\s+\(build\s+(\d+),\s*commit\s+(\w+)\)", re.M)
 _OLD_VERSION = re.compile(r"^\s*version:\s*(\S+)(?:\s*\(([0-9a-fA-F]+)\))?", re.M)
 
 
@@ -570,7 +570,8 @@ def parse_version(text):
     new = _NEW_VERSION.search(text)
     old = None if new else _OLD_VERSION.search(text)
     if new:
-        result.update(build=int(new.group(2)), version=f"b{int(new.group(2))}", commit=new.group(3), semver=new.group(1))
+        commit = new.group(3) if re.fullmatch(r"[0-9a-fA-F]+", new.group(3)) else None   # "unknown" without git
+        result.update(build=int(new.group(2)), version=f"b{int(new.group(2))}", commit=commit, semver=new.group(1))
     elif old:
         raw = old.group(1)
         result["commit"] = old.group(2)
@@ -712,11 +713,13 @@ def pick_device(devices, gpu):
     devices = [d for d in devices or [] if d.get("backend") != "cpu"]
     if not devices or not gpu:
         return None
-    same = [d for d in devices if d["backend"] == gpu.get("backend")] or devices
+    same = [d for d in devices if d["backend"] == gpu.get("backend")]
     if len(same) == 1:
         return same[0]["name"]
+    # Different backend (an NVIDIA card on a Vulkan build) or several cards: the name must match, word for word.
     name = _plain(gpu.get("name"))
-    named = [d for d in same if name and (name in _plain(d["description"]) or _plain(d["description"]) in name)]
+    named = [d for d in same or devices if name and _plain(d["description"])
+             and (f" {name} " in f" {_plain(d['description'])} " or f" {_plain(d['description'])} " in f" {name} ")]
     return named[0]["name"] if len(named) == 1 else None
 
 

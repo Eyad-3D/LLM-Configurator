@@ -276,6 +276,26 @@ class DownloadTests(unittest.TestCase):
         self.run_download(variant, Hub({"m.gguf": body}))
         self.assertEqual((self.dir / "m.gguf").read_bytes(), body)
 
+    def test_cancel_is_not_hidden_by_a_failing_close(self):
+        body = bytes(range(100))
+        variant = make_variant({"m.gguf": body})
+        cancel = threading.Event()
+
+        class FailingClose:
+            def __init__(self, path, mode):
+                self.real = open(path, mode)
+            def write(self, chunk):
+                return self.real.write(chunk)
+            def close(self):
+                self.real.close()
+                raise OSError(28, "No space left on device")
+
+        hub = Hub({"m.gguf": body})
+        hub.script = [lambda h, r: h.reply(r, on_read=lambda sent: sent >= 30 and cancel.set())]
+        with patch.object(downloads, "_open_partial", lambda path, mode, name: FailingClose(path, mode)):
+            with self.assertRaises(Cancelled):
+                self.run_download(variant, hub, cancel=cancel)
+
     def test_unsafe_or_colliding_local_names_are_refused(self):
         for names in (["m.gguf:stream"], ["a.gguf", "a.gguf.part"], ["C:m.gguf"]):
             variant = make_variant({n: b"x" * (i + 1) for i, n in enumerate(names)})
@@ -527,6 +547,17 @@ class BenchDeviceTests(unittest.TestCase):
         self.run_bench(self.hw(apple), [self.device("MTL0", "Apple M3 Max", "metal")])
         self.assertEqual(self.dev(), "MTL0")
         self.assertEqual(self.calls[-1][1].get("CUDA_VISIBLE_DEVICES"), os.environ.get("CUDA_VISIBLE_DEVICES"))
+
+    def test_other_backend_card_is_never_taken_without_a_name_match(self):
+        # Intel iGPU picked on a laptop whose CUDA build only lists the NVIDIA card.
+        igpu = {"index": 0, "uuid": "intel-1", "name": "Intel(R) Iris(R) Xe Graphics", "backend": "vulkan", "available": 2 * GIB}
+        with self.assertRaisesRegex(ValueError, "cannot tell which"):
+            self.run_bench(self.hw(igpu), [self.device("CUDA0", "NVIDIA GeForce RTX 4070 Laptop GPU", "cuda")], layers=1)
+        # Whole words only: an A100 is not an A10.
+        a100 = {"index": 0, "uuid": "GPU-a", "name": "NVIDIA A100-PCIE-40GB", "backend": "cuda", "available": 40 * GIB}
+        with self.assertRaisesRegex(ValueError, "cannot tell which"):
+            self.run_bench(self.hw(a100), [self.device("Vulkan0", "NVIDIA A10", "vulkan"),
+                                           self.device("Vulkan1", "-", "vulkan")], layers=1)
 
     def test_nvidia_card_with_vulkan_build(self):
         gpu = {"index": 0, "uuid": "GPU-abc", "name": "NVIDIA GeForce RTX 4090", "backend": "cuda", "available": 24 * GIB}
