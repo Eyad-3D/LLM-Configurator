@@ -75,9 +75,10 @@ def _files(variant, directory):
     result, seen = [], set()
     for entry in variant.all_files():
         name = Path(entry["filename"]).name
-        if name in {"", ".", ".."} or "\\" in name or name in seen:
+        # ":" would name a Windows drive or alternate data stream; "x" and "x.part" would share a file.
+        if name in {"", ".", ".."} or "\\" in name or ":" in name or name in seen or name + ".part" in seen:
             raise ValueError(f"Unsafe or duplicate model file name: {entry['filename']}")
-        seen.add(name)
+        seen.update((name, name + ".part"))
         result.append((entry, directory / name, directory / (name + ".part")))
     return result
 
@@ -195,10 +196,11 @@ def _fetch(url, entry, target, partial, token, tracker, cancel):
         tracker.emit("checking", f"Checking the {have} bytes of {name} downloaded earlier", force=True)
         _hash_existing(partial, hasher, tracker, cancel)
     failures = 0
+    best = have  # most bytes ever on disk; re-fetching bytes we already had is not progress
     while have < size:
         check_cancel(cancel)
         request = Request(url, headers={**headers, **({"Range": f"bytes={have}-"} if have else {})})
-        before = have
+        before = best
         try:
             with _open(request, timeout=TIMEOUT) as response:
                 status = getattr(response, "status", None) or response.getcode()
@@ -208,32 +210,37 @@ def _fetch(url, entry, target, partial, token, tracker, cancel):
                         partial.unlink(missing_ok=True)
                         raise ValueError(f"The server reports a different size for {name} than the catalogue. "
                                          "Refresh the catalogue and try again.")
-                    if int(match.group(1)) != have or int(match.group(2)) != size - 1:
-                        raise _Restart()
+                    if int(match.group(1)) != have or int(match.group(2)) > size - 1:
+                        raise _Restart()   # a shorter range (some CDNs cap them) is fine: the loop asks for the rest
                     mode = "ab"
                 elif status == 200:
                     if have:  # the server ignored Range: start this file again from zero
                         tracker.add(-have)
-                        have, before, hasher = 0, 0, hashlib.sha256()
+                        have, hasher = 0, hashlib.sha256()
                     mode = "wb"
                 else:
                     raise ValueError(f"Unexpected reply from the server for {name} (HTTP {status}). Try again later.")
                 length = response.headers.get("Content-Length")
                 if length and length.isdigit() and have + int(length) > size:
                     raise _TooLarge()
-                with partial.open(mode) as output:
+                output = _open_partial(partial, mode, name)
+                try:
                     while chunk := response.read(CHUNK):
                         check_cancel(cancel)
                         if have + len(chunk) > size:
                             raise _TooLarge()
-                        try:
-                            output.write(chunk)
-                        except OSError as error:
-                            raise ValueError(f"Could not save {name}: {error.strerror or error}. Free up disk space or "
-                                             "choose another folder; the download will resume where it stopped.") from None
+                        _save(output.write, chunk, name)
                         hasher.update(chunk)
                         have += len(chunk)
                         tracker.received(len(chunk))
+                except BaseException:
+                    try:  # already failing (cancel, too large, network): keep that reason
+                        output.close()
+                    except OSError:
+                        pass
+                    raise
+                # The last chunk usually sits in the write buffer until close; a full disk shows up here.
+                _save(output.close, None, name)
             if have < size:
                 raise ConnectionError("connection closed early")
         except (Cancelled, ValueError):
@@ -262,6 +269,7 @@ def _fetch(url, entry, target, partial, token, tracker, cancel):
             if not _transient(error):
                 raise
             failures = 0 if have > before else failures + 1
+        best = max(best, have)
         if have < size:
             if failures >= RETRIES:
                 raise ValueError(f"The network kept failing while downloading {name}. Check your connection and run "
@@ -270,12 +278,31 @@ def _fetch(url, entry, target, partial, token, tracker, cancel):
                 tracker.emit("retrying", f"Connection problem; trying {name} again", force=True)
                 _sleep(BACKOFF[min(failures, len(BACKOFF)) - 1], cancel)
     tracker.emit("verifying", force=True)
+    if _size(partial) != size:  # the hash covers what we wrote; this checks it all reached the disk
+        raise ValueError(f"{name} was not saved completely. Free up disk space and run the download again; it will "
+                         "resume where it stopped.")
     if hasher.hexdigest() != expected:
         partial.unlink(missing_ok=True)
         tracker.add(-size)
         raise ValueError(f"{name} did not match its published SHA256 (it was damaged or changed), so the partial file "
                          "was deleted. Run the download again.")
     os.replace(partial, target)
+
+
+def _open_partial(partial, mode, name):
+    try:
+        return partial.open(mode)
+    except OSError as error:
+        raise ValueError(f"Could not save {name}: {error.strerror or error}. Check the folder is writable, or choose "
+                         "another folder.") from None
+
+
+def _save(action, chunk, name):
+    try:
+        return action(chunk) if chunk is not None else action()
+    except OSError as error:
+        raise ValueError(f"Could not save {name}: {error.strerror or error}. Free up disk space or choose another "
+                         "folder; the download will resume where it stopped.") from None
 
 
 class _TooLarge(Exception):

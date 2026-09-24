@@ -138,14 +138,28 @@ def fake_run(argv):
     return ("FAIL" not in text), text
 
 
+def fake_devices(argv):
+    """Scripts that contain a `#devices` block answer --list-devices with it; others act like old builds."""
+    path = Path(argv[0])
+    text = path.read_text(errors="replace") if path.is_file() else ""
+    if "#devices\n" not in text:
+        return False, "error: invalid argument: --list-devices"
+    return True, "Available devices:\n" + text.split("#devices\n", 1)[1]
+
+
+def with_devices(script, *lines):
+    return script + "#devices\n" + ("\n".join(lines) if lines else "  (none)") + "\n"
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.store = Store(self.root / "data")
         patches = [mock.patch.object(ri, "_run_version", side_effect=fake_run),
+                   mock.patch.object(ri, "_run_devices", side_effect=fake_devices),
                    mock.patch.object(ri, "_path_candidates", return_value=iter(())),
-                   mock.patch.object(ri, "CHUNK", 16)]
+                   mock.patch.object(ri, "CHUNK", 16), mock.patch.object(ri, "PROGRESS_INTERVAL", 0)]
         for patch in patches:
             patch.start()
             self.addCleanup(patch.stop)
@@ -319,6 +333,37 @@ class VersionParsingTests(unittest.TestCase):
         self.assertEqual((semver["version"], semver["build"]), ("0.5.0", 11158))
         self.assertIsNone(ri.parse_version("Segmentation fault")["version"])
 
+    def test_current_format_from_a_real_build(self):
+        # tests/integration/samples/version.txt (llama.cpp 4df29be, Aug 2026)
+        info = ri.parse_version("\nversion: 0.1.0-dev (build 1, commit 4df29be)\nbuilt with GNU 13.3.0 for Linux x86_64\n")
+        self.assertEqual((info["version"], info["build"], info["commit"], info["semver"]), ("b1", 1, "4df29be", "0.1.0-dev"))
+        info = ri.parse_version("load_backend: loaded CUDA backend from /x/libggml-cuda.so\n"
+                                "version: 0.5.0 (build 11158, commit d2e5458)\n")
+        self.assertEqual((info["version"], info["build"], info["backend"]), ("b11158", 11158, "cuda"))
+        info = ri.parse_version("version: 0.1.0-dev (build 0, commit unknown)\n")   # source build without git
+        self.assertEqual((info["version"], info["build"], info["commit"]), ("b0", 0, None))
+
+
+class DeviceListTests(unittest.TestCase):
+    def test_cpu_only_build(self):
+        # Real output of `llama-server --list-devices` on a CPU-only build.
+        self.assertEqual(ri.parse_devices("Available devices:\n  (none)\n"), [])
+
+    def test_gpu_builds(self):
+        devices = ri.parse_devices("ggml_cuda_init: found 2 CUDA devices:\n  Device 0: NVIDIA GeForce RTX 4090\n"
+                                   "Available devices:\n  CUDA0: NVIDIA GeForce RTX 4090 (24080 MiB, 23000 MiB free)\n"
+                                   "  CUDA1: NVIDIA GeForce RTX 3060 (12288 MiB, 12000 MiB free)\n  BLAS: OpenBLAS (0 MiB, 0 MiB free)\n")
+        self.assertEqual([(d["name"], d["backend"]) for d in devices],
+                         [("CUDA0", "cuda"), ("CUDA1", "cuda"), ("BLAS", "cpu")])
+        self.assertEqual(devices[0]["description"], "NVIDIA GeForce RTX 4090")
+        self.assertEqual(devices[0]["free"], 23000 * 1024**2)
+        for name, backend in [("Vulkan0", "vulkan"), ("ROCm1", "rocm"), ("Metal", "metal"), ("MTL0", "metal"),
+                              ("SYCL0", "unknown"), ("CPU", "cpu")]:
+            self.assertEqual(ri.device_backend(name), backend, name)
+
+    def test_no_list_means_unknown(self):
+        self.assertIsNone(ri.parse_devices("error: invalid argument: --list-devices"))
+
 
 class ExtractTests(Base):
     def extract(self, data, suffix):
@@ -431,7 +476,17 @@ class DownloadTests(Base):
             path = ri._download(self.record, self.folder, progress=events.append)
         self.assertEqual(path.read_bytes(), self.data)
         self.assertEqual(events[-1]["done"], len(self.data))
-        self.assertEqual(set(events[0]), {"stage", "done", "total", "message"})
+        self.assertEqual(set(events[0]), {"stage", "done", "total", "message", "bytes_per_second", "eta_seconds"})
+
+    def test_progress_is_throttled_and_has_speed(self):
+        events, ticks = [], iter(range(10**6))
+        with mock.patch.object(ri, "_open", FakeNet({self.record["name"]: self.data})), \
+                mock.patch.object(ri, "PROGRESS_INTERVAL", 1000), mock.patch.object(ri, "_clock", lambda: next(ticks)):
+            ri._download(self.record, self.folder, progress=events.append)
+        self.assertEqual(len(events), 2)          # the first update and the last one, not one per chunk
+        self.assertEqual(events[-1]["done"], len(self.data))
+        self.assertGreater(events[-1]["bytes_per_second"], 0)
+        self.assertEqual(events[-1]["eta_seconds"], 0)
 
     def test_bad_hash_deletes_partial(self):
         with mock.patch.object(ri, "_open", FakeNet({self.record["name"]: self.data[:-1] + b"!"})):
@@ -474,6 +529,33 @@ class DownloadTests(Base):
         partial.write_bytes(self.data)
         with mock.patch.object(ri, "_open", FakeNet({self.record["name"]: self.data})):
             self.assertEqual(ri._download(self.record, self.folder).read_bytes(), self.data)
+
+    def test_complete_partial_needs_no_network(self):
+        self.folder.mkdir()
+        partial = self.folder / (self.record["sha256"][:16] + "-" + self.record["name"] + ".part")
+        partial.write_bytes(self.data)
+        with mock.patch.object(ri, "_open", side_effect=OSError("offline")):
+            self.assertEqual(ri._download(self.record, self.folder).read_bytes(), self.data)
+
+    def test_unverified_leftover_is_never_reused(self):
+        self.folder.mkdir()
+        record = dict(self.record, sha256=None)
+        (self.folder / ("unverified-" + record["name"])).write_bytes(b"\0" * len(self.data))  # same size, wrong bytes
+        with mock.patch.object(ri, "_open", FakeNet({record["name"]: self.data})):
+            self.assertEqual(ri._download(record, self.folder).read_bytes(), self.data)
+
+    def test_bytes_on_disk_are_what_gets_verified(self):
+        def lossy_stream(response, part, have, size, hasher, *rest):
+            # The right bytes arrive (and are hashed) but different bytes end up on disk, as with a
+            # failed flush or a second writer.
+            hasher.update(response.read())
+            part.write_bytes(b"\0" * size)
+
+        with mock.patch.object(ri, "_open", FakeNet({self.record["name"]: self.data})), \
+                mock.patch.object(ri, "_stream", lossy_stream):
+            with self.assertRaisesRegex(ValueError, "checksum"):
+                ri._download(self.record, self.folder)
+        self.assertEqual(list(self.folder.iterdir()), [])
 
     def test_dropped_connection_is_plain_and_keeps_partial(self):
         class Dropping(FakeResponse):
@@ -549,6 +631,38 @@ class InstallTests(Base):
         self.assertEqual(result["backend"], "cuda")
         self.assertTrue((Path(result["directory"]) / "libcudart.so.13").is_file())
         self.assertTrue(Path(result["directory"]).as_posix().endswith("b11158-cuda/build/bin"))
+
+    def test_runtime_companion_cannot_plant_links(self):
+        deep = "/".join(f"d{i}" for i in range(6))
+        companion = tar_bytes({f"{deep}/libcudart.so.13": ("cuda", 0o644), f"{deep}/libcublas.so.13": ("blas", 0o644),
+                               "etc/passwd": ("x", 0o644)},
+                              links=[(f"{deep}/libggml-evil.so", "../" * 6 + "etc/passwd", tarfile.SYMTYPE)])
+        blobs = {"llama-b11158-bin-ubuntu-cuda-13.4-x64.tar.gz": tar_bytes(server_tree("build/bin/")),
+                 "cudart-llama-b11158-bin-ubuntu-cuda-13.4-x64.tar.gz": companion}
+        result = self.run_install(blobs, nvidia("580.95.05"))
+        folder = Path(result["directory"])
+        self.assertTrue((folder / "libcudart.so.13").is_file())
+        self.assertFalse((folder / "libggml-evil.so").exists() or (folder / "libggml-evil.so").is_symlink())
+
+    def test_install_says_when_a_chosen_folder_still_wins(self):
+        mine = self.root / "mine"
+        mine.mkdir()
+        (mine / "llama-server").write_text(GOOD)
+        (mine / "llama-server").chmod(0o755)
+        self.store.put("settings", {"runtime_dir": str(mine)})
+        result = self.run_install({"llama-b11158-bin-ubuntu-x64.tar.gz": tar_bytes(server_tree())}, NONE)
+        self.assertEqual(result["source"], "configured")
+        self.assertIn("keeps using the llama.cpp folder you chose", result["warnings"][0])
+
+    def test_damaged_archive_is_a_plain_error(self):
+        archive = self.root / "llama-b1-bin-ubuntu-x64.tar.gz"
+        archive.write_bytes(tar_bytes(server_tree())[:200])
+        with self.assertRaisesRegex(ValueError, "damaged"):
+            ri.install_archive(self.store, archive)
+        clash = self.root / "clash.tar.gz"
+        clash.write_bytes(tar_bytes({"a": ("file", 0o644), "a/b": ("x", 0o644)}))
+        with self.assertRaises(ValueError):
+            ri.safe_extract(clash, self.root / "out")
 
     def test_macos_install(self):
         blobs = {"llama-b11158-bin-macos-arm64.tar.gz": tar_bytes(server_tree("llama-b11158/"))}
@@ -693,6 +807,28 @@ class DetectTests(Base):
         self.make(leftover / "bin")
         (leftover / "manifest.json").write_text(json.dumps({"tag": "b1", "backend": "cpu", "bin_dir": "bin"}))
         self.assertFalse(ri.detect(self.store)["installed"])
+
+    def test_backend_comes_from_the_device_list(self):
+        folder = runtime_dir(self.store) / "b6000-cuda"
+        self.make(folder / "bin", script=with_devices(GOOD, "  CUDA0: NVIDIA GeForce RTX 4090 (24080 MiB, 23000 MiB free)"))
+        (folder / "manifest.json").write_text(json.dumps({"tag": "b6000", "backend": "cuda", "bin_dir": "bin"}))
+        result = ri.detect(self.store)
+        self.assertEqual((result["backend"], result["warnings"]), ("cuda", []))
+        self.assertEqual(result["devices"], [{"name": "CUDA0", "description": "NVIDIA GeForce RTX 4090", "backend": "cuda"}])
+        # Same CUDA build, but the driver is broken: it lists no devices, so it will run on the CPU.
+        self.make(folder / "bin", script=with_devices(GOOD))
+        result = ri.detect(self.store)
+        self.assertEqual((result["backend"], result["devices"]), ("cpu", []))
+        self.assertIn("found no usable graphics card", result["warnings"][0])
+
+    def test_self_built_cpu_runtime_is_cpu_not_unknown(self):
+        new_style = VERSION_SCRIPT.format(text="version: 0.1.0-dev (build 1, commit 4df29be)\nbuilt with GNU 13.3.0 for Linux x86_64")
+        self.make(self.root / "mine", script=with_devices(new_style))
+        self.store.put("settings", {"runtime_dir": str(self.root / "mine")})
+        result = ri.detect(self.store)
+        self.assertEqual((result["version"], result["build"], result["commit"], result["backend"]), ("b1", 1, "4df29be", "cpu"))
+        self.make(self.root / "mine", script=with_devices(new_style, "  Vulkan0: AMD Radeon RX 7900 XTX (RADV NAVI31) (24560 MiB, 24000 MiB free)"))
+        self.assertEqual(ri.detect(self.store)["backend"], "vulkan")
 
     def test_path_uses_which_for_missing_siblings(self):
         path_dir = self.make(self.root / "brew", names=("llama-server",))

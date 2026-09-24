@@ -13,11 +13,13 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 import zipfile
+import zlib
 
 from .domain import GIB, check_cancel, now
 from .storage import runtime_dir
@@ -31,6 +33,8 @@ MAX_EXTRACTED_BYTES = 8 * GIB      # stops "zip bombs" (tiny archives that unpac
 MAX_MEMBERS = 20000
 VERSION_TIMEOUT = 15
 CHUNK = 1024**2
+PROGRESS_INTERVAL = 0.2            # at most five progress updates a second, like model downloads
+_clock = time.monotonic
 HOMEBREW_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin", "~/.linuxbrew/bin")
 
 # Oldest NVIDIA driver that fully supports each CUDA toolkit (Linux, Windows). Source: NVIDIA CUDA
@@ -273,6 +277,7 @@ def _download(record, folder, progress=None, cancel=None, done_before=0, grand_t
     part = final.with_name(final.name + ".part")
     if not expected:
         part.unlink(missing_ok=True)
+        final.unlink(missing_ok=True)     # nothing to check a leftover against: always fetch it fresh
     if final.exists() and final.stat().st_size == size and (not expected or _sha256(final) == expected):
         return final
     if shutil.disk_usage(folder).free < size - (part.stat().st_size if part.exists() else 0) + GIB:
@@ -286,7 +291,10 @@ def _download(record, folder, progress=None, cancel=None, done_before=0, grand_t
         if have:
             with part.open("rb") as stream:
                 for chunk in iter(lambda: stream.read(CHUNK), b""):
+                    check_cancel(cancel)
                     hasher.update(chunk)
+        if have == size:
+            break              # already complete (e.g. cancelled while verifying); checked below, no network needed
         headers = {"User-Agent": "llm-configurator", "Accept": "application/octet-stream"}
         if have:
             headers["Range"] = f"bytes={have}-"
@@ -320,7 +328,8 @@ def _download(record, folder, progress=None, cancel=None, done_before=0, grand_t
         break
     if part.stat().st_size != size:
         raise ValueError(f"The download of {record['name']} stopped early. Try again; it will continue where it stopped.")
-    if expected and hasher.hexdigest() != expected:
+    # Check what is on disk, not only what came over the wire (a failed flush or a second writer would differ).
+    if expected and (hasher.hexdigest() != expected or _sha256(part) != expected):
         part.unlink(missing_ok=True)
         raise ValueError(f"{record['name']} failed its checksum check (it may be damaged or tampered with) and was "
                          "deleted. Try again.")
@@ -329,6 +338,7 @@ def _download(record, folder, progress=None, cancel=None, done_before=0, grand_t
 
 
 def _stream(response, part, have, size, hasher, record, progress, cancel, done_before, grand_total):
+    started, last, received = _clock(), None, 0
     with part.open("ab" if have else "wb") as output:
         written = have
         while True:
@@ -343,9 +353,16 @@ def _stream(response, part, have, size, hasher, record, progress, cancel, done_b
                 raise ValueError(f"{record['name']} is bigger than GitHub said it would be; stopped and deleted it.")
             output.write(chunk)
             hasher.update(chunk)
-            if progress:
+            received += len(chunk)
+            moment = _clock()
+            if progress and (last is None or moment - last >= PROGRESS_INTERVAL or written == size):
+                last = moment
+                elapsed = moment - started
+                speed = round(received / elapsed) if elapsed >= 0.5 else None
+                remaining = (grand_total or size) - (done_before + written)
                 progress({"stage": "download", "done": done_before + written, "total": grand_total or size,
-                          "message": f"Downloading {record['name']}"})
+                          "message": f"Downloading {record['name']}", "bytes_per_second": speed,
+                          "eta_seconds": round(remaining / speed) if speed else None})
 
 
 def _sha256(path):
@@ -381,7 +398,14 @@ def _within(root, path):
 
 def safe_extract(archive, target, cancel=None):
     """Unpack a .zip or .tar.gz into `target`. Symlinks are allowed only if they stay inside `target`;
-    hard links only to files already unpacked; device files never."""
+    hard links only to files already unpacked; device files never. Every failure is a plain ValueError."""
+    try:
+        return _extract(archive, target, cancel)
+    except (OSError, EOFError, zlib.error, zipfile.BadZipFile, zipfile.LargeZipFile, tarfile.TarError) as error:
+        raise ValueError(f"The llama.cpp archive is damaged or unusual and could not be unpacked ({error}).") from None
+
+
+def _extract(archive, target, cancel):
     target = Path(target).resolve()
     target.mkdir(parents=True, exist_ok=True)
     name = str(archive).lower()
@@ -509,26 +533,48 @@ def find_bin_dir(directory, depth=4):
     return None
 
 
-def _run_version(argv):
-    """Run `llama-server --version`; returns (ok, combined output). llama.cpp prints it to stderr."""
+def _run_tool(argv, flag, env=None):
+    """Run a llama.cpp tool with one info flag; returns (ok, stdout + stderr). llama.cpp prints
+    `--version` on stderr and `--list-devices` on stdout."""
     try:
-        done = subprocess.run(list(argv) + ["--version"], capture_output=True, text=True, timeout=VERSION_TIMEOUT,
-                              errors="replace", creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        done = subprocess.run(list(argv) + [flag], capture_output=True, text=True, timeout=VERSION_TIMEOUT,
+                              errors="replace", env=env, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
     except subprocess.TimeoutExpired:
-        return False, "llama-server did not answer --version in time"
+        return False, f"llama-server did not answer {flag} in time"
     except OSError as error:
         return False, str(error)
-    return done.returncode == 0, (done.stdout or "") + "\n" + (done.stderr or "")
+    return done.returncode == 0, (getattr(done, "stdout", "") or "") + "\n" + (getattr(done, "stderr", "") or "")
+
+
+def _run_version(argv):
+    """Run `llama-server --version`; returns (ok, combined output)."""
+    return _run_tool(argv, "--version")
+
+
+def _run_devices(argv, env=None):
+    """Run `llama-server --list-devices` (also works for llama-bench); returns (ok, combined output)."""
+    return _run_tool(argv, "--list-devices", env)
+
+
+# Current builds: `version: 0.1.0-dev (build 1234, commit abc1234)`; older ones: `version: 1234 (abc1234)`.
+_NEW_VERSION = re.compile(r"^\s*version:\s*(\S+)\s+\(build\s+(\d+),\s*commit\s+(\w+)\)", re.M)
+_OLD_VERSION = re.compile(r"^\s*version:\s*(\S+)(?:\s*\(([0-9a-fA-F]+)\))?", re.M)
 
 
 def parse_version(text):
-    """Read `version: 4589 (1d1e6a90)`-style output plus backend hints from load/init lines."""
+    """Read the `--version` output plus backend hints from load/init lines. `version` is `b<build>`
+    whenever the build number is known: current builds print a constant `0.1.0-dev` semver, so the
+    build number is the only version that tells builds apart (the raw semver is kept in `semver`)."""
     text = text or ""
     result = {"version": None, "build": None, "commit": None, "backend": None}
-    match = re.search(r"^\s*version:\s*(\S+)(?:\s*\(([0-9a-fA-F]+)\))?", text, re.M)
-    if match:
-        raw = match.group(1)
-        result["commit"] = match.group(2)
+    new = _NEW_VERSION.search(text)
+    old = None if new else _OLD_VERSION.search(text)
+    if new:
+        commit = new.group(3) if re.fullmatch(r"[0-9a-fA-F]+", new.group(3)) else None   # "unknown" without git
+        result.update(build=int(new.group(2)), version=f"b{int(new.group(2))}", commit=commit, semver=new.group(1))
+    elif old:
+        raw = old.group(1)
+        result["commit"] = old.group(2)
         if raw.isdigit():
             result["build"], result["version"] = int(raw), f"b{raw}"
         else:
@@ -549,6 +595,51 @@ def parse_version(text):
         elif "apple-darwin" in lower and "arm64" in lower:
             result["backend"] = "metal"     # Homebrew/Apple builds embed Metal and print no load line
     return result
+
+
+# ggml device-name prefixes (`--list-devices`) -> our backend names. CUDA builds compiled for AMD
+# (HIP) name their devices ROCm0...; Metal is `Metal` on older builds and `MTL0` on newer ones.
+DEVICE_BACKENDS = (("cuda", "CUDA"), ("rocm", "ROCm"), ("rocm", "HIP"), ("vulkan", "Vulkan"), ("metal", "Metal"),
+                   ("metal", "MTL"))
+# Accelerators that run on the main processor; they are not graphics cards.
+_CPU_DEVICES = ("BLAS", "CPU", "AMX", "KLEIDIAI", "ACCELERATE", "RPC")
+_DEVICE_LINE = re.compile(r"^\s+([A-Za-z][\w.-]*):\s*(.*?)(?:\s+\((\d+) MiB, (\d+) MiB free\))?\s*$")
+
+
+def device_backend(name):
+    """The backend of a ggml device name (`CUDA0` -> cuda), "cpu" for CPU-side accelerators, else "unknown"."""
+    for backend, prefix in DEVICE_BACKENDS:
+        if re.fullmatch(re.escape(prefix) + r"\d*", name or ""):
+            return backend
+    return "cpu" if (name or "").upper().startswith(_CPU_DEVICES) else "unknown"
+
+
+def parse_devices(text):
+    """Read `--list-devices` output: `Available devices:` then `  CUDA0: NVIDIA ... (24080 MiB, 23000 MiB free)`
+    lines, or `  (none)`. Returns None when the text has no device list at all (old build or failure)."""
+    lines = (text or "").splitlines()
+    start = next((i for i, line in enumerate(lines) if line.strip().lower().startswith("available devices")), None)
+    if start is None:
+        return None
+    devices = []
+    for line in lines[start + 1:]:
+        match = _DEVICE_LINE.match(line)
+        if not match:
+            if line.strip() and not line.startswith((" ", "\t")):
+                break           # the list is over
+            continue
+        name, description, total, free = match.groups()
+        devices.append({"name": name, "description": description, "backend": device_backend(name),
+                        "total": int(total) * 1024**2 if total else None, "free": int(free) * 1024**2 if free else None})
+    return devices
+
+
+def list_devices(argv, env=None):
+    """GPU devices a llama.cpp tool can offload to (CPU-side accelerators left out), or None if it could not say.
+    `env` matters: CUDA_VISIBLE_DEVICES and friends change what is listed."""
+    ok, output = _run_devices(argv, env) if env is not None else _run_devices(argv)
+    devices = parse_devices(output) if ok else None
+    return None if devices is None else [d for d in devices if d["backend"] != "cpu"]
 
 
 def _backend_from_files(folder):
@@ -591,11 +682,48 @@ def _inspect(folder, source, manifest=None):
     manifest = manifest or {}
     result.update(installed=True, version=info["version"], build=info["build"] or manifest.get("build"),
                   commit=info["commit"], tag=manifest.get("tag"))
-    result["backend"] = manifest.get("backend") or info["backend"] or _backend_from_files(folder) or "unknown"
+    devices = list_devices([str(server)])
+    result["devices"] = [{k: d[k] for k in ("name", "description", "backend")} for d in devices or []]
+    installed_as = manifest.get("backend")
+    if devices:
+        # What the build can actually use right now beats what it was installed as.
+        result["backend"] = devices[0]["backend"]
+    elif devices is not None:
+        result["backend"] = "cpu"
+        if installed_as in ("cuda", "rocm", "vulkan", "metal"):
+            result["warnings"].append(f"This {_BACKEND_WORDS.get(installed_as, installed_as)} build of llama.cpp found no "
+                                      "usable graphics card, so it will run on the CPU only. Updating your graphics "
+                                      "driver may fix this.")
+    else:
+        result["backend"] = installed_as or info["backend"] or _backend_from_files(folder) or "unknown"
     if _quarantined(server):
         result["warnings"].append("macOS has marked this llama.cpp as downloaded from the internet, so it may refuse "
                                   f"to run it. If it does, run: xattr -dr com.apple.quarantine \"{folder}\"")
     return result
+
+
+def _plain(text):
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def pick_device(devices, gpu):
+    """The ggml device name (`CUDA0`, `Vulkan1`, `MTL0`, ...) that is the hardware-scan GPU `gpu`, chosen
+    from a `list_devices` result. None when it cannot be told apart safely: never guess a name, because
+    llama.cpp exits on an unknown one (`invalid device: CUDA0`)."""
+    devices = [d for d in devices or [] if d.get("backend") != "cpu"]
+    if not devices or not gpu:
+        return None
+    same = [d for d in devices if d["backend"] == gpu.get("backend")]
+    if len(same) == 1:
+        return same[0]["name"]
+    # Different backend (an NVIDIA card on a Vulkan build) or several cards: the name must match, word for word.
+    name = _plain(gpu.get("name"))
+    named = [d for d in same or devices if name and _plain(d["description"])
+             and (f" {name} " in f" {_plain(d['description'])} " or f" {_plain(d['description'])} " in f" {name} ")]
+    return named[0]["name"] if len(named) == 1 else None
+
+
+_BACKEND_WORDS = {"cuda": "CUDA (NVIDIA)", "rocm": "ROCm (AMD)", "vulkan": "Vulkan", "metal": "Metal"}
 
 
 def empty_result():
@@ -715,8 +843,11 @@ def _merge_companion(archive, bin_dir, cancel):
         libs = lambda f: sum(1 for p in f.iterdir() if re.search(r"\.(dll|so(\.\d+)*|dylib)$", p.name.lower()))
         source = max(folders, key=libs)
         for path in source.iterdir():
-            if not path.is_dir() and not (bin_dir / path.name).exists():
-                os.replace(path, bin_dir / path.name)
+            # Only plain files: a relative link checked where it was unpacked would point somewhere else
+            # once moved to bin_dir, so links are never carried over.
+            if path.is_symlink() or not path.is_file() or (bin_dir / path.name).exists():
+                continue
+            os.replace(path, bin_dir / path.name)
 
 
 def _tag_from(name):
@@ -747,7 +878,9 @@ def _finish(store, archives, info, progress, cancel):
         if not ok or not parsed["version"]:
             raise ValueError("The downloaded llama.cpp would not start on this computer"
                              + (f" ({output.strip().splitlines()[-1][:200]})" if output.strip() else "") + ".")
-        backend = info["backend"] or parsed["backend"] or _backend_from_files(bin_dir) or "unknown"
+        devices = None if info["backend"] else list_devices([str(bin_dir / _exe("llama-server"))])
+        backend = (info["backend"] or (devices[0]["backend"] if devices else "cpu" if devices is not None else None)
+                   or parsed["backend"] or _backend_from_files(bin_dir) or "unknown")
         if info["backend"] is None:
             folder_name = re.sub(r"[^A-Za-z0-9._-]", "_", f"{info['tag']}-{backend}")
         manifest = dict(info, backend=backend, build=info.get("build") or parsed["build"],
@@ -797,6 +930,9 @@ def install(store, hardware, progress=None, cancel=None, release=None, allow_unv
                  "Updating your graphics driver may let the faster build work."]
         choice = cpu
     result = detect(store)
+    if result["source"] == "configured":
+        notes.append("The new llama.cpp was installed, but the app keeps using the llama.cpp folder you chose earlier "
+                     "with 'llm-config runtime use'. Remove that setting to switch to the new install.")
     result["warnings"] = notes + result["warnings"]
     result["reason"] = choice["reason"]
     if choice.get("unverified"):

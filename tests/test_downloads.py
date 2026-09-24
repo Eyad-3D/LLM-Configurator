@@ -1,5 +1,6 @@
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -232,6 +233,75 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual((self.dir / "m.gguf.part").stat().st_size, 14)
         self.assertEqual(len(hub.requests), 1 + downloads.RETRIES)
 
+    def test_server_ignoring_range_and_dropping_does_not_retry_forever(self):
+        body = bytes(range(100))
+        variant = make_variant({"m.gguf": body})
+        hub = Hub({"m.gguf": body}, ignore_range=True)
+        hub.script = [lambda h, r: h.reply(r, fail_after=14)] * 50
+        with self.assertRaisesRegex(ValueError, "network kept failing"):
+            self.run_download(variant, hub)
+        # Re-downloading the same first bytes again and again is not progress.
+        self.assertEqual(len(hub.requests), 1 + downloads.RETRIES)
+
+    def test_shorter_206_range_keeps_part_and_asks_for_the_rest(self):
+        body = bytes(range(100))
+        variant = make_variant({"m.gguf": body})
+        (self.dir / "m.gguf.part").write_bytes(body[:10])
+        hub = Hub({"m.gguf": body})
+        hub.script = [lambda h, r: Response(body[10:50], 206, {"Content-Range": "bytes 10-49/100"})]
+        self.run_download(variant, hub)
+        self.assertEqual((self.dir / "m.gguf").read_bytes(), body)
+        self.assertEqual([r.get_header("Range") for r in hub.requests], ["bytes=10-", "bytes=50-"])
+
+    def test_write_failing_at_close_never_installs_a_short_file(self):
+        body = bytes(range(100))
+        variant = make_variant({"m.gguf": body})
+
+        class DiskFull:
+            """Like a buffered file on a full disk: the last bytes are lost when it is closed."""
+            def __init__(self, path, mode):
+                self.real = open(path, mode)
+            def write(self, chunk):
+                return self.real.write(chunk)
+            def close(self):
+                self.real.truncate(max(0, self.real.tell() - 5))
+                self.real.close()
+                raise OSError(28, "No space left on device")
+
+        with patch.object(downloads, "_open_partial", lambda path, mode, name: DiskFull(path, mode)):
+            with self.assertRaisesRegex(ValueError, "Could not save m.gguf"):
+                self.run_download(variant, Hub({"m.gguf": body}))
+        self.assertFalse((self.dir / "m.gguf").exists())
+        # The next run resumes from what really reached the disk.
+        self.run_download(variant, Hub({"m.gguf": body}))
+        self.assertEqual((self.dir / "m.gguf").read_bytes(), body)
+
+    def test_cancel_is_not_hidden_by_a_failing_close(self):
+        body = bytes(range(100))
+        variant = make_variant({"m.gguf": body})
+        cancel = threading.Event()
+
+        class FailingClose:
+            def __init__(self, path, mode):
+                self.real = open(path, mode)
+            def write(self, chunk):
+                return self.real.write(chunk)
+            def close(self):
+                self.real.close()
+                raise OSError(28, "No space left on device")
+
+        hub = Hub({"m.gguf": body})
+        hub.script = [lambda h, r: h.reply(r, on_read=lambda sent: sent >= 30 and cancel.set())]
+        with patch.object(downloads, "_open_partial", lambda path, mode, name: FailingClose(path, mode)):
+            with self.assertRaises(Cancelled):
+                self.run_download(variant, hub, cancel=cancel)
+
+    def test_unsafe_or_colliding_local_names_are_refused(self):
+        for names in (["m.gguf:stream"], ["a.gguf", "a.gguf.part"], ["C:m.gguf"]):
+            variant = make_variant({n: b"x" * (i + 1) for i, n in enumerate(names)})
+            with self.assertRaisesRegex(ValueError, "Unsafe or duplicate"):
+                downloads.plan(variant, self.dir)
+
     def test_access_denied_has_plain_message(self):
         body = b"a" * 10
         hub = Hub({})
@@ -400,3 +470,127 @@ class RedirectTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BenchDeviceTests(unittest.TestCase):
+    """runtime.bench picks the `-dev` name the build itself lists, per backend, and never guesses one."""
+
+    def setUp(self):
+        from dataclasses import replace
+        self.model = replace(demo_variants()[0], demo=False, sha256="correct")
+        self.calls = []
+
+    def hw(self, *gpus):
+        return {"fingerprint": "machine", "ram_available": 64 * GIB, "cores": 8, "threads": 16, "gpus": list(gpus)}
+
+    def run_bench(self, hardware, devices, layers=4, executable="llama-bench", build_number=11158):
+        row = {"n_prompt": 0, "n_gen": 128, "n_depth": 4096 - 128, "avg_ts": 30.0, "n_gpu_layers": layers, "n_threads": 8,
+               "type_k": "f16", "type_v": "f16", "build_commit": "d2e5458", "build_number": build_number, "n_batch": 2048,
+               "n_ubatch": 512}
+
+        def fake_run(args, **kwargs):
+            self.calls.append((args, kwargs.get("env") or {}))
+            return type("Done", (), {"returncode": 0, "stdout": json.dumps([row]), "stderr": ""})()
+
+        listed = []
+
+        def fake_list(command, env=None):
+            listed.append(dict(env or {}))
+            return devices
+
+        with patch("llm_configurator.runtime.digest", return_value="correct"), \
+                patch("llm_configurator.runtime.shutil.which", return_value="/bin/llama-bench"), \
+                patch("llm_configurator.runtime.scan", return_value=hardware), \
+                patch("llm_configurator.runtime.list_devices", side_effect=fake_list), \
+                patch("llm_configurator.runtime.subprocess.run", side_effect=fake_run):
+            result = runtime.bench(self.model, "file.gguf", executable, 4096, layers)
+        self.listed = listed
+        return result
+
+    def args(self):
+        return self.calls[-1][0]
+
+    def dev(self):
+        args = self.args()
+        return args[args.index("-dev") + 1] if "-dev" in args else None
+
+    @staticmethod
+    def device(name, description, backend):
+        return {"name": name, "description": description, "backend": backend}
+
+    def test_nvidia_is_pinned_by_uuid_and_uses_its_cuda_name(self):
+        gpu = {"index": 0, "uuid": "GPU-abc", "name": "NVIDIA GeForce RTX 4090", "backend": "cuda", "available": 24 * GIB}
+        result = self.run_bench(self.hw(gpu), [self.device("CUDA0", "NVIDIA GeForce RTX 4090", "cuda")])
+        self.assertEqual(self.dev(), "CUDA0")
+        self.assertEqual(self.calls[-1][1]["CUDA_VISIBLE_DEVICES"], "GPU-abc")
+        self.assertEqual(self.listed[0]["CUDA_VISIBLE_DEVICES"], "GPU-abc")   # the list is taken with the pin applied
+        self.assertEqual(result["runtime"], {"version": "b11158", "backend": "cuda"})
+        self.assertEqual((result["kind"], result["depth"], result["runtime_build"]), ("bench", 4096 - 128, "b11158"))
+        self.assertRegex(result["id"], r"^[0-9a-f]{12}$")
+
+    def test_amd_on_vulkan_is_found_by_name_among_several(self):
+        amd = {"index": 0, "uuid": "amdgpu-0000:03:00.0", "name": "AMD Radeon RX 7900 XTX", "backend": "vulkan",
+               "vendor": "amd", "available": 20 * GIB}
+        nvidia = {"index": 1, "uuid": "GPU-x", "name": "NVIDIA GeForce RTX 3060", "backend": "cuda", "available": 12 * GIB}
+        devices = [self.device("Vulkan0", "NVIDIA GeForce RTX 3060", "vulkan"),
+                   self.device("Vulkan1", "AMD Radeon RX 7900 XTX (RADV NAVI31)", "vulkan")]
+        self.run_bench(self.hw(amd, nvidia), devices)
+        self.assertEqual(self.dev(), "Vulkan1")
+        self.assertEqual(self.calls[-1][1].get("CUDA_VISIBLE_DEVICES"), os.environ.get("CUDA_VISIBLE_DEVICES"))
+
+    def test_rocm_and_metal_names(self):
+        rocm = {"index": 0, "uuid": "amdgpu-1", "name": "AMD Radeon PRO W7900", "backend": "rocm", "available": 40 * GIB}
+        self.run_bench(self.hw(rocm), [self.device("ROCm0", "AMD Radeon PRO W7900", "rocm")])
+        self.assertEqual(self.dev(), "ROCm0")
+        apple = {"index": 0, "uuid": "apple-m3-max", "name": "Apple M3 Max", "backend": "metal", "unified": True,
+                 "available": 40 * GIB}
+        self.run_bench(self.hw(apple), [self.device("MTL0", "Apple M3 Max", "metal")])
+        self.assertEqual(self.dev(), "MTL0")
+        self.assertEqual(self.calls[-1][1].get("CUDA_VISIBLE_DEVICES"), os.environ.get("CUDA_VISIBLE_DEVICES"))
+
+    def test_other_backend_card_is_never_taken_without_a_name_match(self):
+        # Intel iGPU picked on a laptop whose CUDA build only lists the NVIDIA card.
+        igpu = {"index": 0, "uuid": "intel-1", "name": "Intel(R) Iris(R) Xe Graphics", "backend": "vulkan", "available": 2 * GIB}
+        with self.assertRaisesRegex(ValueError, "cannot tell which"):
+            self.run_bench(self.hw(igpu), [self.device("CUDA0", "NVIDIA GeForce RTX 4070 Laptop GPU", "cuda")], layers=1)
+        # Whole words only: an A100 is not an A10.
+        a100 = {"index": 0, "uuid": "GPU-a", "name": "NVIDIA A100-PCIE-40GB", "backend": "cuda", "available": 40 * GIB}
+        with self.assertRaisesRegex(ValueError, "cannot tell which"):
+            self.run_bench(self.hw(a100), [self.device("Vulkan0", "NVIDIA A10", "vulkan"),
+                                           self.device("Vulkan1", "-", "vulkan")], layers=1)
+
+    def test_nvidia_card_with_vulkan_build(self):
+        gpu = {"index": 0, "uuid": "GPU-abc", "name": "NVIDIA GeForce RTX 4090", "backend": "cuda", "available": 24 * GIB}
+        self.run_bench(self.hw(gpu), [self.device("Vulkan0", "NVIDIA GeForce RTX 4090", "vulkan")])
+        self.assertEqual(self.dev(), "Vulkan0")
+
+    def test_cpu_only_build_is_refused_before_running(self):
+        gpu = {"index": 0, "uuid": "GPU-abc", "name": "NVIDIA GeForce RTX 4090", "backend": "cuda", "available": 24 * GIB}
+        with self.assertRaisesRegex(ValueError, "sees no graphics card"):
+            self.run_bench(self.hw(gpu), [])
+        self.assertEqual(self.calls, [])
+
+    def test_ambiguous_devices_are_refused_not_guessed(self):
+        gpu = {"index": 0, "uuid": "amdgpu-1", "name": "AMD Radeon RX 7900 XTX", "backend": "vulkan", "available": 20 * GIB}
+        devices = [self.device("Vulkan0", "AMD Radeon RX 7900 XTX (RADV NAVI31)", "vulkan"),
+                   self.device("Vulkan1", "AMD Radeon RX 7900 XTX (RADV NAVI31)", "vulkan")]
+        with self.assertRaisesRegex(ValueError, "cannot tell which"):
+            self.run_bench(self.hw(gpu), devices)
+        self.assertEqual(self.calls, [])
+
+    def test_build_without_device_list_leaves_dev_out(self):
+        gpu = {"index": 0, "uuid": "GPU-abc", "name": "NVIDIA GeForce RTX 4090", "available": 24 * GIB}  # pre-v0.4 scan
+        self.run_bench(self.hw(gpu), None)
+        self.assertIsNone(self.dev())
+        self.assertEqual(self.calls[-1][1]["CUDA_VISIBLE_DEVICES"], "GPU-abc")
+
+    def test_cpu_run_uses_none_and_accepts_an_argv_prefix(self):
+        result = self.run_bench(self.hw(), None, layers=0, executable=["python3", "fake_llama.py", "--as", "bench"])
+        self.assertEqual(self.args()[:4], ["python3", "fake_llama.py", "--as", "bench"])
+        self.assertEqual(self.dev(), "none")
+        self.assertEqual(result["runtime"]["backend"], "cpu")
+        self.assertEqual(self.listed, [])
+
+    def test_missing_gpu_says_gpu_not_nvidia(self):
+        with self.assertRaisesRegex(ValueError, "^The selected GPU is unavailable$"):
+            self.run_bench(self.hw(), None)
