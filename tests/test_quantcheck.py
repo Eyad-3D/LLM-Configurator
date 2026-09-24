@@ -630,12 +630,22 @@ class KlCheckTests(unittest.TestCase):
         self.assertEqual(q4["verdict"], "small")
         self.assertIsNone(q4["median_kld"])
         self.assertIn("cut short 3 times in a row", q4["partial"])
-        self.assertIn("running average after window 12 of 12", q4["partial"])
+        self.assertIn("last progress line, which covers all 12 windows", q4["partial"])
         self.assertIn("missing: median, worst 1%", q4["partial"])
         self.assertIn("(Partial result:", q4["plain"])
         self.assertTrue(any(note.startswith("Q4_K_M: llama-perplexity's final report was cut short")
                             for note in result["notes"]))
         self.assertEqual(len(self.argv_log.read_text(encoding="utf-8").splitlines()), 1 + quantcheck.MAX_ATTEMPTS)
+
+    def test_partial_note_wording(self):
+        rows = {"from_rows": ["mean_kld"], "chunks_done": 2, "median_kld": 0.1, "kld_99": 0.2, "same_top_p": 90.0,
+                "mean_delta_p": 0.1}
+        self.assertEqual(quantcheck._partial_note(rows, 3, 12),
+                         "llama-perplexity's final report was cut short 3 times in a row, so some figures are a "
+                         "running average over the first 2 of 12 windows.")
+        only_end = quantcheck._partial_note({"from_rows": [], "median_kld": 0.1, "kld_99": 0.2, "same_top_p": None}, 1, 4)
+        self.assertEqual(only_end, "llama-perplexity's final report was cut short; "
+                                   "missing: same top word, change in confidence.")
 
     def test_missing_last_line_only_is_retried(self):
         with mock.patch.dict(os.environ, {"FAKE_COUNTER": str(self.dir / "runs.txt"), "FAKE_TRUNCATE_RUNS": "1",

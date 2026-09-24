@@ -338,12 +338,15 @@ _MISSING_NAMES = [("median_kld", "median"), ("kld_99", "worst 1%"), ("same_top_p
 
 def _partial_note(parsed, attempts, total_chunks):
     """Plain words for a result whose closing report never arrived in full."""
-    times = f"{attempts} time{'s' if attempts != 1 else ''} in a row"
-    text = f"llama-perplexity's final report was cut short {times}"
+    text = "llama-perplexity's final report was cut short" + (f" {attempts} times in a row" if attempts > 1 else "")
+    done = parsed.get("chunks_done")
     if parsed.get("from_rows"):
-        where = (f"after window {parsed['chunks_done']} of {total_chunks}" if parsed.get("chunks_done")
-                 else "part-way through")
-        text += f", so some figures are its running average {where}"
+        if done and done >= total_chunks:
+            text += (f", so some figures come from its last progress line, which covers all {total_chunks} windows "
+                     "but with fewer decimal places")
+        else:
+            where = f"the first {done} of {total_chunks} windows" if done else "only part of the text"
+            text += f", so some figures are a running average over {where}"
     missing = [name for key, name in _MISSING_NAMES if parsed.get(key) is None]
     if missing:
         text += f"; missing: {', '.join(missing)}"
