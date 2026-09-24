@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "workload": "agentic",
   "description": "Tool-calling quiz: pick the right tool and fill its arguments correctly, or decline when no tool fits.",
   "items": [
@@ -88,7 +88,7 @@
         "name": "get_weather",
         "arguments": {
           "city": {
-            "$regex": "lisbon(, portugal)?",
+            "$regex": "(lisbon|lisboa)(,? ?(portugal|pt))?",
             "example": "Lisbon"
           }
         }
@@ -397,7 +397,7 @@
         "name": "calculator",
         "arguments": {
           "expression": {
-            "$regex": "4817\\s*[*x×]\\s*36",
+            "$regex": "4817\\s*[*x×·]\\s*36|36\\s*[*x×·]\\s*4817|\\(\\s*(4817\\s*[*x×·]\\s*36|36\\s*[*x×·]\\s*4817)\\s*\\)",
             "example": "4817*36"
           }
         }
@@ -669,7 +669,7 @@
           }
         }
       ],
-      "prompt": "Customer C-2291 wants to know which of their orders have shipped. Pull those up.",
+      "prompt": "Customer C-2291 wants to see their orders that are currently in 'shipped' status (sent out but not yet delivered). Pull those up.",
       "answer": {
         "name": "query_orders",
         "arguments": {
@@ -1236,11 +1236,11 @@
         "name": "get_distance",
         "arguments": {
           "origin": {
-            "$regex": "lyon(, france)?",
+            "$regex": "lyon(,? ?(france|fr))?",
             "example": "Lyon"
           },
           "destination": {
-            "$regex": "grenoble(, france)?",
+            "$regex": "grenoble(,? ?(france|fr))?",
             "example": "Grenoble"
           },
           "unit": "km"
@@ -1346,10 +1346,13 @@
         "name": "create_task",
         "arguments": {
           "title": {
-            "$regex": "(renew( the| my)? car insurance( policy)?|car insurance( policy)? renewal)",
+            "$regex": "(renew( the| my)? (car|auto|vehicle) insurance( policy)?|(car|auto|vehicle) insurance( policy)? renewal|renew( the| my)? insurance (for|on) (the|my) car)",
             "example": "renew car insurance"
           },
-          "priority": "high"
+          "priority": "high",
+          "due_date": {
+            "$absent": true
+          }
         }
       }
     },
@@ -1389,7 +1392,7 @@
         "name": "play_music",
         "arguments": {
           "query": {
-            "$regex": "('?(the )?glass orchard'?( album)?(,? (by|-|–) (the )?velvet mile)?|(the )?velvet mile,? (-|–)? ?'?glass orchard'?)",
+            "$regex": "(the )?'?glass orchard'?( album)?(,? ?(by|-|–|—|:) ?(the )?velvet mile)?|(the )?velvet mile ?(-|–|—|:|,)? ?'?glass orchard'?( album)?|(album:? ?)?'?glass orchard'?,? (artist:? ?)?(by )?(the )?velvet mile",
             "example": "Glass Orchard by the Velvet Mile"
           },
           "shuffle": true,
@@ -1860,7 +1863,7 @@
         "name": "create_reminder",
         "arguments": {
           "text": {
-            "$regex": "(call( the)? plumber|plumber)",
+            "$regex": "(remind me to )?(call( the)? plumber|plumber( call)?)",
             "example": "call the plumber"
           },
           "datetime": {
@@ -2235,10 +2238,12 @@
         "arguments": {
           "title": "Design sync",
           "date": "2026-10-20",
-          "attendees": [
-            "ana@corp.test",
-            "raj@corp.test"
-          ]
+          "attendees": {
+            "$unordered": [
+              "ana@corp.test",
+              "raj@corp.test"
+            ]
+          }
         }
       }
     },
@@ -2292,12 +2297,20 @@
             "$regex": "backpacks?",
             "example": "backpacks"
           },
-          "max_price": 60,
-          "colors": [
-            "black",
-            "green"
-          ],
-          "in_stock": true
+          "max_price": {
+            "$regex": "\\$?60(\\.0+)?|\\$?59\\.99",
+            "example": "60"
+          },
+          "colors": {
+            "$unordered": [
+              "black",
+              "green"
+            ]
+          },
+          "in_stock": true,
+          "min_rating": {
+            "$absent": true
+          }
         }
       }
     },
@@ -2353,24 +2366,26 @@
         "arguments": {
           "customer": "Harbor Bakery",
           "currency": "EUR",
-          "line_items": [
-            {
-              "description": {
-                "$regex": "flour sacks?",
-                "example": "flour sacks"
+          "line_items": {
+            "$unordered": [
+              {
+                "description": {
+                  "$regex": "(sacks? of )?flour( sacks?)?",
+                  "example": "flour sacks"
+                },
+                "quantity": 3,
+                "unit_price": 18.5
               },
-              "quantity": 3,
-              "unit_price": 18.5
-            },
-            {
-              "description": {
-                "$regex": "delivery fee",
-                "example": "delivery fee"
-              },
-              "quantity": 1,
-              "unit_price": 12
-            }
-          ]
+              {
+                "description": {
+                  "$regex": "delivery( fee| charge)?",
+                  "example": "delivery fee"
+                },
+                "quantity": 1,
+                "unit_price": 12
+              }
+            ]
+          }
         }
       }
     },

@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "workload": "general",
   "description": "Short original questions on arithmetic, reasoning, dates, unit conversion, string manipulation and stable common knowledge.",
   "items": [
@@ -22,7 +22,10 @@
       "kind": "capital",
       "difficulty": "easy",
       "prompt": "What is the capital city of Japan? Reply with the city name only.",
-      "answer": "tokyo"
+      "answer": "tokyo",
+      "accept": [
+        "t[oō]ky[oō](,? japan)?"
+      ]
     },
     {
       "id": "gen-004",
@@ -97,14 +100,20 @@
       "kind": "capital",
       "difficulty": "easy",
       "prompt": "What is the capital city of Canada? Reply with the city name only.",
-      "answer": "ottawa"
+      "answer": "ottawa",
+      "accept": [
+        "ottawa(,? (ontario|on|canada))?"
+      ]
     },
     {
       "id": "gen-014",
       "kind": "chemical_symbol",
       "difficulty": "easy",
       "prompt": "Which chemical element has the symbol Fe? Reply with the element name only.",
-      "answer": "iron"
+      "answer": "iron",
+      "accept": [
+        "iron(,? \\(?fe\\)?)?"
+      ]
     },
     {
       "id": "gen-015",
@@ -272,7 +281,10 @@
       "kind": "logic_syllogism",
       "difficulty": "medium",
       "prompt": "All blickets are green. Some green things are round. Jojo is a blicket. Must Jojo be round? Reply with yes or no.",
-      "answer": "no"
+      "answer": "no",
+      "accept": [
+        "no( ?[,;:—–-] ?| )(not necessarily|it need not be|jojo need not be round|jojo is not necessarily round)"
+      ]
     },
     {
       "id": "gen-038",
@@ -304,7 +316,10 @@
       "kind": "rate_problem",
       "difficulty": "hard",
       "prompt": "Pipe A alone fills an empty tank in 6 hours. Pipe B alone fills it in 4 hours. If both pipes are opened together on the empty tank, how many hours does it take to fill? Give just the number.",
-      "answer": "2.4"
+      "answer": "2.4",
+      "accept": [
+        "(2\\.4 (hours?|hrs?|h) )?\\(?2 ?(hours?|hrs?|h),? (and )?24 ?(minutes?|mins?|m)\\)?"
+      ]
     },
     {
       "id": "gen-042",
@@ -353,7 +368,10 @@
       "kind": "unit_conversion",
       "difficulty": "hard",
       "prompt": "How many square centimeters are in 2.5 square meters? Give just the number.",
-      "answer": "25000"
+      "answer": "25000",
+      "accept": [
+        "25,? ?000 ?(cm ?(2|\\^2)|sq\\.? ?cm|square centimet(er|re)s?)"
+      ]
     },
     {
       "id": "gen-049",
@@ -390,8 +408,9 @@
       "prompt": "What date is 45 days after 20 January 2026? Give the date in YYYY-MM-DD format.",
       "answer": "2026-03-06",
       "accept": [
-        "(march|mar) 0?6,? 2026",
-        "0?6 (march|mar) 2026",
+        "2026-0?3-0?6( \\((friday|fri)\\))?",
+        "((friday|fri),? )?(march|mar) 0?6(th)?,? 2026",
+        "((friday|fri),? )?0?6(th)? (of )?(march|mar),? 2026",
         "2026/0?3/0?6"
       ]
     }
