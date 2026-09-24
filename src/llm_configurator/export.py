@@ -21,6 +21,7 @@ SPLIT = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$", re.IGNORECASE)
 PS_QUOTES = "'‘’‚‛"  # PowerShell treats all of these as single quotes
 PS_BARE = re.compile(r"^(--?[A-Za-z][A-Za-z0-9-]*|[A-Za-z0-9_]+)$")
 DOCKER_IMAGES = {"cuda": "server-cuda", "vulkan": "server-vulkan", "rocm": "server-rocm"}
+RUNTIME_GPU_BACKENDS = {"cuda", "vulkan", "rocm", "metal"}
 
 FORMATS = [
     {"id": "llama-server", "label": "llama-server script",
@@ -92,10 +93,17 @@ def _grouped(args):
     return lines
 
 
-def _prepared(config, variant, uses_port=True):
-    """Normalised config with placeholders for missing files, a fixed port and an alias for clients."""
+def _prepared(config, variant, uses_port=True, runtime_backend=None):
+    """Normalised config with placeholders for missing files, a fixed port and an alias for clients.
+
+    `runtime_backend` (runtime_install.detect()["backend"]) is the llama.cpp build the settings were
+    tested with. When it is a GPU backend it wins over the card's own, so a Vulkan build on an NVIDIA
+    card exports the Vulkan docker image and no CUDA_VISIBLE_DEVICES, like the tested run.
+    """
     raw = dict(config)
     notes = []
+    if runtime_backend in RUNTIME_GPU_BACKENDS and raw.get("gpu_backend") not in (None, "cpu", runtime_backend):
+        raw["gpu_backend"] = runtime_backend
     if not raw.get("model_path"):
         raw["model_path"] = PLACEHOLDER
         name = f" ({variant.filename})" if variant is not None else ""
@@ -349,6 +357,9 @@ def _docker(config, variant, platform, notes):
     elif backend == "vulkan":
         notes.append("Vulkan in Docker works on Linux by passing /dev/dri; Docker Desktop on Windows and macOS "
                      "cannot pass the graphics card this way, so use the llama-server script there.")
+        notes.append("This uses the Vulkan image because the settings were tested with a Vulkan build of llama.cpp. "
+                     "On an NVIDIA card, Vulkan inside Docker also needs the NVIDIA Container Toolkit; the CUDA image "
+                     "(server-cuda) is the usual choice there, and its speed may differ from the tested run.")
     elif backend == "rocm":
         notes.append("AMD ROCm in Docker works on Linux only and needs /dev/kfd and /dev/dri.")
     elif config["gpu_backend"] == "metal":
@@ -480,13 +491,16 @@ BUILDERS = {"ollama": _ollama, "docker-compose": _docker, "openai-python": _open
             "continue": _continue, "open-webui": _open_webui, "lmstudio": _lmstudio}
 
 
-def export(config, variant, fmt, platform="posix", server_command=None):
-    """Build one export. Returns {"format", "filename", "content", "instructions", "notes"}."""
+def export(config, variant, fmt, platform="posix", server_command=None, runtime_backend=None):
+    """Build one export. Returns {"format", "filename", "content", "instructions", "notes"}.
+
+    Pass `runtime_backend` (runtime_install.detect(store)["backend"]) when the config did not come from
+    launch.from_candidate(..., runtime_backend=...), so the GPU backend is the installed build's."""
     if fmt not in {item["id"] for item in FORMATS}:
         raise ValueError(f"Unknown export format {fmt!r}. Choose one of: {', '.join(item['id'] for item in FORMATS)}")
     if platform not in {"posix", "windows"}:
         raise ValueError("platform must be posix (macOS or Linux) or windows")
-    config, notes = _prepared(config, variant, uses_port=fmt not in {"ollama", "lmstudio"})
+    config, notes = _prepared(config, variant, uses_port=fmt not in {"ollama", "lmstudio"}, runtime_backend=runtime_backend)
     if fmt == "llama-server":
         filename, content, instructions = _llama_server(config, variant, platform, server_command, notes)
     elif fmt == "ollama":

@@ -34,7 +34,7 @@ def hardware(**extra):
 def measurement(**extra):
     base = {"id": "m1", "variant_id": "qwen|q4", "sha256": SHA, "fingerprint": FINGERPRINT,
             "timestamp": "2026-09-14T13:37:42.123456+00:00", "context": 8192, "users": 1, "gpu_layers": 36,
-            "gpu_uuid": GPU_UUID, "threads": 8, "tps": 101.25, "pp_tps": 3000.0, "ttft_s": 0.21, "depth": 0,
+            "gpu_uuid": GPU_UUID, "threads": 8, "tps": 101.25, "pp_tps": 3000.0, "ttft_s": 0.21, "depth": 7552,
             "kind": "speed_test", "runtime_build": "b4500", "runtime": {"version": "b4500", "backend": "cuda"},
             "settings": {"flash_attn": "on", "cache_type_k": "q8_0", "cache_type_v": "q8_0", "batch": 2048,
                          "ubatch": 512, "n_cpu_moe": 0},
@@ -125,7 +125,8 @@ class AnonymizeTests(unittest.TestCase):
                       platform={"system": "Darwin", "machine": "arm64", "release": "23.2.0"},
                       gpus=[{"index": 0, "uuid": "apple-m2-max", "name": "Apple M2 Max", "backend": "metal", "unified": True,
                              "total": int(48 * GIB)}])
-        row = community.anonymize(measurement(gpu_uuid="apple-m2-max"), hw, VARIANT)
+        row = community.anonymize(measurement(gpu_uuid="apple-m2-max", runtime={"version": "b4500", "backend": "Metal,BLAS"}),
+                                  hw, VARIANT)
         self.assertEqual((row["hardware"]["gpu"], row["hardware"]["backend"], row["hardware"]["unified"], row["hardware"]["arch"]),
                          ("Apple M2 Max", "metal", True, "arm64"))
 
@@ -436,7 +437,7 @@ class ShareTests(unittest.TestCase):
 
 
 class EvidenceTests(unittest.TestCase):
-    CONFIG = {"context": 8192, "gpu_layers": 36, "total_layers": 36, "gpu_uuid": GPU_UUID, "parallel": 1}
+    CONFIG = {"context": 8192, "gpu_layers": 36, "total_layers": 36, "gpu_uuid": GPU_UUID, "parallel": 1, "cache_type_k": "q8_0"}
 
     def rows(self, speeds, **changes):
         return [record(tps=s, **changes) for s in speeds]
@@ -464,7 +465,7 @@ class EvidenceTests(unittest.TestCase):
         noise = (self.rows([1], variant__sha256="cd" * 32) + self.rows([2], context=65536)
                  + self.rows([3], settings__placement="split", settings__gpu_layers=10))
         self.assertIsNone(community.evidence(base + noise, VARIANT, hardware(), self.CONFIG))
-        self.assertEqual(community.evidence(base + self.rows([110], context=12000), VARIANT, hardware(), self.CONFIG)["n"], 2)
+        self.assertEqual(community.evidence(base + self.rows([110], context=12000, depth=12000 - 640), VARIANT, hardware(), self.CONFIG)["n"], 2)
 
     def test_cpu_tiers(self):
         config = {**self.CONFIG, "gpu_layers": 0}
@@ -549,7 +550,7 @@ class FixupTests(unittest.TestCase):
         config = dict(EvidenceTests.CONFIG, n_cpu_moe=20)
         full = [record(), record()]
         self.assertIsNone(community.evidence(full, VARIANT, hardware(), config))
-        moe = [community.anonymize(measurement(settings={"n_cpu_moe": 20}), hardware(), VARIANT) for _ in range(2)]
+        moe = [community.anonymize(measurement(settings={"n_cpu_moe": 20, "cache_type_k": "q8_0"}), hardware(), VARIANT) for _ in range(2)]
         self.assertEqual(moe[0]["settings"]["placement"], "split")
         self.assertEqual(community.evidence(moe, VARIANT, hardware(), config)["n"], 2)
         self.assertIsNone(community.evidence(moe, VARIANT, hardware(), EvidenceTests.CONFIG))
@@ -607,3 +608,57 @@ class FixupTests(unittest.TestCase):
         self.assertEqual((result["records"], result["skipped"]), (1, 2))
         with self.assertRaisesRegex(ValueError, "different hardware"):
             community.share_payload(self.store, ["old"], hardware=hardware(), variants=[VARIANT])
+
+
+class Round3Tests(unittest.TestCase):
+    CONFIG = EvidenceTests.CONFIG
+
+    def test_evidence_matches_cache_type_itself(self):
+        rows = [record(s) for s in (80, 90, 100)]  # measured with a q8_0 notepad
+        self.assertEqual(community.evidence(rows, VARIANT, hardware(), self.CONFIG)["n"], 3)
+        self.assertIsNone(community.evidence(rows, VARIANT, hardware(), {**self.CONFIG, "cache_type_k": "f16"}))
+        self.assertIsNone(community.evidence(rows, VARIANT, hardware(), {k: v for k, v in self.CONFIG.items() if k != "cache_type_k"}))
+        plain = [record(s, settings__cache_type_k=None) for s in (80, 90)]  # missing means f16, like the engine
+        self.assertEqual(community.evidence(plain, VARIANT, hardware(), {**self.CONFIG, "cache_type_k": "f16"})["n"], 2)
+
+    def test_evidence_needs_full_depth(self):
+        shallow = [record(s, depth=1024) for s in (80, 90, 100)]  # tune trials: ~1k tokens in memory
+        self.assertIsNone(community.evidence(shallow, VARIANT, hardware(), self.CONFIG))
+        unknown = [record(s, depth=None) for s in (80, 90)]  # v0.3 benches: no depth, measured near the full context
+        self.assertEqual(community.evidence(unknown, VARIANT, hardware(), self.CONFIG)["n"], 2)
+        edge = [record(s, depth=8192 - 1024) for s in (80, 90)]
+        self.assertEqual(community.evidence(edge, VARIANT, hardware(), self.CONFIG)["n"], 2)
+
+    def test_runtime_backend_decides_the_shared_backend(self):
+        # A Vulkan llama.cpp build on an NVIDIA card is a Vulkan result, not a CUDA one.
+        row = community.anonymize(measurement(runtime={"version": "b4500", "backend": "Vulkan"}), hardware(), VARIANT)
+        self.assertEqual((row["hardware"]["backend"], row["hardware"]["gpu"], row["runtime"]["backend"]),
+                         ("vulkan", "NVIDIA GeForce RTX 4090", "vulkan"))
+        # A processor-only build ignores -ngl: nothing ran on the graphics chip.
+        row = community.anonymize(measurement(runtime={"version": "b4500", "backend": "CPU"}), hardware(), VARIANT)
+        self.assertEqual((row["settings"]["placement"], row["settings"]["gpu_layers"], row["hardware"]["backend"],
+                          row["hardware"]["gpu"]), ("cpu", 0, "cpu", None))
+        # Unknown runtime: the card's own backend, as before.
+        row = community.anonymize(measurement(runtime={}), hardware(), VARIANT)
+        self.assertEqual(row["hardware"]["backend"], "cuda")
+        # Evidence for a Vulkan launch matches Vulkan rows only.
+        vulkan = [community.anonymize(measurement(tps=s, runtime={"backend": "Vulkan"}), hardware(), VARIANT) for s in (70, 80)]
+        cuda = [record(s) for s in (100, 110)]
+        found = community.evidence(vulkan + cuda, VARIANT, hardware(), {**self.CONFIG, "gpu_backend": "vulkan"})
+        self.assertEqual((found["n"], found["median_tps"]), (2, 75.0))
+
+    def test_evidence_caches_the_hardware_class(self):
+        community._CLASS_CACHE.clear()
+        rows = [record(s) for s in (80, 90)]
+        with mock.patch.object(community, "_personal_words", wraps=community._personal_words) as words:
+            for _ in range(50):
+                community.evidence(rows, VARIANT, hardware(), self.CONFIG)
+            self.assertEqual(words.call_count, 1)
+            # A different computer (or GPU choice) is looked up afresh.
+            community.evidence(rows, VARIANT, hardware(ram_total=64 * GIB), self.CONFIG)
+            self.assertEqual(words.call_count, 2)
+        # Sharing never uses the cache: names are always scrubbed with the current host and user.
+        with mock.patch.object(community, "_personal_words", return_value=set()) as words:
+            community.anonymize(measurement(), hardware(), VARIANT)
+            community.anonymize(measurement(), hardware(), VARIANT)
+            self.assertEqual(words.call_count, 2)

@@ -46,6 +46,7 @@ KINDS = {"bench", "speed_test", "tune"}
 FLASH = {"on", "off", "auto"}
 CACHE = {"f16", "q8_0", "q4_0"}
 CONTEXT_BUCKETS = ((4096, "up to 4K"), (16384, "4K–16K"), (65536, "16K–64K"), (math.inf, "over 64K"))
+FULL_DEPTH_SLACK = 1024  # same rule as the engine: a result counts when it ran with at least context-1024 tokens in memory
 NOTE = "Measured by other people on similar computers, not on yours. Treat it as a hint."
 
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9 .+-]{0,63}")
@@ -174,10 +175,14 @@ def hardware_class(hardware, gpu_uuid=None, uses_gpu=True, personal=None, backen
     gpus = [g for g in hardware.get("gpus") or [] if isinstance(g, dict)]
     gpu = _pick_gpu(gpus, gpu_uuid, backend) if uses_gpu else None
     os_family, os_version = _os_family(hardware)
+    runtime = backend
     backend = "cpu"
     if gpu:
-        backend = gpu.get("backend") if gpu.get("backend") in BACKENDS else "unknown"
+        # The llama.cpp build decides what ran: a Vulkan build on an NVIDIA card is a Vulkan result.
+        backend = (runtime if runtime in BACKENDS - {"cpu", "unknown"} else
+                   gpu.get("backend") if gpu.get("backend") in BACKENDS else "unknown")
     unified = bool(hardware.get("unified_memory") or (gpu or {}).get("unified"))
+    personal = _personal_words() if personal is None else personal  # once, not once per name
     return {"cpu": clean_name(hardware.get("cpu_name") or hardware.get("cpu"), personal),
             "gpu": clean_name(gpu.get("name"), personal) if gpu else None, "backend": backend,
             "vram_gib": bucket_gib(gpu.get("total")) if gpu else None, "ram_gib": bucket_gib(hardware.get("ram_total")),
@@ -251,6 +256,9 @@ def anonymize(measurement, hardware, variant):
     users = _number(measurement.get("users", 1), 1, 64, integer=True)
     if users is None:
         raise ValueError("This result served more users at once than community results can describe.")
+    run_backend = _runtime_backend(runtime.get("backend"))
+    if run_backend == "cpu":
+        gpu_layers = 0  # a processor-only llama.cpp build ignores -ngl, so nothing ran on a graphics chip
     record = {
         "schema": SCHEMA, "id": secrets.token_hex(8), "month": _month(measurement.get("timestamp")),
         "kind": _choice(measurement.get("kind"), KINDS),
@@ -261,8 +269,7 @@ def anonymize(measurement, hardware, variant):
                     "filename": _text(os.path.basename(str(_field(variant, "filename") or "")), _FILENAME) if public else None,
                     "sha256": _text(sha.lower() if isinstance(sha, str) else None, _SHA),
                     "quant": _text(quant.upper() if isinstance(quant, str) else None, _QUANT), "layers": layers},
-        "hardware": hardware_class(hardware, measurement.get("gpu_uuid"), gpu_layers > 0,
-                                   backend=_runtime_backend(runtime.get("backend"))),
+        "hardware": hardware_class(hardware, measurement.get("gpu_uuid"), gpu_layers > 0, backend=run_backend),
         "settings": {"placement": _placement(gpu_layers, layers, settings.get("n_cpu_moe") or measurement.get("n_cpu_moe")),
                      "gpu_layers": gpu_layers,
                      "users": users,
@@ -274,7 +281,7 @@ def anonymize(measurement, hardware, variant):
                      "ubatch": _number(settings.get("ubatch"), 1, 65536, integer=True),
                      "n_cpu_moe": _number(settings.get("n_cpu_moe"), 0, 4096, integer=True)},
         "runtime": {"version": _runtime_version(runtime.get("version") or measurement.get("runtime_build")),
-                    "backend": _runtime_backend(runtime.get("backend"))},
+                    "backend": run_backend},
     }
     return validate_record(record)
 
@@ -567,19 +574,47 @@ def _same_model(record, variant):
                 and isinstance(quant, str) and theirs.get("quant") == quant.upper())
 
 
+_CLASS_CACHE = {}
+_CLASS_FIELDS = ("cpu_name", "cpu", "gpus", "unified_memory", "ram_total", "platform", "os")
+
+
+def _my_class(hardware, gpu_uuid, uses_gpu, backend):
+    """hardware_class for matching only (never shared), memoised: a report asks about the same computer
+    for hundreds of candidates, and the host/user name lookups dominated report time."""
+    try:
+        key = json.dumps([[(hardware or {}).get(k) for k in _CLASS_FIELDS], gpu_uuid, uses_gpu, backend],
+                         sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return hardware_class(hardware, gpu_uuid, uses_gpu, backend=backend)
+    found = _CLASS_CACHE.get(key)
+    if found is None:
+        if len(_CLASS_CACHE) >= 64:
+            _CLASS_CACHE.clear()
+        found = _CLASS_CACHE[key] = hardware_class(hardware, gpu_uuid, uses_gpu, backend=backend)
+    return dict(found)
+
+
+def _full_depth(record):
+    """Measured with (nearly) the whole context in memory. Short tune trials say little about long chats."""
+    depth = record.get("depth")
+    return depth is None or (type(depth) is int and depth + FULL_DEPTH_SLACK >= record["context"])
+
+
 def evidence(records, variant, hardware, config):
     """Median speed from other people's similar computers, or None when fewer than 2 match.
 
     Tiers, most similar first: same GPU model and backend (GPU runs) or same CPU model
     (CPU-only runs), then the same class (memory bucket + backend). Always the same model
-    file/quant, the same placement (full GPU / split / CPU) and the same context bucket.
+    file/quant, the same placement (full GPU / split / CPU), experts-on-CPU count, notepad
+    (KV cache) format and context bucket, measured at full depth.
     """
     config = config or {}
     total = config.get("total_layers") or _field(variant, "layers")
     gpu_layers = config.get("gpu_layers") or 0
     n_cpu_moe = config.get("n_cpu_moe") or 0
+    cache_type = config.get("cache_type_k") or "f16"
     placement = _placement(gpu_layers, total, n_cpu_moe)
-    mine = hardware_class(hardware, config.get("gpu_uuid"), placement != "cpu", backend=config.get("gpu_backend"))
+    mine = _my_class(hardware, config.get("gpu_uuid"), placement != "cpu", config.get("gpu_backend"))
     if config.get("gpu_backend") in BACKENDS and placement != "cpu":
         mine["backend"] = config["gpu_backend"]
     bucket, users = context_bucket(config.get("context") or 8192), config.get("parallel") or 1
@@ -592,8 +627,8 @@ def evidence(records, variant, hardware, config):
         if type(tps) not in (int, float) or not math.isfinite(tps) or tps <= 0 or type(record.get("context")) is not int:
             continue
         if (settings.get("placement") == placement and (settings.get("users") or 1) == users
-                and (settings.get("n_cpu_moe") or 0) == n_cpu_moe
-                and context_bucket(record["context"]) == bucket and _same_model(record, variant)):
+                and (settings.get("n_cpu_moe") or 0) == n_cpu_moe and (settings.get("cache_type_k") or "f16") == cache_type
+                and context_bucket(record["context"]) == bucket and _full_depth(record) and _same_model(record, variant)):
             pool.append((tps, theirs))
     if placement == "cpu":
         tiers = [("same_cpu", lambda h: mine["cpu"] and h.get("cpu") == mine["cpu"] and h.get("arch") == mine["arch"]),

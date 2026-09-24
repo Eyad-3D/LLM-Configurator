@@ -9,8 +9,9 @@ body:
         Thank you for sharing. These results help other people see how fast a model runs on computers like theirs.
 
         LLM Configurator fills in the box below. If it is empty, paste the JSON the app showed you.
-        Read it before you submit: it should only hold model names, a rough hardware description
-        (names, memory rounded to 4 GB, operating system family), settings and speeds.
+        Read it before you submit: it should only hold the model (quantisation, layer count and the file's SHA-256
+        checksum, plus its name for catalogue models only), a rough hardware description (names, memory rounded to 4 GB, operating
+        system family), the month of the test, the llama.cpp version and backend, settings and speeds.
         No file paths, user names, computer names or serial numbers.
   - type: textarea
     id: results

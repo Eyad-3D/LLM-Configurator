@@ -588,3 +588,123 @@ class PerformanceTests(unittest.TestCase):
         elapsed = time.perf_counter() - start
         self.assertTrue(report["candidates"])
         self.assertLess(elapsed, 1.5, f"recommend took {elapsed:.2f}s (target 0.5s on a typical machine)")
+
+
+# ---- v0.4 round 3: local files, short tunes, runtime backend, resolved threads ----
+from llm_configurator.engine import community_speed, matching_speed, matching_tuned
+from llm_configurator.launch import server_env
+
+
+class Round3Tests(unittest.TestCase):
+    def setUp(self):
+        self.hw = hardware(vram=0)
+        self.local = replace(demo_variants()[0], demo=False, sha256=None, source="local",
+                             id="local:0123456789abcdef:my-model.gguf")
+
+    def pick(self, report, context=8192):
+        return next(c for c in report["candidates"] if c["context"] == context and c["mode"] == "cpu")
+
+    def test_files_found_on_disk_match_their_tests_by_id(self):
+        # Scanned files have no sha256 until hashed; their id already names the file.
+        c = self.pick(recommend([self.local], self.hw, Requirements(), [record(self.local, sha256=None, kind="speed_test")]))
+        self.assertEqual((c["evidence"], c["tps"]), ("measured", 25))
+        hashed = replace(self.local, sha256="a" * 64)
+        self.assertEqual(self.pick(recommend([hashed], self.hw, Requirements(), [record(hashed, sha256=None)]))["evidence"], "measured")
+        # Both hashes known and different: the file at that path was replaced.
+        self.assertNotEqual(self.pick(recommend([hashed], self.hw, Requirements(), [record(hashed, sha256="b" * 64)]))["evidence"],
+                            "measured")
+        # Catalogue files still need a matching hash.
+        catalogue = replace(self.local, source="catalogue", id="cat")
+        self.assertNotEqual(self.pick(recommend([catalogue], self.hw, Requirements(), [record(catalogue, sha256=None)]))["evidence"],
+                            "measured")
+        tune = {"variant_id": self.local.id, "sha256": None, "fingerprint": "test-machine", "timestamp": now(),
+                "context": 8192, "gpu_layers": 0, "n_cpu_moe": 0, "kv_cache_type": "f16", "settings": {"depth": 7552},
+                "best": {"gpu_layers": 0, "threads": 6, "cache_type_k": "f16"}, "best_result": {"tps": 40}}
+        self.assertEqual(self.pick(recommend([self.local], self.hw, Requirements(), tuned=[tune]))["evidence"], "tuned")
+
+    def tune(self, depth_key="settings", depth=2048, **changes):
+        model = real(demo_variants()[0])
+        base = {"variant_id": model.id, "sha256": model.sha256, "fingerprint": "test-machine", "timestamp": now(),
+                "context": 8192, "gpu_layers": 0, "n_cpu_moe": 0, "kv_cache_type": "f16",
+                "best": {"gpu_layers": 0, "threads": 6, "cache_type_k": "f16"}, "best_result": {"tps": 40}}
+        base.update({"settings": {"depth": depth}} if depth_key == "settings" else {depth_key: depth})
+        return model, {**base, **changes}
+
+    def test_short_tunes_are_scaled_to_the_full_length_and_labelled(self):
+        model, short = self.tune()
+        c = self.pick(recommend([model], self.hw, Requirements(min_tps=10), tuned=[short]))
+        scaled = c["tuned"]["scaled_tps"]
+        self.assertLess(scaled, 40 * 0.9 + 1e-9)  # more notepad to read at 8k than at 2k, shaded 10%
+        self.assertGreater(scaled, 0)
+        self.assertEqual((c["evidence"], c["tps"], c["verdict"], c["tuned"]["depth"]), ("tuned", None, "unknown", 2048))
+        self.assertIn("near the start of a conversation", c["verdict_text"])
+        self.assertIn(f"Scaled to this length that is roughly {scaled:.0f}", c["verdict_text"])
+        self.assertIn("Run a speed test", c["verdict_text"])
+        # The pinned record's top-level depth (from **tune_result) is used when settings.depth is absent.
+        model, top = self.tune(depth_key="depth")
+        self.assertEqual(matching_tuned([top], model, self.hw, 8192, 0)["scaled_tps"], scaled)
+        # Verified at full depth: no scaling needed. Unknown depth: nothing to scale from.
+        model, full = self.tune(depth=7552)
+        self.assertIsNone(matching_tuned([full], model, self.hw, 8192, 0)["scaled_tps"])
+        model, unknown = self.tune(depth_key="nothing")
+        self.assertIsNone(matching_tuned([unknown], model, self.hw, 8192, 0)["scaled_tps"])
+        # Never stretched more than 4x (bytes-per-token scaling ignores attention compute), and never from depth 0.
+        for depth in [1024, 0]:
+            model, far = self.tune(depth=depth)
+            self.assertIsNone(matching_tuned([far], model, self.hw, 8192, 0)["scaled_tps"])
+        # A tune that moved the placement measured another candidate: no number for this one.
+        model, moved = self.tune(best={"gpu_layers": 0, "threads": 6, "cache_type_k": "q8_0"})
+        self.assertIsNone(matching_tuned([moved], model, self.hw, 8192, 0)["scaled_tps"])
+
+    def test_runtime_backend_names_the_launch_backend(self):
+        hw = hardware(ram=64, vram=12)
+        hw["gpus"][0].update(backend="cuda", name="NVIDIA RTX")
+        model = real(demo_variants()[0])
+        report = recommend([model], hw, Requirements(), runtime_backend="vulkan")
+        gpu = next(c for c in report["candidates"] if c["gpu_layers"])
+        self.assertEqual(gpu["launch"]["gpu_backend"], "vulkan")
+        config = from_candidate(gpu, "/m/x.gguf", hw, runtime_backend="vulkan")
+        self.assertEqual(config["gpu_backend"], "vulkan")
+        self.assertNotIn("CUDA_VISIBLE_DEVICES", server_env(config, base={}))  # a Vulkan build ignores it
+        cpu = next(c for c in report["candidates"] if c["mode"] == "cpu")
+        args = server_args(from_candidate(cpu, "/m/x.gguf", hw, runtime_backend="vulkan"))
+        self.assertEqual(args[args.index("-dev") + 1], "none")
+        # Unknown runtime: the card's own backend, as before.
+        gpu = next(c for c in recommend([model], hw, Requirements())["candidates"] if c["gpu_layers"])
+        self.assertEqual(gpu["launch"]["gpu_backend"], "cuda")
+        # A GPU build seen by the runtime but not by the scan still gets hidden from CPU-only runs.
+        cpu = self.pick(recommend([model], hardware(vram=0), Requirements(), runtime_backend="rocm"))
+        self.assertIn("-dev", server_args(from_candidate(cpu, "/m/x.gguf", hardware(vram=0))))
+        # A processor-only build says so instead of silently promising GPU speed.
+        notes = recommend([model], hw, Requirements(), runtime_backend="cpu")["notes"]
+        self.assertTrue(any("processor-only build" in n for n in notes))
+
+    def test_resolved_threads_match_what_testing_records(self):
+        # testing.speed_test stores config["threads"] when set, else llama-bench's n_threads. The engine always
+        # sets threads (tune threads or the core count), so the stored number is the one the candidate launches.
+        model = real(demo_variants()[0])
+        c = self.pick(recommend([model], self.hw, Requirements()))
+        config = from_candidate(c, "/m/x.gguf", self.hw)
+        self.assertEqual(config["threads"], self.hw["cores"])
+        stored = record(model, threads=config["threads"] or 99, kind="speed_test", depth=7552,
+                        settings={k: config[k] for k in ["flash_attn", "cache_type_k", "cache_type_v", "batch", "ubatch", "n_cpu_moe"]})
+        self.assertEqual(self.pick(recommend([model], self.hw, Requirements(), [stored]))["evidence"], "measured")
+        self.assertIsNone(matching_speed([record(model, threads=16)], model, self.hw, 8192, 0, None, c["threads"], launch=c["launch"]))
+
+    def test_community_speed_survives_attribute_errors(self):
+        def broken(*args):
+            raise AttributeError("'str' object has no attribute 'get'")
+        self.assertIsNone(community_speed([{"x": 1}], real(demo_variants()[0]), self.hw, {}, broken))
+
+    def test_long_tests_capped_at_32k_tokens_still_count_as_labelled_estimates(self):
+        # testing.bench_plan stops at MAX_BENCH_DEPTH: a 65,536-token test runs with 32,768 tokens in memory.
+        model = real(demo_variants()[0], max_context=131072)
+        capped = record(model, context=65536, depth=32768, tps=12, kind="speed_test", id="long")
+        self.assertIsNone(matching_speed([capped], model, self.hw, 65536, 0, None, 8))  # not verified at 64k
+        found = interpolated_speed([capped], model, self.hw, 65536, 0, None, 8)
+        self.assertLess(found["tps"], 12 * 0.9 + 1e-9)
+        self.assertEqual((found["contexts"], found["measurement_ids"]), ([32768], ["long"]))
+        # It also says something about a 32k conversation (the length it really measured), unscaled.
+        self.assertEqual(interpolated_speed([capped], model, self.hw, 16384, 0, None, 8)["tps"], 12)
+        # Short tune trials (1k tokens) cannot stand in for 8k.
+        self.assertIsNone(interpolated_speed([record(model, depth=1024, kind="tune")], model, self.hw, 8192, 0, None, 8))
