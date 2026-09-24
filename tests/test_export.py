@@ -95,6 +95,13 @@ class FormatListTests(unittest.TestCase):
                     self.assertTrue(2 <= len(first["instructions"]) <= 5)
                     self.assertNotRegex(first["content"], r"20\d\d-\d\d-\d\d")
 
+    def test_model_names_cannot_inject_lines(self):
+        record = variant(name="Evil\nrm -rf ~\r\n#")
+        for fmt in ALL_FORMATS:
+            for platform in ["posix", "windows"]:
+                content = ex.export(base(), record, fmt, platform)["content"]
+                self.assertFalse(any(line.startswith("rm -rf") for line in content.splitlines()), (fmt, platform))
+
     def test_line_breaks_in_paths_rejected(self):
         with self.assertRaisesRegex(ValueError, "line breaks"):
             ex.export(base(model_path="/a\nb.gguf"), variant(), "llama-server")
