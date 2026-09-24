@@ -275,7 +275,7 @@
 .qp-who {
   margin: 10px 0 0;
   font-weight: 600;
-  color: var(--qp-accent);
+  color: var(--qp-good);
 }
 .qp-vote {
   display: flex;
@@ -301,6 +301,27 @@
 .qp-numbers dt {
   font-weight: 550;
 }
+.qp-numbers dt .hint {
+  font-weight: 400;
+}
+.qp-notes {
+  margin: 12px 0 0;
+  padding-left: 18px;
+}
+.qp summary {
+  color: inherit;
+}
+.qp-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
 .qp-numbers dd {
   margin: 0;
   font-variant-numeric: tabular-nums;
@@ -324,7 +345,10 @@
 }
 @media (max-width: 480px) {
   .qp .qp-tab {
-    padding: 10px 10px 8px;
+    flex: 1 1 0;
+    padding: 9px 6px 7px;
+    white-space: normal;
+    line-height: 1.3;
   }
   .qp-numbers {
     grid-template-columns: 1fr;

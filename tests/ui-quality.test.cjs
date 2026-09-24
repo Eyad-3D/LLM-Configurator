@@ -397,7 +397,9 @@ test("compression check defaults to the biggest file and shows plain results", a
   assert.match(text, /95\.9%/);
   assert.match(text, /0\.0123/);
   assert.match(text, /7\.10 → 7\.30/);
+  assert.match(text, /-0\.50 points/, "mean Δp is already in percentage points");
   assert.match(text, /1\.2 GiB and was deleted/);
+  assert.match(text, /-0\.50 points/, "mean delta-p is already in percentage points");
   assert.ok(t.$$("details summary", panel).some((s) => s.textContent === "Show the numbers"));
 
   // Changing the reference to another model resets the choices; none selected -> validation.
@@ -437,7 +439,7 @@ test("local models list shows files and runs a scan job", async () => {
   t.w.LocalModels.mount(t.$("#l"), t.ctx);
   const l = t.$("#l");
   await until(() => l.textContent.includes("Alpha 8B"), "files");
-  assert.match(l.textContent, /4\.6 GiB · Q4_K_M · 32 layers · found in Hugging Face download folder/);
+  assert.match(l.textContent, /4\.6 GiB · Q4_K_M · 32 layers · found in the Hugging Face download folder/);
   assert.match(l.textContent, /Known model/);
   assert.match(l.textContent, /fingerprint matches/);
   assert.match(l.textContent, /Ollama: \/home\/u\/.ollama\/models \(folder not found\)/);

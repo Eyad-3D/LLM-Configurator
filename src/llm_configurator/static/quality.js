@@ -16,11 +16,11 @@
     ["documents", "Working with documents"],
   ];
   const SOURCES = {
-    hf_cache: "Hugging Face download folder",
+    hf_cache: "the Hugging Face download folder",
     lmstudio: "LM Studio",
     ollama: "Ollama",
-    models_dir: "This app's models folder",
-    custom: "A folder you added",
+    models_dir: "this app's models folder",
+    custom: "a folder you added",
   };
   const mounted = new WeakMap();
   let uid = 0;
@@ -54,6 +54,7 @@
     v == null ? "unknown" : `${pct(v).toFixed(digits)}%`;
   const num = (v, digits = 3) =>
     typeof v === "number" && Number.isFinite(v) ? v.toFixed(digits) : "unknown";
+  const capital = (text) => String(text || "").replace(/^./, (c) => c.toUpperCase());
   const basename = (path) => String(path || "").split(/[\\/]/).pop();
 
   function defaultApi(path, options = {}) {
@@ -523,7 +524,13 @@
     // The blind view only ever holds slot letters and answer text.
     function vote(comparisonId, items) {
       const decided = new Array(items.length).fill(null);
-      const status = h("p", { class: "qp-status", role: "status", "aria-live": "polite" });
+      // Screen-reader announcements; it only becomes visible to show an error.
+      const status = h("p", { class: "qp-status qp-sr-only", role: "status", "aria-live": "polite" });
+      const tell = (text, isError = false) => {
+        status.textContent = text;
+        status.classList.toggle("qp-sr-only", !isError);
+        status.classList.toggle("qp-error", isError);
+      };
       const reveal = h("button", { type: "button", text: "Reveal which model wrote each answer", disabled: true });
       const skipRest = h("button", { type: "button", class: "secondary", text: "Skip voting on the rest" });
       const revealSlots = [];
@@ -551,10 +558,10 @@
             button.setAttribute("aria-pressed", "true");
             decided[index] = slot || "skip";
             choice.textContent = slot ? `You picked answer ${slot}.` : "Skipped: no preference.";
-            status.textContent = `Prompt ${index + 1}: ${choice.textContent}`;
+            tell(`Prompt ${index + 1}: ${choice.textContent}`);
             sync();
           } catch (error) {
-            status.textContent = errorText(error);
+            tell(errorText(error), true);
             all.forEach((b) => (b.disabled = false));
           }
         };
@@ -581,7 +588,7 @@
           c.none.setAttribute("aria-pressed", "true");
           c.choice.textContent = "Skipped: no preference.";
         }
-        status.textContent = "Skipped the remaining prompts. You can reveal now.";
+        tell("Skipped the remaining prompts. You can reveal now.");
         sync();
       });
       const summary = h("div", { class: "qp-result" });
@@ -598,9 +605,9 @@
           renderTallies(out);
           reveal.hidden = true;
           skipRest.hidden = true;
-          status.textContent = "Revealed. Each answer now shows which model wrote it.";
+          tell("Revealed. Each answer now shows which model wrote it.");
         } catch (error) {
-          status.textContent = errorText(error);
+          tell(errorText(error), true);
           reveal.disabled = false;
         }
       });
@@ -783,9 +790,9 @@
                   row("Median difference", "the typical word", num(r.median_kld, 4)),
                   row("Worst 1% difference", "99th percentile KL divergence", num(r.kld_99, 4)),
                   row("Surprise score", "perplexity, reference → this file; lower is better", `${num(r.ppl_base, 2)} → ${num(r.ppl, 2)}`),
-                  row("Change in confidence", "average change in the top word's probability", r.mean_delta_p == null ? "unknown" : `${num(pct(r.mean_delta_p), 2)}%`)))))
+                  row("Change in confidence", "average change in the top word's probability, in percentage points", r.mean_delta_p == null ? "unknown" : `${num(r.mean_delta_p, 2)} points`)))))
           : h("p", { text: "The check finished but returned no results." }),
-        (out.notes || []).length ? h("ul", { class: "hint" }, out.notes.map((n) => h("li", { text: n }))) : null,
+        (out.notes || []).length ? h("ul", { class: "hint qp-notes" }, out.notes.map((n) => h("li", { text: n }))) : null,
       );
     }
     return panel;
@@ -870,7 +877,7 @@
       const locations = (data && data.locations) || [];
       fill(where, locations.length
         ? h("details", {}, h("summary", { text: "Where we looked" }),
-            h("ul", { class: "hint" }, locations.map((l) => h("li", { text: `${SOURCES[l.source] || l.source}: ${l.path} ${l.exists ? "" : "(folder not found)"}`.trim() }))))
+            h("ul", { class: "hint" }, locations.map((l) => h("li", { text: `${capital(SOURCES[l.source] || l.source)}: ${l.path} ${l.exists ? "" : "(folder not found)"}`.trim() }))))
         : null);
     }
     async function load() {
