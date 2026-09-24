@@ -351,7 +351,9 @@ def _safe_streams():
 def main(argv=None):
     _safe_streams()
     args = parser().parse_args(argv)
-    from . import llama_server
+    from . import llama_server, runtime_install
+    # No blocking Windows "System Error" boxes when a llama.cpp program cannot start.
+    runtime_install.quiet_system_errors()
     # A closed terminal or `kill` (SIGTERM/SIGHUP) then still stops every llama-server this command started.
     getattr(llama_server, "install_exit_handlers", lambda: None)()
     try:

@@ -36,6 +36,9 @@ CHUNK = 1024**2
 PROGRESS_INTERVAL = 0.2            # at most five progress updates a second, like model downloads
 _clock = time.monotonic
 HOMEBREW_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin", "~/.linuxbrew/bin")
+# Windows exit code for "a .dll file this program needs was not found" (STATUS_DLL_NOT_FOUND).
+DLL_NOT_FOUND = 0xC0000135
+MISSING_DLL = "Windows could not find a .dll file that llama-server needs in its folder"
 
 # Oldest NVIDIA driver that fully supports each CUDA toolkit (Linux, Windows). Source: NVIDIA CUDA
 # Toolkit release notes, "CUDA Toolkit and Corresponding Driver Versions" table (GA releases).
@@ -410,16 +413,17 @@ def _within(root, path):
         return False
 
 
-def safe_extract(archive, target, cancel=None):
+def safe_extract(archive, target, cancel=None, written=None):
     """Unpack a .zip or .tar.gz into `target`. Symlinks are allowed only if they stay inside `target`;
-    hard links only to files already unpacked; device files never. Every failure is a plain ValueError."""
+    hard links only to files already unpacked; device files never. Every failure is a plain ValueError.
+    Each file written is added to the `written` list when one is given."""
     try:
-        return _extract(archive, target, cancel)
+        return _extract(archive, target, cancel, [] if written is None else written)
     except (OSError, EOFError, zlib.error, zipfile.BadZipFile, zipfile.LargeZipFile, tarfile.TarError) as error:
         raise ValueError(f"The llama.cpp archive is damaged or unusual and could not be unpacked ({error}).") from None
 
 
-def _extract(archive, target, cancel):
+def _extract(archive, target, cancel, written):
     target = Path(target).resolve()
     target.mkdir(parents=True, exist_ok=True)
     name = str(archive).lower()
@@ -450,6 +454,7 @@ def _extract(archive, target, cancel):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 with bundle.open(member) as source, path.open("wb") as output:
                     shutil.copyfileobj(source, output, CHUNK)
+                written.append(path)
                 if os.name != "nt" and mode & 0o111:
                     path.chmod(0o755)
         return target
@@ -489,6 +494,7 @@ def _extract(archive, target, cancel):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 _clear(path, member.name)
                 shutil.copyfile(source, path)
+                written.append(path)
             elif member.isfile():
                 total += member.size
                 if total > MAX_EXTRACTED_BYTES:
@@ -498,6 +504,7 @@ def _extract(archive, target, cancel):
                 with bundle.extractfile(member) as source, path.open("wb") as output:
                     shutil.copyfileobj(source, output, CHUNK)
                 path.chmod(0o755 if member.mode & 0o111 else 0o644)
+                written.append(path)
             else:
                 raise ValueError(f"The archive contains a special device file ({member.name}); refusing to unpack it.")
     # Final guard: every link must still point inside, whatever order the archive used.
@@ -547,9 +554,25 @@ def find_bin_dir(directory, depth=4):
     return None
 
 
+def quiet_system_errors():
+    """Stop Windows from showing a "System Error" box, which waits for a click, when a program it starts
+    is missing a .dll file or crashes. Programs started later inherit this, so llama.cpp just exits with
+    an error code the app can explain instead."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        # SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX
+        kernel32.SetErrorMode(kernel32.GetErrorMode() | 0x0001 | 0x0002 | 0x8000)
+    except (AttributeError, OSError):
+        pass
+
+
 def _run_tool(argv, flag, env=None):
     """Run a llama.cpp tool with one info flag; returns (ok, stdout + stderr). llama.cpp prints
     `--version` on stderr and `--list-devices` on stdout."""
+    quiet_system_errors()
     try:
         done = subprocess.run(list(argv) + [flag], capture_output=True, text=True, timeout=VERSION_TIMEOUT,
                               errors="replace", env=env, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
@@ -557,7 +580,10 @@ def _run_tool(argv, flag, env=None):
         return False, f"llama-server did not answer {flag} in time"
     except OSError as error:
         return False, str(error)
-    return done.returncode == 0, (getattr(done, "stdout", "") or "") + "\n" + (getattr(done, "stderr", "") or "")
+    output = (getattr(done, "stdout", "") or "") + "\n" + (getattr(done, "stderr", "") or "")
+    if done.returncode in (DLL_NOT_FOUND, DLL_NOT_FOUND - 2**32):
+        output += "\n" + MISSING_DLL
+    return done.returncode == 0, output
 
 
 def _run_version(argv):
@@ -689,8 +715,10 @@ def _inspect(folder, source, manifest=None):
     ok, output = _run_version([str(server)])
     info = parse_version(output)
     if not ok or not info["version"]:
-        result["warnings"].append(f"Found llama-server in {folder}, but it would not start or report its version. "
-                                  "It may be damaged or need extra system files. Reinstall with: llm-config runtime install")
+        why = ("a .dll file it needs is missing from that folder (antivirus software sometimes removes one)"
+               if MISSING_DLL in output else "it may be damaged or need extra system files")
+        result["warnings"].append(f"Found llama-server in {folder}, but it would not start or report its version: "
+                                  f"{why}. Reinstall with: llm-config runtime install")
         result["installed"] = False
         return result
     manifest = manifest or {}
@@ -877,7 +905,8 @@ def _finish(store, archives, info, progress, cancel):
     try:
         if progress:
             progress({"stage": "extract", "done": 0, "total": None, "message": "Unpacking llama.cpp"})
-        safe_extract(archives[0], staging, cancel)
+        written = []
+        safe_extract(archives[0], staging, cancel, written)
         bin_dir = find_bin_dir(staging)
         if not bin_dir:
             raise ValueError("The archive does not contain llama-server, so it is not a usable llama.cpp build.")
@@ -890,6 +919,13 @@ def _finish(store, archives, info, progress, cancel):
         ok, output = _run_version([str(bin_dir / _exe("llama-server"))])
         parsed = parse_version(output)
         if not ok or not parsed["version"]:
+            gone = sorted({path.name for path in written if not path.exists()})
+            if gone:
+                # Seen on Windows: llama-server-impl.dll vanished between unpacking and the first run.
+                raise ValueError("The downloaded llama.cpp would not start on this computer, because some of its "
+                                 f"files were removed right after unpacking ({', '.join(gone[:5])}). Antivirus software "
+                                 "usually does this. Check its quarantine list, allow the folder "
+                                 f"{root}, then try again.")
             raise ValueError("The downloaded llama.cpp would not start on this computer"
                              + (f" ({output.strip().splitlines()[-1][:200]})" if output.strip() else "") + ".")
         devices = None if info["backend"] else list_devices([str(bin_dir / _exe("llama-server"))])

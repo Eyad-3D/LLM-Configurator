@@ -46,6 +46,9 @@ That is llama.cpp's build number, the same name its GitHub releases use. New lla
 **"Found llama-server in …, but it would not start or report its version"**
 The program is damaged or needs system files it can't find. Reinstall with `llm-config runtime install`. On Windows and macOS, also check the next section (antivirus and quarantine).
 
+**"Windows could not find a .dll file" or "files were removed right after unpacking"**
+llama.cpp is one program plus helper files (`.dll` files such as `llama-server-impl.dll`) that must sit in the same folder. The official download includes all of them, so a missing one was almost always removed by antivirus software right after unpacking. Restore it and allow the folder as described in the next section, then install again. (Older versions of this app showed a Windows "System Error" box saying `llama-server-impl.dll was not found`; that is the same problem.)
+
 **"The app now uses this new llama.cpp instead of the folder you chose earlier"**
 You installed llama.cpp while the app was pointed at your own build (`runtime use`). The fresh install wins. To go back, run `llm-config runtime use DIR` with your folder again.
 

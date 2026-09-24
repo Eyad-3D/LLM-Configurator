@@ -63,6 +63,7 @@ class CliCase(unittest.TestCase):
         discover.find_for_variant, discover.locations, discover.add_file = find_for_variant, locations, add_file
         discover.remember_hash = lambda store, path, sha256: fakes.calls.append(("remember_hash", str(path), sha256))
         self.fakes.modules["llama_server"].install_exit_handlers = lambda: fakes.calls.append(("exit_handlers",))
+        self.fakes.modules["runtime_install"].quiet_system_errors = lambda: None
         discover.local_variants = lambda store: [Variant(**r["local_variant"]) for r in store.get("local_files") or [] if r.get("local_variant")]
         self.fakes.modules["gguf"].shard_paths = lambda path: [Path(path)]
 

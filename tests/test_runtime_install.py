@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -714,6 +715,21 @@ class InstallTests(Base):
         self.assertFalse((runtime_dir(self.store) / "b11158-vulkan").exists())
         self.assertEqual(list((runtime_dir(self.store) / "downloads").iterdir()), [])
 
+    def test_files_removed_after_unpacking_are_blamed_on_antivirus(self):
+        # Seen on Windows: llama-server-impl.dll vanished between unpacking and the first run.
+        blobs = {"llama-b11158-bin-ubuntu-x64.tar.gz": tar_bytes(server_tree())}
+        def quarantined(argv):
+            (Path(argv[0]).parent / "libllama.so").unlink()
+            return False, "\n" + ri.MISSING_DLL
+        with mock.patch.object(ri, "_run_version", side_effect=quarantined), \
+                self.assertRaisesRegex(ValueError, r"removed right after unpacking \(libllama.so\)\. Antivirus"):
+            self.run_install(blobs, NONE)
+        self.assertEqual([p.name for p in runtime_dir(self.store).iterdir()], ["downloads"])
+        # Nothing removed: the Windows reason is passed on as it is.
+        with mock.patch.object(ri, "_run_version", return_value=(False, "\n" + ri.MISSING_DLL)), \
+                self.assertRaisesRegex(ValueError, r"would not start on this computer \(Windows could not find a \.dll"):
+            self.run_install(blobs, NONE)
+
     def test_archive_without_server_is_refused_and_cleaned(self):
         blobs = {"llama-b11158-bin-ubuntu-x64.tar.gz": tar_bytes({"README.md": ("hi", 0o644)})}
         with self.assertRaisesRegex(ValueError, "does not contain llama-server"):
@@ -896,6 +912,37 @@ class DetectTests(Base):
         self.make(self.root / "broken", script=BROKEN)
         with self.assertRaisesRegex(ValueError, "would not start"):
             ri.use_directory(self.store, self.root / "broken")
+
+
+class WindowsErrorTests(unittest.TestCase):
+    def test_missing_dll_exit_code_is_explained(self):
+        for code in (0xC0000135, 0xC0000135 - 2**32):
+            with mock.patch.object(ri.subprocess, "run", return_value=subprocess.CompletedProcess([], code, "", "")):
+                ok, output = ri._run_version(["llama-server.exe"])
+            self.assertFalse(ok)
+            self.assertIn(ri.MISSING_DLL, output)
+        with mock.patch.object(ri.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "boom")):
+            self.assertNotIn(ri.MISSING_DLL, ri._run_version(["llama-server"])[1])
+
+    def test_detect_names_the_missing_dll(self):
+        with tempfile.TemporaryDirectory() as temp:
+            (Path(temp) / ri._exe("llama-server")).write_text("")
+            store = Store(Path(temp) / "data")
+            store.put("settings", {"runtime_dir": temp})
+            with mock.patch.object(ri, "_run_version", return_value=(False, ri.MISSING_DLL)), \
+                    mock.patch.object(ri, "_path_candidates", return_value=iter(())):
+                result = ri.detect(store)
+        self.assertFalse(result["installed"])
+        self.assertIn("a .dll file it needs is missing", result["warnings"][0])
+
+    def test_windows_error_boxes_are_switched_off(self):
+        import ctypes
+        kernel32 = mock.Mock()
+        kernel32.GetErrorMode.return_value = 0x0004
+        with mock.patch.object(ri.os, "name", "nt"), \
+                mock.patch.object(ctypes, "windll", mock.Mock(kernel32=kernel32), create=True):
+            ri.quiet_system_errors()
+        kernel32.SetErrorMode.assert_called_once_with(0x0004 | 0x0001 | 0x0002 | 0x8000)
 
 
 @unittest.skipIf(os.name == "nt", "fake binaries are shell scripts")
