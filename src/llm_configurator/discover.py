@@ -127,7 +127,7 @@ def _stat_entry(path, real, **extra):
 
 
 def _walk(root, cancel, counter, pattern=lambda name: name.lower().endswith(".gguf")):
-    """(path, is_link) for matching files; skips hidden folders and never descends through linked folders."""
+    """Matching files under root; skips hidden folders, stops at MAX_DEPTH and never enters linked folders."""
     base_depth = len(root.parts)
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         check_cancel(cancel)
