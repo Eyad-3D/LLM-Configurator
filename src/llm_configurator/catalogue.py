@@ -15,8 +15,8 @@ import tempfile
 import threading
 import time
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
-from urllib.request import Request, urlopen
+from urllib.parse import quote, urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .domain import ARCHITECTURES, GIB, MOE_ARCHITECTURES, QUANT_BYTES_PER_PARAMETER, Cancelled, Variant, check_cancel, now
 from .credentials import resolve, validate_key
@@ -44,10 +44,39 @@ CONFIG_DEFAULTS = {"gemma3_text": {"vocab_size": 262208, "hidden_size": 2304, "i
                                    "sliding_window_pattern": 6}}
 
 
+# Headers that carry a secret (HF_TOKEN, the Artificial Analysis key); never sent to another host.
+_SECRET_HEADERS = {"authorization", "x-api-key"}
+
+
+def _origin(url):
+    parts = urlsplit(url)
+    return parts.scheme.lower(), (parts.hostname or "").lower(), parts.port
+
+
+class _MetadataRedirect(HTTPRedirectHandler):
+    """Like downloads.DownloadRedirect: urllib copies every header to the new URL, so a redirect to another
+    host (a CDN, or anywhere a compromised mirror points) would receive the token. Drop secrets when the
+    host changes, and never follow an HTTPS request down to plain HTTP."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urlsplit(req.full_url).scheme.lower() == "https" and urlsplit(newurl).scheme.lower() != "https":
+            raise ValueError("Metadata request was redirected away from HTTPS; refused")
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None and _origin(req.full_url) != _origin(newurl):
+            for name in [n for n in redirected.headers if n.lower() in _SECRET_HEADERS]:
+                del redirected.headers[name]
+        return redirected
+
+
+def _open(request, timeout=25):
+    """The one place catalogue metadata touches the network."""
+    return build_opener(_MetadataRedirect()).open(request, timeout=timeout)
+
+
 def get_json(url, headers=None):
     request = Request(url, headers={"User-Agent": "LLM-Configurator/0.1", **(headers or {})})
     try:
-        with urlopen(request, timeout=25) as response:
+        with _open(request) as response:
             raw = response.read(12 * 1024**2 + 1)
         if len(raw) > 12 * 1024**2:
             raise ValueError("Metadata response exceeds 12 MiB")
