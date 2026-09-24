@@ -5,7 +5,6 @@ come from the app's models folder, discovered model folders or CLI arguments, an
 binaries from `runtime_install.binary`, never from browser input. Modules built by other
 v0.4 workstreams are imported inside functions so this file loads without them.
 """
-from dataclasses import fields
 import inspect
 import json
 from pathlib import Path
@@ -424,6 +423,3 @@ def add_local_job(store, path):
         return record
     return run
 
-
-def requirement_fields():
-    return {f.name for f in fields(Requirements)}
