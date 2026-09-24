@@ -1,69 +1,20 @@
-"""Explicit downloads and local llama-bench execution. Never invoked by a scan."""
-import hashlib
+"""Explicit downloads (via `downloads`) and local llama-bench execution. Never invoked by a scan."""
 import json
 import math
 import os
 from pathlib import Path
 import shutil
 import subprocess
-from urllib.parse import quote, urlparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .domain import GIB, now
+from .downloads import DownloadRedirect, digest, download_variant  # noqa: F401 (re-exported for compatibility)
 from .engine import allocations
 from .hardware import scan
 
 
-def digest(path):
-    result = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(4 * 1024**2), b""):
-            result.update(chunk)
-    return result.hexdigest()
-
-
-class DownloadRedirect(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if urlparse(newurl).scheme != "https":
-            raise ValueError("Model downloads require HTTPS redirects")
-        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if redirected is not None and urlparse(req.full_url).netloc != urlparse(newurl).netloc:
-            redirected.remove_header("Authorization")
-        return redirected
-
-
-def download(variant, directory):
-    if variant.demo or not variant.sha256:
-        raise ValueError("A real model with a published SHA256 is required")
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
-    target = directory / Path(variant.filename).name
-    if target.exists():
-        if digest(target) == variant.sha256:
-            return target
-        raise ValueError("Destination already exists with a different hash; choose a different directory")
-    if shutil.disk_usage(directory).free < variant.size_bytes + GIB:
-        raise ValueError("Insufficient disk space for the model plus 1 GiB headroom")
-    url = f"https://huggingface.co/{variant.repo}/resolve/{quote(variant.revision)}/{quote(variant.filename)}"
-    headers = {"Authorization": f"Bearer {os.environ['HF_TOKEN']}"} if os.environ.get("HF_TOKEN") else {}
-    partial = target.with_suffix(target.suffix + ".part")
-    try:
-        with partial.open("xb") as output, build_opener(DownloadRedirect()).open(Request(url, headers=headers), timeout=60) as response:
-            written = 0
-            while chunk := response.read(4 * 1024**2):
-                written += len(chunk)
-                if written > variant.size_bytes:
-                    raise ValueError("Download exceeded catalogue file size")
-                output.write(chunk)
-        if written != variant.size_bytes or digest(partial) != variant.sha256:
-            raise ValueError("Downloaded model does not match the pinned size and SHA256")
-        partial.rename(target)
-    except FileExistsError:
-        raise ValueError("A partial download already exists; inspect/remove it before retrying") from None
-    except BaseException:
-        partial.unlink(missing_ok=True)
-        raise
-    return target
+def download(variant, directory, progress=None, cancel=None, token=None):
+    """Kept for existing callers; resumable, verified downloads live in `downloads`."""
+    return download_variant(variant, directory, progress=progress, cancel=cancel, token=token)
 
 
 def bench(variant, model_path, executable, context, layers, gpu_index=0, timeout=600):
