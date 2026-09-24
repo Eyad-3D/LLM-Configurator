@@ -1,0 +1,17 @@
+$ llama-server -c 512 -ngl 0 --host 127.0.0.1 --port 45383 -m tiny-llama-F16.gguf -ctk q9_9
+# exit code: 1
+# ---- stdout ----
+# ---- stderr ----
+warning: no usable GPU found, --gpu-layers option will be ignored
+warning: one possible reason is that llama.cpp was compiled without GPU support
+warning: consult docs/build.md for compilation instructions
+error while handling argument "-ctk": Unsupported cache type: q9_9
+
+usage:
+-ctk,  --cache-type-k TYPE              KV cache data type for K
+                                        allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1
+                                        (default: f16)
+                                        (env: LLAMA_ARG_CACHE_TYPE_K)
+
+
+to show complete usage, run with -h

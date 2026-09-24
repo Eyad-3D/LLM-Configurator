@@ -1,0 +1,4 @@
+# Real-runtime scratch output; binaries and models live outside the repo (see docs/v0.4/handoff/harness.md).
+*.gguf
+*.bin
+*.kld

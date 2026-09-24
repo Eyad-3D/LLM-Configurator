@@ -1,0 +1,16 @@
+$ llama-server -c 512 -ngl 0 --host 127.0.0.1 --port 45383 -m tiny-llama-F16.gguf -fa yes
+# exit code: 1
+# ---- stdout ----
+# ---- stderr ----
+warning: no usable GPU found, --gpu-layers option will be ignored
+warning: one possible reason is that llama.cpp was compiled without GPU support
+warning: consult docs/build.md for compilation instructions
+error while handling argument "-fa": error: unknown value for --flash-attn: 'yes'
+
+
+usage:
+-fa,   --flash-attn [on|off|auto]       set Flash Attention use ('on', 'off', or 'auto', default: 'auto')
+                                        (env: LLAMA_ARG_FLASH_ATTN)
+
+
+to show complete usage, run with -h
