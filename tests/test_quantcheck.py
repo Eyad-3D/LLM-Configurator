@@ -758,6 +758,24 @@ class KlCheckTests(unittest.TestCase):
         with mock.patch.object(gguf, "read_metadata", side_effect=ValueError("not a GGUF")):
             self.assertIsNone(quantcheck._vocab_size(self.reference))
 
+    def test_shared_fake_llama_perplexity(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        try:
+            from fixtures import fake_command, write_fake_gguf
+        finally:
+            sys.path.pop(0)
+        reference = write_fake_gguf(self.dir / "fake-Q8_0.gguf", layers=4)
+        q4 = write_fake_gguf(self.dir / "fake-Q4_K_M.gguf", layers=4)
+        result = kl_check(fake_command("perplexity"), reference, {"Q4_K_M": q4}, work_dir=self.work, vocab_size=32000,
+                          context=128, chunks=3, timeout=60)
+        entry = result["results"]["Q4_K_M"]
+        self.assertIsNone(entry["error"], entry["plain"])
+        self.assertTrue(entry["complete"])
+        self.assertIsNotNone(entry["mean_kld"])
+        self.assertIsNotNone(entry["same_top_p"])
+        self.assertIsNotNone(result["reference"]["ppl"])
+        self.assertEqual(os.listdir(self.work), [])
+
     def test_input_validation(self):
         with self.assertRaises(ValueError):
             self.check(candidates={})
