@@ -186,7 +186,9 @@ def candidate_for(store, variant, hardware, context=None, gpu_layers=None, kv_ca
     report = recommend([variant], hardware, requirements, store.get("measurements", []), store.get("calibration"),
                        **engine_extras(store))
     matches = [c for c in report["candidates"] if c["context"] == context and c["scenario"] == "now"
-               and c.get("kv_cache_type", "f16") == kv_cache_type]
+               and c.get("kv_cache_type", kv_cache_type) == kv_cache_type]
+    # Engines without KV compression support still describe placements; the notepad format is a launch setting.
+    matches = [{"kv_cache_type": kv_cache_type, **c} for c in matches]
     if gpu_layers is None:
         if not matches:
             raise ValueError(f"{variant.name} {variant.quant} does not fit in free memory at {context:,} tokens. "

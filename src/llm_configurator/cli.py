@@ -221,9 +221,11 @@ def run_job(fn, title):
     job = jobs.submit("cli", title, fn)
     bar = ProgressBar()
     try:
-        while job["state"] not in {"done", "failed", "cancelled"}:
+        while True:  # always draw at least once, so fast jobs still show their final progress
             job = jobs.wait(job["id"], 0.2)
             bar.update(job["progress"])
+            if job["state"] in {"done", "failed", "cancelled"}:
+                break
     except KeyboardInterrupt:
         bar.close()
         print("Stopping… (press Ctrl+C again to quit immediately)", file=sys.stderr, flush=True)
