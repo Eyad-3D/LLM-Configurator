@@ -145,6 +145,83 @@ class CheckerTests(unittest.TestCase):
         self.assertGreater(high, 0.4)
 
 
+class TrickyReplyTests(unittest.TestCase):
+    """Replies real models give, which a naive checker gets wrong one way or the other."""
+
+    def check(self, answer, reply, kind="arithmetic", **extra):
+        return evals.check_text({"id": "x", "kind": kind, "answer": answer, **extra}, reply)[0]
+
+    def test_numbers_are_not_matched_inside_other_numbers(self):
+        for reply in ("Answer: 14", "Answer: -4", "Answer: 40", "Answer: 0.4", "Answer: .4",
+                      "Answer: 4 or 5", "Answer: not 4", "Answer: 5 (not 4)", "Answer: 4 (or maybe 5)",
+                      "Answer: 12 = 3 x 4", "Answer: 4:30", "Answer: 3-5"):
+            self.assertFalse(self.check("4", reply), reply)
+        for reply in ("Answer: 4", "Answer: 4.", "Answer: **4**", "Answer: four", "Answer: 4.0", "Answer: x = 4",
+                      "Answer: 2 + 2 = 4", "Answer: 4 (2 + 2)", "Answer: about 4", "answer : 4 apples", "Answer: 8/2"):
+            self.assertTrue(self.check("4", reply), reply)
+
+    def test_decimals_fractions_negatives_and_units(self):
+        self.assertTrue(self.check("0.7", "Answer: .7"))
+        self.assertFalse(self.check("7", "Answer: .7"))
+        self.assertFalse(self.check("0.7", "Answer: 7"))
+        for reply in ("Answer: 16½", "Answer: 16 1/2", "Answer: 16.50 days"):
+            self.assertTrue(self.check("16.5", reply), reply)
+        self.assertFalse(self.check("16.5", "Answer: 161/2"))
+        self.assertTrue(self.check("-3", "Answer: −3"))  # unicode minus
+        self.assertFalse(self.check("-3", "Answer: 3"))
+        self.assertFalse(self.check("3", "Answer: -3"))
+        for reply in ("Answer: 25,000 cm²", "Answer: 25000 cm^2", "Answer: 2.5 m² = 25,000 cm²", "Answer: €25,000"):
+            self.assertTrue(self.check("25000", reply), reply)
+        self.assertFalse(self.check("25000", "Answer: 250 cm²"))
+        self.assertTrue(self.check("42", "Answer: forty-two"))
+        self.assertTrue(self.check("1", "Answer: one year"))
+        self.assertTrue(self.check("12:05", "Answer: 12:05 p.m.", accept=["12[:.]05( ?pm)?"]))
+
+    def test_letters_and_answer_markers(self):
+        for reply in ("Answer: B", "Answer: (b)", "Answer: b)", "The answer is:\n**B**"):
+            self.assertTrue(self.check("b", reply, kind="choice"), reply)
+        self.assertFalse(self.check("b", "Answer: (c)", kind="choice"))
+        self.assertTrue(self.check("Paris", "Answer: Lyon\nWait, no.\nFinal answer: Paris"))
+        self.assertFalse(self.check("Paris", "Final answer: Paris\nAnswer: Lyon"))
+
+    def test_program_output_is_exact_about_case_and_spaces(self):
+        self.assertTrue(self.check("HOP-3", "Answer: `HOP-3`", kind="js_output"))
+        self.assertFalse(self.check("HOP-3", "Answer: hop-3", kind="js_output"))
+        self.assertFalse(self.check("True", "Answer: true", kind="python_output"))
+        self.assertFalse(self.check("2 4", "Answer: 24", kind="python_output"))
+        self.assertFalse(self.check("ba", "Answer: b a", kind="python_output"))
+        self.assertTrue(self.check("[1, 16]", "Answer: [1,16]", kind="python_output"))
+        self.assertFalse(self.check("6", "Answer: 6 (rounds half to even)", kind="python_output"))
+        self.assertTrue(self.check("aelnpt", "Answer: a e l n p t", kind="string_sort"))
+
+    def test_reasoning_tags_and_template_tokens(self):
+        self.assertTrue(self.check("9", "<thinking>maybe 8</thinking>Answer: 9<|im_end|>"))
+        self.assertTrue(self.check("9", "<reasoning>Answer: 8</reasoning>\n\nAnswer: 9</s>"))
+        self.assertFalse(self.check("9", "<think>so the answer is 9 but let me check"))
+        self.assertFalse(self.check("9", ""))
+
+    def test_tool_calls_accept_sets_and_prefixed_names(self):
+        tools = [{"name": "create_event", "parameters": {"type": "object", "properties": {
+            "title": {"type": "string"}, "attendees": {"type": "array", "items": {"type": "string"}}}}}]
+        item = {"id": "t", "kind": "nested_args", "check": "tool_call", "prompt": "p", "tools": tools,
+                "answer": {"name": "create_event", "arguments": {
+                    "title": "Sync", "attendees": {"$unordered": ["ana@x.test", "raj@x.test"]}}}}
+        self.assertEqual(evals.validate_quiz({"version": 1, "items": [item]}), [])
+        for reply in ('{"name": "create_event", "arguments": {"title": "Sync", "attendees": ["raj@x.test", "ana@x.test"]}}',
+                      '{"name": "functions.create_event", "arguments": {"title": "sync", "attendees": ["ana@x.test", "raj@x.test"]}}',
+                      '[TOOL_CALLS][{"name": "create_event", "arguments": {"title": "Sync", "attendees": ["ana@x.test", "raj@x.test"]}}]'):
+            self.assertTrue(evals.check_tool_call(item, reply)[0], reply)
+        for reply in ('{"name": "create_event", "arguments": {"title": "Sync", "attendees": ["ana@x.test", "ana@x.test"]}}',
+                      '{"name": "create_event", "arguments": {"title": "Sync", "attendees": ["ana@x.test"]}}',
+                      '{"name": "create_event", "arguments": {"title": "Sync", "attendees": "ana@x.test, raj@x.test"}}',
+                      '{"name": "other.create_event", "arguments": {"title": "Sync", "attendees": ["ana@x.test", "raj@x.test"]}}'):
+            self.assertFalse(evals.check_tool_call(item, reply)[0], reply)
+        none_item = {**item, "answer": {"name": "none", "arguments": {}}}
+        self.assertFalse(evals.check_tool_call(none_item, "No tool fits this request.")[0])  # format is part of the test
+        bad = {**item, "answer": {"name": "create_event", "arguments": {"attendees": {"$unordered": [{"$regex": "a+"}]}}}}
+        self.assertTrue(evals.validate_quiz({"version": 1, "items": [bad]}))
+
+
 class RunQuizTests(unittest.TestCase):
     def test_always_correct_scores_full_marks_on_every_workload(self):
         for workload in evals.WORKLOADS:
@@ -201,6 +278,33 @@ class RunQuizTests(unittest.TestCase):
             evals.run_quiz(wrong_chat, "poetry")
         with self.assertRaises(ValueError):
             evals.run_quiz(wrong_chat, "general", limit=0)
+
+    def test_thinking_is_switched_off_when_the_chat_accepts_it(self):
+        seen = []
+
+        def chat(messages, max_tokens, **options):
+            seen.append(options)
+            return {"text": "Answer: nope"}
+
+        evals.run_quiz(chat, "general", limit=2)
+        self.assertEqual(seen[0], {"temperature": 0.0, "seed": 1, "enable_thinking": False})
+
+    def test_questions_too_long_for_the_context_are_left_out(self):
+        def chat(messages, max_tokens):
+            if len(messages[-1]["content"]) > 2000:
+                raise ValueError("The text is longer than the model's context window (its short-term notepad).")
+            return {"text": "Answer: nope"}
+
+        result = evals.run_quiz(chat, "documents")
+        self.assertGreater(len(result["skipped"]), 0)
+        self.assertEqual(result["total"] + len(result["skipped"]), len(evals.load_quiz("documents")["items"]))
+        self.assertIn("too long for this context", result["note"])
+
+        def always_too_long(messages, max_tokens):
+            raise ValueError("request (5000 tokens) exceeds the available context size (2048 tokens)")
+
+        result = evals.run_quiz(always_too_long, "general", limit=3)
+        self.assertEqual((result["total"], result["score"], len(result["skipped"])), (0, None, 3))
 
     def test_cancel_stops_the_quiz(self):
         cancel = threading.Event()
@@ -263,6 +367,22 @@ class NeedleTests(unittest.TestCase):
         result = evals.needle_test(forgetful, word_tokenize, 2048)
         self.assertEqual([r["found"] for r in result["results"]], [True, False, False])
         self.assertIn("Missed at 50%, 90%", result["note"])
+
+    def test_deepest_needle_runs_first_with_cache_and_cut_off_replies_are_not_misses(self):
+        seen = []
+
+        def chat(messages, max_tokens, **options):
+            content = messages[-1]["content"]
+            seen.append((content.find("The secret code") / len(content), options))
+            return {"text": "<think>let me look", "finish_reason": "length"}
+
+        result = evals.needle_test(chat, word_tokenize, 2048)
+        self.assertEqual([round(depth, 1) for depth, _ in seen], [0.9, 0.5, 0.1])
+        self.assertEqual(seen[0][1], {"temperature": 0.0, "seed": 1, "enable_thinking": False, "cache_prompt": True})
+        self.assertEqual([r["position"] for r in result["results"]], [0.1, 0.5, 0.9])
+        self.assertTrue(all(r["truncated"] for r in result["results"]))
+        self.assertNotIn("Missed", result["note"])
+        self.assertIn("tell us nothing", result["note"])
 
     def test_validation_and_cancel(self):
         with self.assertRaises(ValueError):
@@ -332,6 +452,25 @@ class ComparisonTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "closed"):
             evals.vote(self.store, cid, 3, "A")
         self.assertEqual(evals.reveal(self.store, cid)["tallies"], revealed["tallies"])
+
+    def test_answers_stay_hidden_until_every_model_answered_that_prompt(self):
+        labels = ["cand|a", "cand|b"]
+        cid = evals.start_comparison(self.store, ["p0", "p1"], labels, names={"cand|a": "Qwen 8B", "cand|b": "Llama 3B"})
+        evals.record_output(self.store, cid, "cand|a", 0, "first model, prompt 0", {})
+        evals.record_output(self.store, cid, "cand|a", 1, "first model, prompt 1", {})
+        view = evals.blinded(self.store, cid)
+        # Showing the finished answers now would reveal which slot the running model sits in on each prompt.
+        self.assertTrue(all(o["text"] == "" and not o["ready"] for i in view["items"] for o in i["outputs"]))
+        self.assertNotIn("Qwen", json.dumps(view))
+        evals.record_output(self.store, cid, "cand|b", 0, "second model, prompt 0", {})
+        view = evals.blinded(self.store, cid)
+        self.assertTrue(all(o["ready"] and o["text"] for o in view["items"][0]["outputs"]))
+        self.assertFalse(any(o["ready"] or o["text"] for o in view["items"][1]["outputs"]))
+        revealed = evals.reveal(self.store, cid)
+        self.assertEqual(revealed["labels"], {"cand|a": "Qwen 8B", "cand|b": "Llama 3B"})
+        row = revealed["mapping"][0]
+        self.assertEqual({row["A"], row["B"]}, set(labels))  # the pinned {"A": id, "B": id} shape
+        self.assertEqual(row["slots"], {"A": row["A"], "B": row["B"]})
 
     def test_shuffle_varies_between_items_and_comparisons(self):
         labels = ["a", "b", "c"]
@@ -437,6 +576,36 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(len(servers), 2)  # the second model was never started
         states = [c["state"] for c in self.store.get("comparisons").values()]
         self.assertIn("cancelled", states)
+
+
+class LlamaServerSeamTests(unittest.TestCase):
+    """The real LlamaServer class against the fake llama.cpp: the chat/tokenize seams evals relies on."""
+
+    def test_quiz_and_needle_through_llama_server(self):
+        import os
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from fixtures import fake_command, write_fake_gguf
+        from llm_configurator.llama_server import LlamaServer
+
+        with tempfile.TemporaryDirectory() as folder:
+            model = str(write_fake_gguf(Path(folder) / "Qwen3-8B-Q4_K_M.gguf", "qwen3", 36))
+            old = os.environ.get("FAKE_LLAMA_REASONING")
+            os.environ["FAKE_LLAMA_REASONING"] = "1"  # the fake thinks unless enable_thinking is false
+            try:
+                with LlamaServer(fake_command("server"), {"model_path": model, "context": 4096}) as server:
+                    quiz = evals.run_quiz(server.chat, "general", limit=3)
+                    self.assertEqual(quiz["total"], 3)
+                    self.assertEqual(quiz["truncated"], 0)
+                    needle = evals.needle_test(server.chat, server.tokenize, 4096)
+            finally:
+                if old is None:
+                    os.environ.pop("FAKE_LLAMA_REASONING", None)
+                else:
+                    os.environ["FAKE_LLAMA_REASONING"] = old
+        self.assertEqual(needle["found"], 3, needle)
+        self.assertTrue(all(r["prompt_tokens"] <= 4096 - 96 - 128 for r in needle["results"]))
 
 
 if __name__ == "__main__":

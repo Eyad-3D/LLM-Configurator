@@ -75,7 +75,7 @@ def final_answer(text):
     for index in range(len(lines) - 1, -1, -1):
         matches = list(_ANSWER_LINE.finditer(lines[index]))
         if matches:
-            answer = matches[-1].group(1).strip(_OUTER)
+            answer = _strip_outer(matches[-1].group(1))
             if answer:
                 return answer
             following = [line for line in lines[index + 1:] if line.strip(_OUTER)]
@@ -91,12 +91,16 @@ def normalize(text, case=False):
     for symbol, spelled in _VULGAR.items():
         text = text.replace(symbol, spelled)
     text = unicodedata.normalize("NFKC", text).replace("\u2212", "-").replace("\u2044", "/")
-    text = re.sub(r"\s+", " ", text if case else text.lower()).strip().rstrip(_OUTER)
+    text = _strip_outer(re.sub(r"\s+", " ", text if case else text.lower()))
+    return re.sub(r"\b([ap])\.m\b\.?", r"\1m", text).strip()
+
+
+def _strip_outer(text):
+    """Remove outer spaces, quotes, markdown and punctuation, but keep the '.' of a decimal like '.7'."""
+    text = text.rstrip(_OUTER)
     prefix = _LEFT_OUTER.match(text).group(0)
     rest = text[len(prefix):]
-    if prefix.endswith(".") and rest[:1].isdigit():
-        rest = "." + rest
-    return re.sub(r"\b([ap])\.m\b\.?", r"\1m", rest).strip()
+    return "." + rest if prefix.endswith(".") and rest[:1].isdigit() else rest
 
 
 def _word_number(text):
@@ -434,6 +438,9 @@ def _ask(chat, messages, max_tokens, options=GREEDY):
     return {"text": reply} if isinstance(reply, str) else dict(reply or {})
 
 
+_TOO_LONG = re.compile(r"context (window|size|length)|exceed_context|exceeds? the (available )?context", re.I)
+
+
 def _report(progress, stage, done, total, message):
     if progress:
         progress({"stage": stage, "done": done, "total": total, "message": message})
@@ -443,7 +450,7 @@ def run_quiz(chat, workload, limit=None, progress=None, cancel=None, max_tokens=
     """Ask each quiz question once (greedy), check answers locally and score with a 95% range."""
     quiz = load_quiz(workload)
     items = _select(quiz["items"], limit)
-    started, results = time.monotonic(), []
+    started, results, skipped = time.monotonic(), [], []
     for index, item in enumerate(items):
         check_cancel(cancel)
         _report(progress, "quiz", index, len(items), f"Question {index + 1} of {len(items)}")
@@ -453,6 +460,9 @@ def run_quiz(chat, workload, limit=None, progress=None, cancel=None, max_tokens=
         except Cancelled:
             raise
         except Exception as error:
+            if _TOO_LONG.search(str(error)):  # a long document that does not fit this context: not the model's fault
+                skipped.append(item["id"])
+                continue
             raise ValueError(f"The quiz stopped at question {index + 1}: {error}") from error
         ok, got = check_item(item, reply.get("text") or "")
         results.append({"id": item["id"], "kind": item["kind"], "ok": ok, "expected": expected_text(item),
@@ -470,17 +480,21 @@ def run_quiz(chat, workload, limit=None, progress=None, cancel=None, max_tokens=
     return {"kind": "quiz", "workload": workload, "version": quiz.get("version"), "correct": correct, "total": total,
             "score": round(correct / total, 4) if total else None,
             "ci_low": round(low, 4) if low is not None else None, "ci_high": round(high, 4) if high is not None else None,
-            "items": results, "by_kind": by_kind, "truncated": truncated,
-            "seconds": round(time.monotonic() - started, 3), "note": _quiz_note(correct, total, low, high, truncated),
+            "items": results, "by_kind": by_kind, "truncated": truncated, "skipped": skipped,
+            "seconds": round(time.monotonic() - started, 3),
+            "note": _quiz_note(correct, total, low, high, truncated, len(skipped)),
             "timestamp": now()}
 
 
-def _quiz_note(correct, total, low, high, truncated):
+def _quiz_note(correct, total, low, high, truncated, skipped=0):
+    too_long = (f"{skipped} questions were too long for this context size and were left out of the score. "
+                if skipped else "")
     if not total:
-        return "No questions were asked."
+        return too_long + "No questions were answered." if skipped else "No questions were asked."
     spread = round((high - low) * 50)
     note = (f"{correct} of {total} right. With only {total} questions the true score is probably between "
             f"{round(low * 100)}% and {round(high * 100)}%, so treat differences under about {spread} points as noise.")
+    note = too_long + note
     if truncated:
         note += (f" {truncated} wrong answers hit the length limit (often a model still 'thinking'), "
                  "so this score may understate the model.")
