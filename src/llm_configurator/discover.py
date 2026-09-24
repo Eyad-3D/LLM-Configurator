@@ -428,24 +428,43 @@ def hash_cached(store, path, progress=None, cancel=None):
     if (after.st_size, after.st_mtime) != (before.st_size, before.st_mtime):
         raise ValueError(f"{path.name} changed while it was being checked. Wait for any copy or download to finish, then try again.")
     result = digest.hexdigest()
+    _save_hash(store, key, before, result)
+    return result
 
+
+def remember_hash(store, path, sha256):
+    """Records a fingerprint the caller has just checked itself (a finished download), so the first test or run
+    after it does not read the whole file again. It stays valid only while size and modification time are unchanged."""
+    path = Path(path)
+    if not HEX64.match((sha256 or "").lower()):
+        raise ValueError("A SHA-256 fingerprint is 64 hexadecimal characters.")
+    try:
+        key, info = str(path.resolve()), path.stat()
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"Could not read {path.name}: {getattr(exc, 'strerror', None) or exc}.") from None
+    _save_hash(store, key, info, sha256.lower())
+
+
+def _save_hash(store, key, info, sha256):
     def save(cache):
         cache = {k: v for k, v in (cache or {}).items() if k != key}
-        cache[key] = {"size": before.st_size, "mtime": before.st_mtime, "sha256": result}
+        cache[key] = {"size": info.st_size, "mtime": info.st_mtime, "sha256": sha256}
         return dict(list(cache.items())[-HASH_CACHE_LIMIT:])
     store.update("hash_cache", save, {})
-    return result
 
 
 def _candidates(store, variant, wanted):
     from .storage import models_dir
     base = models_dir(store)
     real_base = _resolve(base)
-    direct = [base / f["filename"] for f in wanted]
     # a local model is one particular file: a same-named file in the models folder is not it
-    if variant.source != "local" and real_base and all(_inside(_resolve(p), real_base) for p in direct):  # catalogue file names never lead out of the folder
-        yield [{"path": str(p), "filename": Path(f["filename"]).name, "size_bytes": f["size_bytes"], "sha256": None}
-               for p, f in zip(direct, wanted)], None
+    if variant.source != "local" and real_base:
+        # downloads save every file flat (models/x.gguf) even when the catalogue name has a folder (Q4_K_M/x.gguf)
+        flat, nested = [base / Path(f["filename"]).name for f in wanted], [base / f["filename"] for f in wanted]
+        for direct in [flat] if flat == nested else [flat, nested]:
+            if all(_inside(_resolve(p), real_base) for p in direct):  # catalogue file names never lead out of the folder
+                yield [{"path": str(p), "filename": Path(f["filename"]).name, "size_bytes": f["size_bytes"], "sha256": None}
+                       for p, f in zip(direct, wanted)], None
     for record in store.get("local_files") or []:
         if not record.get("complete", True):
             continue

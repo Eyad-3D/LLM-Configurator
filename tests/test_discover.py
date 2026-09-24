@@ -382,5 +382,28 @@ class DiscoverTest(unittest.TestCase):
         sha256 = discover.hash_cached(self.store, path)
         self.assertEqual(gguf.variant_from_file(path, sha256=sha256).id, scanned)
 
+    def test_flat_download_of_a_foldered_catalogue_name_is_found(self):
+        from llm_configurator.storage import models_dir
+        data = model_bytes("q")
+        variant = catalogue_variant("org/x:Q4_K_M", "Q4_K_M/x-Q4_K_M.gguf", data)
+        path = self.write(models_dir(self.store) / "x-Q4_K_M.gguf", data)  # downloads keep only the file name
+        self.assertEqual(discover.find_for_variant(self.store, variant, verify=False), path)
+        self.assertEqual(discover.find_for_variant(self.store, variant), path)
+        path.write_bytes(data[:-1] + b"!")  # same size, different content: never accepted when verifying
+        self.assertIsNone(discover.find_for_variant(self.store, variant))
+
+    def test_remember_hash_spares_the_first_check_after_a_download(self):
+        from llm_configurator.storage import models_dir
+        data = model_bytes("r")
+        variant = catalogue_variant("org/y:Q4_K_M", "y-Q4_K_M.gguf", data)
+        path = self.write(models_dir(self.store) / "y-Q4_K_M.gguf", data)
+        discover.remember_hash(self.store, path, sha(data).upper())
+        with mock.patch.object(discover.hashlib, "sha256", side_effect=AssertionError("should be remembered")):
+            self.assertEqual(discover.find_for_variant(self.store, variant), path)
+        with self.assertRaisesRegex(ValueError, "64 hexadecimal"):
+            discover.remember_hash(self.store, path, "abc")
+        os.utime(path, (5, 5))  # a changed file is checked again
+        self.assertEqual(discover.find_for_variant(self.store, variant), path)
+
 if __name__ == "__main__":
     unittest.main()
