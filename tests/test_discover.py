@@ -77,6 +77,7 @@ class DiscoverTest(unittest.TestCase):
 
     # locations -------------------------------------------------------------------------------------------------
 
+    @unittest.skipIf(os.name == "nt", "checks POSIX-style default paths")
     def test_default_locations_per_system(self):
         paths = {(loc["source"], loc["path"]) for loc in discover.locations()}
         self.assertIn(("hf_cache", str(self.home / ".cache/huggingface/hub")), paths)
@@ -164,6 +165,7 @@ class DiscoverTest(unittest.TestCase):
         self.assertTrue(all(set(e) >= {"stage", "done", "total", "message"} and "/" not in e["message"] for e in events))
         self.assertEqual([v.id for v in discover.local_variants(self.store)], [own["local_variant_id"]])
 
+    @unittest.skipIf(os.name == "nt", "symbolic links need extra rights on Windows")
     def test_scan_never_follows_links_out_of_the_folder(self):
         outside = self.write(self.root / "outside/secret.gguf", model_bytes("x"))
         lm = self.home / ".lmstudio/models"

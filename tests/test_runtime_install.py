@@ -469,6 +469,7 @@ class ExtractTests(Base):
         self.assertTrue(os.access(out / "build/bin/llama-server", os.X_OK))
         self.assertEqual(ri.find_bin_dir(out), out / "build" / "bin")
 
+    @unittest.skipIf(os.name == "nt", "fake builds are POSIX shell scripts without .exe")
     def test_zip_layouts(self):
         out = self.extract(zip_bytes({"llama-server": (GOOD, 0o755), "ggml-cuda.dll": ("x", 0o644)}), ".zip")
         self.assertEqual(ri.find_bin_dir(out), out)
@@ -609,6 +610,7 @@ class DownloadTests(Base):
             handler.redirect_request(request, None, 302, "Found", {}, "http://example.com/x")
 
 
+@unittest.skipIf(os.name == "nt", "installs run fake llama.cpp builds that are POSIX shell scripts")
 class InstallTests(Base):
     def run_install(self, blobs, hardware, system="Linux", machine="x86_64", names=None, **kwargs):
         rel = release(names=names or list(blobs), blobs=blobs)
@@ -872,6 +874,7 @@ class DetectTests(Base):
         self.assertEqual(result["binaries"]["llama-cli"], ["/elsewhere/llama-cli"])
         self.assertIsNone(result["binaries"]["llama-bench"])
 
+    @unittest.skipIf(os.name == "nt", "fake builds are POSIX shell scripts without .exe")
     def test_binary_uses_cache_and_checks_names(self):
         self.managed()
         ri.detect(self.store)

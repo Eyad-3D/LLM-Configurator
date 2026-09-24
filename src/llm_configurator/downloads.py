@@ -7,7 +7,7 @@ different file is never overwritten, and cancelling keeps the `.part` file so th
 import hashlib
 import http.client
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import time
@@ -74,7 +74,7 @@ def _files(variant, directory):
     directory = Path(directory)
     result, seen = [], set()
     for entry in variant.all_files():
-        name = Path(entry["filename"]).name
+        name = PurePosixPath(entry["filename"]).name  # repo paths use "/" on every OS; keeps "C:x" visible
         # ":" would name a Windows drive or alternate data stream; "x" and "x.part" would share a file.
         if name in {"", ".", ".."} or "\\" in name or ":" in name or name in seen or name + ".part" in seen:
             raise ValueError(f"Unsafe or duplicate model file name: {entry['filename']}")

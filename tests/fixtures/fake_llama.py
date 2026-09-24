@@ -1297,4 +1297,6 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8", errors="replace")  # real llama.cpp writes UTF-8 on every OS
     main(sys.argv)

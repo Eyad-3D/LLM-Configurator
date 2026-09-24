@@ -2,6 +2,7 @@ import ast
 import json
 import re
 import shlex
+import os
 import unittest
 
 from llm_configurator import export as ex
@@ -443,6 +444,7 @@ if __name__ == "__main__":
 PRINT_ARGV = "import json, sys; print(json.dumps(sys.argv[1:]))"
 
 
+@unittest.skipIf(os.name == "nt", "the bash on Windows runners is not a POSIX shell for these paths")
 class RealShellTests(unittest.TestCase):
     """Run the exported scripts in real shells with a stand-in server that prints its arguments."""
 
