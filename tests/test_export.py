@@ -434,3 +434,101 @@ class ClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+PRINT_ARGV = "import json, sys; print(json.dumps(sys.argv[1:]))"
+
+
+class RealShellTests(unittest.TestCase):
+    """Run the exported scripts in real shells with a stand-in server that prints its arguments."""
+
+    def run_script(self, shell, suffix, content):
+        import os
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "start" + suffix)
+            with open(path, "w", encoding="utf-8-sig" if suffix == ".ps1" else "utf-8") as handle:
+                handle.write(content)
+            done = subprocess.run(shell + [path], capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout.strip().splitlines()[-1])
+
+    def config(self, path):
+        return base(model_path=path, draft_model_path=path.replace(".gguf", "-draft.gguf"), draft_max=8,
+                    cache_type_k="q8_0", cache_type_v="q8_0", mlock=True, alias="demo's $x")
+
+    def test_bash_passes_exactly_the_tested_args(self):
+        import shutil
+        import sys
+        if not shutil.which("bash"):
+            self.skipTest("bash not installed")
+        for path in [NASTY, "/m/-lead.gguf", "/m/a;b&c|d>e!f*g{h,i}~.gguf"]:
+            with self.subTest(path=path):
+                result = ex.export(self.config(path), variant(), "llama-server", server_command=[sys.executable, "-c", PRINT_ARGV])
+                self.assertEqual(self.run_script(["bash"], ".sh", result["content"]), server_args(self.config(path)))
+
+    def test_powershell_passes_exactly_the_tested_args(self):
+        import shutil
+        import sys
+        pwsh = shutil.which("pwsh")
+        if not pwsh:
+            self.skipTest("PowerShell (pwsh) not installed")
+        for path in [WIN_NASTY, "\\\\server\\share\\m odels\\x.gguf", "C:\\m\\@(1),{x}[y]#z.gguf"]:
+            with self.subTest(path=path):
+                result = ex.export(self.config(path), variant(), "llama-server", "windows",
+                                   server_command=[sys.executable, "-c", PRINT_ARGV])
+                self.assertEqual(self.run_script([pwsh, "-NoProfile", "-File"], ".ps1", result["content"]),
+                                 server_args(self.config(path)))
+
+
+class SeamTests(unittest.TestCase):
+    def test_non_first_shard_starts_from_the_first(self):
+        result = ex.export(base(model_path="/m/x-00002-of-00003.gguf"), None, "llama-server")
+        self.assertIn("/m/x-00001-of-00003.gguf", bash_argv(result["content"]))
+        merge = ex.export(base(model_path="/m/x-00003-of-00003.gguf"), None, "ollama")["instructions"][0]
+        self.assertIn("--merge /m/x-00001-of-00003.gguf /m/x.gguf", merge)
+
+    def test_merged_file_is_not_merged_again(self):
+        split = variant(size_bytes=2, files=[{"filename": "x-00001-of-00002.gguf", "size_bytes": 1, "sha256": "x"},
+                                             {"filename": "x-00002-of-00002.gguf", "size_bytes": 1, "sha256": "y"}])
+        result = ex.export(base(model_path="/m/x.gguf"), split, "ollama")
+        self.assertNotIn("merge", " ".join(result["instructions"]).lower())
+        self.assertIn("FROM /m/x.gguf", result["content"])
+
+    def test_merge_tool_next_to_known_server(self):
+        result = ex.export(base(model_path="/opt/m/x-00001-of-00002.gguf"), None, "ollama",
+                           server_command=["/opt/llama b1/llama-server"])
+        self.assertIn("'/opt/llama b1/llama-gguf-split' --merge", result["instructions"][0])
+        win = ex.export(base(model_path="C:\\m\\x-00001-of-00002.gguf"), None, "ollama", "windows",
+                        server_command="C:\\llama\\llama-server.exe")
+        self.assertIn("& 'C:\\llama\\llama-gguf-split.exe' --merge", win["instructions"][0])
+
+    def test_control_characters_rejected_everywhere(self):
+        for key in ["alias", "device", "gpu_uuid"]:
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                ex.export(base(**{key: "x\ry"}), None, "open-webui")
+        with self.assertRaisesRegex(ValueError, "must be text"):
+            ex.export(base(model_path=b"/m/x.gguf"), None, "llama-server")
+
+    def test_double_quote_refused_for_windows_script(self):
+        with self.assertRaisesRegex(ValueError, "double quote"):
+            ex.export(base(alias='my "model"'), None, "llama-server", "windows")
+        self.assertIn('my "model"', bash_argv(ex.export(base(alias='my "model"'), None, "llama-server")["content"]))
+
+    def test_docker_needs_full_paths(self):
+        for path in ["m.gguf", "models/m.gguf", "C:m.gguf"]:
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "full path"):
+                ex.export(base(model_path=path), None, "docker-compose")
+        unc = ex.export(base(model_path="\\\\nas\\share\\m.gguf"), None, "docker-compose", "windows")
+        self.assertTrue(any("network share" in note for note in unc["notes"]))
+
+    def test_draft_flags_follow_launch(self):
+        config = base(draft_model_path="/models/d.gguf", draft_max=4)
+        argv = bash_argv(ex.export(config, None, "llama-server")["content"])
+        self.assertEqual(argv[argv.index("-md"):argv.index("-md") + 6],
+                         ["-md", "/models/d.gguf", "--spec-type", "draft-simple", "--spec-draft-n-max", "4"])
+        self.assertNotIn("--draft-max", argv)
+        compose = ex.export(config, None, "docker-compose")["content"]
+        self.assertIn('"/draft/d.gguf"', compose)
+        self.assertIn('"--spec-type"', compose)
