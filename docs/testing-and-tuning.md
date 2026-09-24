@@ -6,7 +6,7 @@ Both need the llama.cpp engine (the **Runtime** step installs it) and the downlo
 
 ## Test
 
-The test has two parts. In the app choose **Test**; on the command line use `llm-config test VARIANT_ID --kind smoke|speed|full` (default `full`).
+The test has two parts. In the app choose **Test**; on the command line use `llm-config test VARIANT_ID --kind smoke|speed|full`.
 
 ### 1. Smoke test ("does it work at all?")
 
@@ -38,8 +38,8 @@ Peak graphics memory is only measured on NVIDIA cards (via `nvidia-smi`). On App
 
 After the test you get one of:
 
-- **Works** – started, answered correctly, and meets your speed target.
-- **Works, but slowly** – started and answered, but is below your speed target.
+- **Works** – started, passed the checks, and is fast enough.
+- **Works, but slowly** – started and passed the checks, but is slow.
 - **Failed** – with a plain reason and what to try next.
 
 Speed results are saved and used by future recommendations (see "measured" in [How it works](how-it-works.md#part-2-how-fast-speed)).
@@ -54,11 +54,11 @@ Speed results are saved and used by future recommendations (see "measured" in [H
 
 Tuning tries different engine settings and keeps the ones that make the model fastest **without running out of memory**.
 
-In the app, pick a time budget of **1, 5 or 15 minutes**. On the command line: `llm-config tune VARIANT_ID --budget SECONDS` (60 to 1800 seconds).
+In the app, pick a time budget of **1, 5 or 15 minutes**. On the command line: `llm-config tune VARIANT_ID --budget SECONDS` (the app allows 60 to 1800 seconds).
 
 ### Goal
 
-- **generation** (default) – fastest writing speed.
+- **generation** – fastest writing speed.
 - **prompt** – fastest reading speed (good for long documents).
 - **balanced** – a mix of both.
 
@@ -85,7 +85,7 @@ It stops when time runs out, when nothing improves, or when you cancel. It never
 
 ### The result
 
-You see before and after speeds, the improvement (for example "1.3× faster"), each trial, and short notes. The best settings are saved. Use them later with `--tuned` on `export` and `run`, or automatically in the **Use it** step.
+You see before and after speeds, the improvement (for example "1.3× faster"), each trial, and short notes. The best settings are saved. Use them later with `--tuned` on `export` and `run`.
 
 ### Limits of tuning
 

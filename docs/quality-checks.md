@@ -17,7 +17,7 @@ A short set of questions with checkable answers, for your chosen use:
 
 All questions were written for this project. They are not copied from public benchmarks (so models are unlikely to have memorised them), but that also means scores **can't be compared** with published benchmark numbers.
 
-The result is a score plus a range, for example "18 of 30 (60%, likely between 42% and 75%)". The range (a 95% Wilson interval) is wide because 30–60 questions is a small sample. Treat differences of a few questions as noise.
+The result is a score plus a range. For example, 18 right out of 30 is 60%, with a likely range of about 42% to 75%. The range (a 95% Wilson interval) is wide because 30–60 questions is a small sample. Treat differences of a few questions as noise.
 
 **Long-document recall ("needle test").** Optionally, the app hides one fact inside a long filler text at 10%, 50% and 90% of the way through, and asks the model to find it. This checks the model can actually use the context you chose.
 
@@ -25,7 +25,7 @@ App: **Quality → Quick quiz**. Command line: `llm-config quiz VARIANT_ID [--wo
 
 ## Try my prompts (blind comparison)
 
-Pick 2 or 3 models and type up to 5 of your own prompts. The app runs each model on each prompt, then shows the answers **shuffled and labelled A, B, C** so you don't know which is which. You vote for the best answer to each prompt, then press **Reveal** to see which model you preferred.
+Pick 2 or 3 models and type up to 5 of your own prompts. The app runs each model on each prompt, then shows the answers **shuffled and labelled A, B, C** so you don't know which is which. You vote for the best answer to each prompt, then reveal the answers to see which model you preferred.
 
 This is the most useful check for your real work, because it uses your prompts and your judgement. Your prompts stay on your computer.
 
@@ -42,7 +42,7 @@ Behind the scenes: this uses llama.cpp's `llama-perplexity` tool and a measure c
 Be aware:
 
 - You need the reference **and** the compressed files downloaded. References are big.
-- It writes a temporary file of the reference's predictions, which can be **several GB**. The app warns you and deletes it afterwards.
+- It writes a temporary file of the reference's predictions, which can be large. The app warns you about its size and deletes it afterwards.
 - It tells you how much a compressed version **differs** from the reference, not how good the model is overall.
 
 App: **Quality → Compression check**. Command line: `llm-config quant-check REFERENCE_VARIANT_ID VARIANT_ID [VARIANT_ID ...]`.
@@ -55,7 +55,7 @@ Optional. If you add an [Artificial Analysis](https://artificialanalysis.ai) API
 
 **Adding a key:**
 
-1. Open **Benchmark settings** in the app and paste your key.
+1. In guided setup choose **Include rankings** (or later, **Ranking settings**) and paste your key.
 2. **Test connection** checks it. **Save key** stores it. (Testing alone does not save.)
 3. **Remember on this computer** keeps it in your system password store (Windows Credential Manager, macOS Keychain, or a Linux Secret Service/KWallet keyring). Untick it to use the key for this session only. If the password store is locked or missing, saving fails with a clear message; the app never falls back to a plain file.
 4. **Remove key** deletes it.

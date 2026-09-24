@@ -5,19 +5,19 @@ Once a model is downloaded (and ideally tested), you can use it in two ways:
 1. **Start a local server** from LLM Configurator, and point your apps at it.
 2. **Export settings** for another tool you already use (Ollama, LM Studio, Docker, and so on).
 
-Both use exactly the settings you tested or tuned, so what you measured is what you get.
+Both build the engine settings in one shared place, so the settings you tested are exactly the ones you run or export. Add your tuned settings with `--tuned` on the command line.
 
 ## Start a local server
 
 The server is llama.cpp's `llama-server`. It speaks the **OpenAI API**: the same "language" as ChatGPT's developer interface. Many apps and code libraries can plug straight into it, like a universal power socket.
 
-**In the app:** open **Get it running → Use it** and click **Start**. The app shows the address, for example:
+**In the app:** open **Get it running → Use it** and start the server. The app shows the address, for example:
 
 ```text
 http://127.0.0.1:PORT/v1
 ```
 
-Click **Stop** to shut it down. One server runs at a time. It keeps running in the background while the app is open.
+Stop it from the same place. One server runs at a time.
 
 **On the command line:**
 
@@ -35,7 +35,7 @@ Use these settings in any OpenAI-compatible app or library:
 |---|---|
 | Base URL | `http://127.0.0.1:PORT/v1` (the address shown) |
 | API key | anything, e.g. `local` (it is ignored, but some apps require a value) |
-| Model name | the name shown by the app (any name usually works with one model loaded) |
+| Model name | any name usually works, since one model is loaded |
 
 Python example (needs `pip install openai`):
 
@@ -58,7 +58,7 @@ The server listens on `127.0.0.1` only: other computers and phones on your netwo
 
 ## Export settings
 
-**In the app:** **Use it** shows one tab per format with a **Copy** button.
+**In the app:** **Use it** shows one tab per format with a copy button.
 **On the command line:**
 
 ```bash
@@ -79,7 +79,7 @@ llm-config export VARIANT_ID --format FORMAT [--platform posix|windows] [--conte
 
 Each export also lists plain **instructions** and **notes**. Read the notes: some tools can't express every setting. For example:
 
-- **Ollama** can't set notepad (KV cache) compression per model (it is a setting for the whole Ollama server, `OLLAMA_KV_CACHE_TYPE`), and can't keep MoE experts in RAM the way llama.cpp's `--n-cpu-moe` does. The note tells you what was left out.
+- **Ollama** can't set notepad (KV cache) compression per model (it is a setting for the whole Ollama server), and can't keep MoE experts in RAM the way llama.cpp's `--n-cpu-moe` does. The note tells you what was left out.
 - **Docker** needs Docker installed, and the NVIDIA Container Toolkit for graphics card use.
 
 If the model isn't downloaded yet, exports use a placeholder path and say so. Replace it with the real file path.

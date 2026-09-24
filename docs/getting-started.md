@@ -75,14 +75,14 @@ python3 -m venv .venv
 ## The guided questions
 
 1. Click **Get started**. The app checks your hardware in the background.
-2. Choose whether to **include quality rankings**. Rankings come from Artificial Analysis and need a free API key (see [Quality checks](quality-checks.md#rankings-from-artificial-analysis)). You can skip this.
+2. Choose **Include rankings** or **Continue without rankings**. Rankings come from Artificial Analysis and need a free API key (see [Quality checks](quality-checks.md#rankings-from-artificial-analysis)). You can skip this.
 3. Answer one question per screen:
    - what you'll mainly use it for (general chat, coding, agents, long documents). **Agents** are AI helpers that take actions for you, such as calling tools.
    - whether you care more about quality or speed
    - how much text it needs to keep in view at once (the **context**, like the size of its desk, measured in **tokens**: pieces of words, about ¾ of a word each)
    - how many chats or agents run **at the same time** (one person running three agents counts as three)
    - whether other apps will stay open
-   Exact numbers (tokens, words per second, memory to keep free) are under **advanced** controls.
+   Exact numbers (tokens, speed target, memory to keep free) can be set on those screens and under **Advanced hardware settings**.
 4. Check your answers. **Edit** jumps back to one question.
 5. See up to **three recommendations**. Each card shows:
    - a **verdict badge**: *Runs well*, *Runs slowly*, *Too slow* or *Not tested yet*
@@ -102,6 +102,8 @@ Each card has a **Get it running** button. It opens six steps:
 4. **Tune** – spends 1, 5 or 15 minutes trying settings and keeps the fastest safe ones.
 5. **Check quality** – optional quizzes and blind comparisons. See [Quality checks](quality-checks.md).
 6. **Use it** – start a local server, or copy settings for Ollama, LM Studio, Docker and others. See [Using your model](using-your-model.md).
+
+The Quality panel can also **list model files already on your computer** and scan for more.
 
 A small **jobs tray** shows everything running in the background. You can cancel any job.
 

@@ -8,10 +8,10 @@ The app sends **no usage data or telemetry**. It only makes these requests, all 
 
 | Destination | When | What is sent / fetched |
 |---|---|---|
-| **Hugging Face** (`huggingface.co`, or your `HF_ENDPOINT` mirror) | Guided setup, **Refresh**, `refresh` | Public model information: sizes, layers, file list. Not the model files. |
+| **Hugging Face** (`huggingface.co`, or your `HF_ENDPOINT` mirror) | Guided setup, **Refresh**, `refresh`, `models add` | Public model information: sizes, layers, file list. Not the model files. |
 | **Hugging Face** | Only when you click **Download** or run `download` | The model file(s) you chose. |
-| **GitHub** (`api.github.com` and GitHub release downloads) | Only when you click **Install runtime** or run `runtime install` | Asks for the latest official llama.cpp release and downloads the one file for your system. |
-| **GitHub** (`raw.githubusercontent.com`) | Only when you click **Import community results** or run `community import` | Downloads the public community results file. |
+| **GitHub** (`api.github.com` and GitHub release downloads) | Only when you click the install button or run `runtime install` | Asks for the latest official llama.cpp release and downloads the build for your system (on Windows with NVIDIA, also the matching CUDA runtime file). |
+| **GitHub** (`raw.githubusercontent.com`) | Only when you import community results in the app or run `community import` | Downloads the public community results file. |
 | **Artificial Analysis** (`artificialanalysis.ai`) | Only if you turned on rankings and gave a key | Your key (to authorise) and requests for public benchmark scores. |
 
 Your hardware details, prompts, test results, file paths and keys are **not** sent anywhere, except the key to Artificial Analysis itself.
@@ -34,7 +34,7 @@ A Hugging Face token (`HF_TOKEN`) is optional and only needed for models that re
 - Every file (every piece of a split model) is checked against its published **SHA256 fingerprint** (a unique code; if a single byte differs, the code differs). A file that doesn't match is not used.
 - Interrupted downloads keep a `.part` file and resume later.
 - Only HTTPS redirects are followed.
-- **Remove** deletes only that model's files (and its `.part` files) inside the models folder.
+- Removing a model deletes only that model's files (and its `.part` files) inside the models folder.
 
 **The llama.cpp engine:**
 
@@ -48,7 +48,7 @@ A Hugging Face token (`HF_TOKEN`) is optional and only needed for models that re
 
 ## The local app and servers
 
-- The app listens on **`127.0.0.1` only**, so only your own computer can reach it. It rejects requests with a different host or origin, and every request needs a random session token that changes each start. This stops other websites open in your browser from controlling it.
+- The app listens on **`127.0.0.1` only**, so only your own computer can reach it. It rejects requests with a different host or origin, and every data request needs a random session token that changes each start (only the page files themselves load without it). This stops other websites open in your browser from controlling it.
 - The page **cannot** send file paths, web addresses, program names or command-line options. It only sends IDs from lists the app made itself, choices from fixed menus, and bounded numbers or text. Anything that touches files or programs comes from the app's own folders or from command-line arguments you type.
 - Model servers the app starts also listen on `127.0.0.1` only.
 - Heavy jobs (tests, tuning, quizzes) run one at a time and can be cancelled.

@@ -46,7 +46,7 @@ None (docs only). User-facing command names: `llm-config` and the new alias `llm
 - Inspected the wheel: `static/*`, `catalogue.json` present. Simulated the other workstreams' files (`evals/general.json`, `data/quantcheck_corpus.txt`, `static/run.js`) in a scratch copy and rebuilt: all shipped in the wheel via the existing package-data patterns, and `importlib.resources` finds them after install.
 - Installed the wheel in a fresh venv: `llm-config --help` and `llm-configurator --help` work.
 - Parsed both workflow files with PyYAML; ran the package job's wheel-contents check locally.
-- A "fresh user" subagent read only README + getting-started and reported confusing sentences; a second subagent checked the docs against the contract and code. Fixes applied (see commits).
+- A "fresh user" subagent read only README + getting-started and reported confusing sentences (prerequisites, "use From source right now", how to restart, jargon); a second subagent checked the docs against the contract and code (wrong UI label "Benchmark settings", wrong credential error text, invented defaults/labels/error strings, missing "Compare again first" and cudart). Fixes applied in the last commit.
 
 ## llama.cpp facts assumed (for the harness to confirm)
 
@@ -64,7 +64,7 @@ These appear in user-facing docs:
 
 Each is written from the contract, not from merged code. Adjust the docs if the implementation differs.
 
-1. **UI labels**: "Get it running", its six step names, "jobs tray", "Install runtime", "Start"/"Stop", "Copy", verdict badges "Runs well / Runs slowly / Too slow / Not tested yet", Quality tabs "Quick quiz / Try my prompts / Compression check", "Reveal", "Import community results" (getting-started, quality-checks, using-your-model, privacy).
+1. **UI labels**: "Get it running", its six step names, "jobs tray", verdict badges "Runs well / Runs slowly / Too slow / Not tested yet", Quality tabs "Quick quiz / Try my prompts / Compression check", and that the Quality panel hosts the local-models list (getting-started). Button names not fixed by the contract (install, start/stop, copy, reveal, import, remove) are described generically on purpose; existing labels (Include rankings, Ranking settings, Test connection, Save key, Remove key, Remember on this computer, Match benchmark entries, Advanced hardware settings, Recalibrate speed) were checked against `static/index.html`.
 2. **Tune budgets** 1/5/15 min in the UI and 60–1800 s on the CLI `--budget` (API range; CLI validation may differ).
 3. **`llm-config run`** without `--port` picks a free port and prints the address (testing-and-tuning, using-your-model, troubleshooting).
 4. **`llm-config local`** with no flags lists found files; `--scan` searches; `--add` registers (cli.md).
@@ -77,6 +77,6 @@ Each is written from the contract, not from merged code. Adjust the docs if the 
 11. **Quiz** item counts (30–60) and "Wilson 95%" range example.
 12. **Community** anonymised fields and "month of the test" precision.
 13. **Speed estimate quants**: `speed.py` currently only knows Q4_K_M/Q5_K_M/Q6_K/Q8_0; docs list all `QUANT_BYTES_PER_PARAMETER` levels as having known **sizes** (memory), not speed estimates. Fine unless engine drops a level.
-14. **Troubleshooting error texts** are paraphrased, not quoted, except "Secure credential storage is unavailable" and "Reload the application to refresh the session" (both from current code) and the contract's "Compare again first".
+14. **Troubleshooting error texts** are paraphrased, not quoted, except "Could not save to the OS credential store", "Unsupported memory architecture" and "Reload the application to refresh the session" (all from current code), the contract's "Compare again first", and the OS "address already in use" wording.
 15. **Learning label** "adjusted from N local measurements" and evidence labels list.
 16. **`uvx --python 3.12 llm-configurator serve`** in troubleshooting — standard uv flag.
