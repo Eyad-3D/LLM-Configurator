@@ -298,9 +298,9 @@ def _rocm_names():
     return [], rocm
 
 
-def drm_cards(root=DRM_ROOT):
+def drm_cards(root=None):
     """GPUs visible in /sys/class/drm, one per PCI device, with vendor, driver and memory counters."""
-    cards, seen = [], set()
+    cards, seen, root = [], set(), root or DRM_ROOT
     try:
         entries = sorted((e for e in os.listdir(root) if re.fullmatch(r"card\d+", e)), key=lambda e: int(e[4:]))
     except OSError:
@@ -326,9 +326,9 @@ def drm_cards(root=DRM_ROOT):
     return cards
 
 
-def linux_gpus(start_index, have_nvidia, root=DRM_ROOT):
+def linux_gpus(start_index, have_nvidia, root=None):
     """AMD cards with sysfs memory counters go in `gpus`; everything else we can see goes in `other_gpus`."""
-    cards = drm_cards(root)
+    cards = drm_cards(root or DRM_ROOT)
     gpus, others, warnings = [], [], []
     amd = [c for c in cards if c["vendor"] == "amd"]
     names, rocm = _cached("rocm_names", _rocm_names) if amd else ([], False)
@@ -404,7 +404,7 @@ def windows_gpus(have_nvidia, registry=None):
 
 # ---------- scan ----------
 
-def gpu_scan(system, ram_total, ram_available, registry=None, drm_root=DRM_ROOT):
+def gpu_scan(system, ram_total, ram_available, registry=None, drm_root=None):
     """Returns (gpus, other_gpus, warnings, unified_memory)."""
     gpus, warnings = nvidia_gpus()
     others, unified = [], False
