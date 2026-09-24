@@ -12,6 +12,7 @@ import re
 import secrets
 import subprocess
 import tempfile
+import threading
 import time
 
 from .domain import Cancelled, check_cancel, now
@@ -32,6 +33,9 @@ BENCH_PROMPT = 512
 BENCH_GEN = 128
 BENCH_REPETITIONS = 2
 TTFT_PROMPT_TOKENS = 1500
+# llama-bench re-reads the whole depth, untimed, before every repetition of both tests. Past this many tokens that
+# costs more time than it tells (a 128K context on a CPU would take hours), so the record says the depth it used.
+MAX_BENCH_DEPTH = 32768
 
 
 def _now():
@@ -41,6 +45,14 @@ def _now():
 def _progress(progress, stage, done, total, message, **extra):
     if progress:
         progress({"stage": stage, "done": done, "total": total, "message": message, **extra})
+
+
+def _loading(progress, stage, done, total):
+    """llama-server reports loading as seconds out of its timeout; keep this test's own stage and step counts."""
+    if not progress:
+        return None
+    return lambda event: progress({"stage": stage, "done": done, "total": total,
+                                   "message": (event or {}).get("message") or "Loading the model…"})
 
 
 def _server_class(server_factory):
@@ -58,11 +70,10 @@ def _peak_class(peak_factory):
 
 
 def _chat(server, messages, max_tokens, **kwargs):
-    """Ask without hidden reasoning where the server supports it; older servers ignore the extra field."""
-    try:
-        return server.chat(messages, max_tokens=max_tokens, chat_template_kwargs=NO_THINKING, **kwargs)
-    except TypeError:
-        return server.chat(messages, max_tokens=max_tokens, **kwargs)
+    """Ask without hidden reasoning. Chat templates that don't know these switches simply ignore them.
+    cache_prompt=False (LlamaServer's default, sent explicitly) makes every call read the whole prompt again."""
+    return server.chat(messages, max_tokens=max_tokens, cache_prompt=False,
+                       extra={"chat_template_kwargs": dict(NO_THINKING)}, **kwargs)
 
 
 def _stop(server):
@@ -137,7 +148,7 @@ def smoke_test(server_command, config, progress=None, cancel=None, server_factor
         server = _server_class(server_factory)(server_command, config)
         started = _now()
         try:
-            server.start(timeout=timeout, progress=progress, cancel=cancel)
+            server.start(timeout=timeout, progress=_loading(progress, "smoke_start", 0, 2), cancel=cancel)
         except Cancelled:
             raise
         except (ValueError, OSError, RuntimeError) as error:
@@ -158,10 +169,15 @@ def smoke_test(server_command, config, progress=None, cancel=None, server_factor
         except (ValueError, OSError, RuntimeError) as error:
             result.update(stage_failed="reply", message=f"The model loaded but did not answer: {error}", log_tail=_tail(server))
             return result
-        text, checks = reply_checks((reply or {}).get("text"))
+        reply = reply or {}
+        text, checks = reply_checks(reply.get("text"))
         result.update(reply=text, checks=checks, log_tail=_tail(server))
         failed = [c for c in checks if not c["ok"]]
-        if failed:
+        if failed and not text and reply.get("reasoning"):
+            # llama-server puts hidden reasoning in its own field; the model thought but never answered.
+            result.update(stage_failed="reply", message="The model loaded but spent its whole answer thinking and never "
+                          "replied, even when asked not to think. Its chat template may not support turning thinking off.")
+        elif failed:
             result.update(stage_failed="reply", message=f"The model loaded but its answer looks wrong. {failed[0]['detail']}")
         else:
             result.update(ok=True, message=f"The model loaded in {result['load_seconds']:.1f} s and answered correctly.")
@@ -175,12 +191,13 @@ def bench_plan(context):
     """Reading/writing test sizes at the user's conversation length.
 
     Rule: depth = context - prompt - gen (the contract's -p 512 -n 128 -d <context-640>), so the
-    test ends exactly at the configured context. Short contexts shrink prompt/gen to fit.
+    test ends exactly at the configured context. Short contexts shrink prompt/gen to fit, and very long
+    contexts are measured at MAX_BENCH_DEPTH (the record's `depth` says so).
     """
     n_prompt, n_gen = BENCH_PROMPT, BENCH_GEN
     if context < n_prompt + n_gen + 128:
         n_prompt, n_gen = max(32, context // 2), max(16, context // 4)
-    depth = max(0, context - n_prompt - n_gen)
+    depth = min(max(0, context - n_prompt - n_gen), MAX_BENCH_DEPTH)
     return {"n_prompt": n_prompt, "n_gen": n_gen, "depth": depth}
 
 
@@ -197,8 +214,9 @@ def bench_args(config, n_prompt, n_gen, depth, repetitions=BENCH_REPETITIONS):
     c = launch.normalize(config)
     if not c["model_path"]:
         raise ValueError("A downloaded model file is required")
+    # -v: without it llama-bench hides llama.cpp's own log, so an out-of-memory load reads only "failed to load model".
     args = ["-m", c["model_path"], "-p", str(n_prompt), "-n", str(n_gen), "-d", str(depth),
-            "-r", str(repetitions), "-o", "json",
+            "-r", str(repetitions), "-o", "json", "-v",
             "-ngl", str(launch.runtime_gpu_layers(c["gpu_layers"], c["total_layers"])),
             "-ctk", c["cache_type_k"], "-ctv", c["cache_type_v"]]
     for flag, name in [("-t", "threads"), ("-b", "batch"), ("-ub", "ubatch")]:
@@ -211,32 +229,15 @@ def bench_args(config, n_prompt, n_gen, depth, repetitions=BENCH_REPETITIONS):
     device = c["device"] or ("none" if c["gpu_layers"] == 0 and c["gpu_backend"] not in {None, "cpu"} else None)
     if device:
         args += ["-dev", device]
+    if not c["mmap"]:
+        args += ["-lm", "none"]  # llama-server's --no-mmap; -mmp 0 is deprecated in favour of --load-mode
     return args
 
 
 def parse_bench_json(text):
-    """Rows from llama-bench `-o json` (or jsonl), tolerating log lines before or after the JSON."""
-    text = text or ""
-    start = text.find("[")
-    if start >= 0:
-        end = text.rfind("]")
-        try:
-            rows = json.loads(text[start:end + 1])
-            if isinstance(rows, list):
-                return [r for r in rows if isinstance(r, dict)]
-        except ValueError:
-            pass
-    rows = []
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("{"):
-            try:
-                row = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(row, dict):
-                rows.append(row)
-    return rows
+    """Rows from llama-bench `-o json` or jsonl, tolerating log lines and an array left open by a crash."""
+    from .tuner import parse_rows
+    return parse_rows(text or "")
 
 
 def _speed(row):
@@ -313,12 +314,13 @@ def run_bench(bench_command, config, plan, repetitions=BENCH_REPETITIONS, timeou
         bench_args(config, plan["n_prompt"], plan["n_gen"], plan["depth"], repetitions)
     code, stdout, stderr = run_process(argv, timeout, env=launch.server_env(config), cancel=cancel)
     if code:
-        detail = stderr.strip()[-600:]
-        if any(hint in detail.lower() for hint in OOM_HINTS):
+        from .tuner import bench_failure
+        reason = bench_failure(stderr, stdout, code)
+        if reason.startswith("Ran out of memory"):
             raise ValueError("The speed test ran out of memory. Try fewer GPU layers, a shorter context or a smaller file.")
-        if re.search(r"invalid parameter|unknown argument|error: invalid", detail, re.I):
+        if reason.startswith("This llama.cpp version"):
             raise ValueError("This llama.cpp version does not support the speed test settings. Update llama.cpp and try again.")
-        raise ValueError(f"The speed test failed (exit code {code}). {detail}".strip())
+        raise ValueError(f"The speed test failed. {reason}")
     rows = parse_bench_json(stdout)
     pp = next((r for r in rows if r.get("n_prompt") == plan["n_prompt"] and r.get("n_gen") == 0
                and r.get("n_depth", 0) == plan["depth"]), None)
@@ -348,6 +350,77 @@ def filler_prompt(tokens=TTFT_PROMPT_TOKENS):
         words += len(sentence.split())
         i += 1
     return " ".join(sentences) + "\n\nIn one short sentence, what is this text about?"
+
+
+def fitted_prompt(server, target):
+    """Filler text of at most `target` tokens, counted by the model's own tokenizer (word-based guesses can overflow
+    a short context). Returns (prompt, tokens); tokens is None when the server can't count."""
+    size = target
+    for _ in range(4):
+        prompt = filler_prompt(size)
+        try:
+            count = len(server.tokenize(prompt))
+        except (ValueError, OSError, AttributeError):
+            return prompt, None
+        if count <= target or size <= 16:
+            return prompt, count
+        size = max(16, int(size * target / count) - 8)
+    return prompt, count
+
+
+class _PeakWatcher:
+    """Starts the peak-memory sampler as soon as the server has a process id, while start() is still loading."""
+
+    def __init__(self, server, peak_class, gpu_backend):
+        self.server, self.peak_class, self.gpu_backend = server, peak_class, gpu_backend
+        self.monitor = None
+        self._done = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="peak-watch", daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        while not self._done.is_set():
+            try:
+                pid = self.server.pid
+            except Exception:
+                pid = None
+            if pid:
+                monitor = self.peak_class(pid, gpu_backend=self.gpu_backend)
+                monitor.start()
+                self.monitor = monitor
+                return
+            self._done.wait(0.02)
+
+    def stop(self):
+        self._done.set()
+        self._thread.join(timeout=5)
+        if self.monitor is None:
+            return {}
+        try:
+            return self.monitor.stop() or {}
+        except Exception:
+            return {}
+
+
+BACKEND_NAMES = (("cuda", "cuda"), ("rocm", "rocm"), ("hip", "rocm"), ("vulkan", "vulkan"), ("metal", "metal"),
+                 ("mtl", "metal"), ("cpu", "cpu"))
+
+
+def runtime_info(row, config):
+    """§2.3 `runtime`: llama.cpp build tag (b<N>, the release name) and the backend that did the work, in the
+    lower-case names the rest of the app uses. llama-bench reports e.g. "CPU" or "CUDA,CPU"."""
+    number = row.get("build_number")
+    version = f"b{number}" if type(number) is int and number > 0 else (row.get("build_commit") or None)
+    reported = [part.strip().lower() for part in str(row.get("backends") or "").split(",") if part.strip()]
+    names = [next((name for key, name in BACKEND_NAMES if part.startswith(key)), "unknown") for part in reported]
+    gpu = next((n for n in names if n not in {"cpu", "unknown"}), None)
+    if config["gpu_layers"] and gpu:
+        backend = gpu
+    elif not config["gpu_layers"] or (names and not gpu and "cpu" in names):
+        backend = "cpu"
+    else:
+        backend = config["gpu_backend"] or ("unknown" if names else None)
+    return {"version": version, "backend": backend}
 
 
 def estimate_memory(variant, config, hardware=None, allocations=None):
@@ -397,13 +470,15 @@ def speed_test(bench_command, server_command, variant, config, hardware, progres
     check_cancel(cancel)
 
     _progress(progress, "first_word", 1, 3, "Measuring the delay before the first word…")
-    server = monitor = None
+    server = watcher = None
     peak = {"peak_ram_bytes": None, "peak_vram_bytes": None}
-    ttft = timings = None
+    ttft = timings = prompt_tokens = None
     try:
         server = _server_class(server_factory)(server_command, config)
+        # Memory is watched from the moment the process exists, so the peak includes loading the model.
+        watcher = _PeakWatcher(server, _peak_class(peak_factory), config["gpu_backend"])
         try:
-            server.start(timeout=server_timeout, progress=None, cancel=cancel)
+            server.start(timeout=server_timeout, progress=_loading(progress, "first_word", 1, 3), cancel=cancel)
         except (ValueError, OSError, RuntimeError) as error:
             reason = None
             try:
@@ -411,27 +486,27 @@ def speed_test(bench_command, server_command, variant, config, hardware, progres
             except Exception:
                 pass
             raise ValueError(_start_message(reason or str(error))) from None
-        monitor = _peak_class(peak_factory)(server.pid, gpu_backend=config["gpu_backend"])
-        monitor.start()
-        tokens = min(TTFT_PROMPT_TOKENS, max(64, config["context"] - 256))
-        prompt = filler_prompt(tokens)
+        check_cancel(cancel)
+        # A tiny warm-up request so one-off start-up costs don't land in the timed request.
+        _chat(server, [{"role": "user", "content": "Hi"}], 1, temperature=0.0)
+        target = min(TTFT_PROMPT_TOKENS, max(64, config["context"] - 256))
+        prompt, prompt_tokens = fitted_prompt(server, target)
         check_cancel(cancel)
         started = _now()
         reply = _chat(server, [{"role": "user", "content": prompt}], 1, temperature=0.0)
         wall = _now() - started
         timings = (reply or {}).get("timings") or {}
         prompt_ms = timings.get("prompt_ms")
+        if isinstance(timings.get("prompt_n"), int) and timings["prompt_n"] > 0:
+            prompt_tokens = timings["prompt_n"]  # what the server really read, chat template included
         # Wall clock includes the HTTP round trip, which is what the user feels; fall back to the server's own timer.
         ttft = round(wall, 3) if wall > 0 else (round(prompt_ms / 1000, 3) if isinstance(prompt_ms, (int, float)) else None)
         check_cancel(cancel)
         # A short generation so the peak includes a working KV cache, not just the loaded weights.
         _chat(server, [{"role": "user", "content": "Write two sentences about the sea."}], 64, temperature=0.0)
     finally:
-        if monitor is not None:
-            try:
-                peak.update(monitor.stop() or {})
-            except Exception:
-                pass
+        if watcher is not None:
+            peak.update(watcher.stop())
         _stop(server)
 
     _progress(progress, "memory", 2, 3, "Comparing memory use with the estimate…")
@@ -439,24 +514,27 @@ def speed_test(bench_command, server_command, variant, config, hardware, progres
     within, note = memory_verdict(estimated_ram, estimated_vram, peak.get("peak_ram_bytes"), peak.get("peak_vram_bytes"))
     tg = bench["tg_row"]
     build = tg.get("build_commit")
-    backend = tg.get("backends") or tg.get("backend") or config["gpu_backend"] or ("cpu" if not config["gpu_layers"] else None)
-    record = {"variant_id": variant.id, "sha256": variant.sha256, "fingerprint": hardware.get("fingerprint"), "timestamp": now(),
+    record = {"variant_id": variant.id, "sha256": variant.sha256, "fingerprint": (hardware or {}).get("fingerprint"),
+              "timestamp": now(),
               "context": config["context"], "users": config["parallel"], "gpu_layers": config["gpu_layers"],
               "gpu_uuid": config["gpu_uuid"] if config["gpu_layers"] else None,
               "threads": config["threads"] if config["threads"] else tg.get("n_threads"),
               "tps": bench["tps"], "runtime_build": build,
               "raw": {"bench": [r for r in (bench["pp_row"], tg) if r], "server_timings": timings, "plan": plan},
-              "note": "Measured on this computer with llama-bench (reading and writing speed at the given depth) and one "
-                      "llama-server run (first-word delay and peak memory). Other programs running can change speed.",
-              "kind": "speed_test", "pp_tps": bench["pp_tps"], "ttft_s": ttft, "depth": plan["depth"],
+              "note": "Measured on this computer with llama-bench (reading and writing speed with the given depth of "
+                      "conversation already in memory) and one llama-server run (first-word delay for a fresh prompt of "
+                      "ttft_prompt_tokens tokens, and peak memory including loading). Other programs running can change speed.",
+              "kind": "speed_test", "pp_tps": bench["pp_tps"], "ttft_s": ttft, "ttft_prompt_tokens": prompt_tokens,
+              "depth": plan["depth"],
               "peak_ram_bytes": peak.get("peak_ram_bytes"), "peak_vram_bytes": peak.get("peak_vram_bytes"),
               "estimated_ram_bytes": estimated_ram, "estimated_vram_bytes": estimated_vram,
               "settings": {k: config[k] for k in ["flash_attn", "cache_type_k", "cache_type_v", "batch", "ubatch", "n_cpu_moe"]},
-              "runtime": {"version": str(tg["build_number"]) if tg.get("build_number") is not None else build, "backend": backend},
+              "runtime": runtime_info(tg, config),
               "id": secrets.token_hex(6)}
     _progress(progress, "speed_done", 3, 3, "Speed test finished.")
     return {"measurement": record,
-            "summary": {"pp_tps": bench["pp_tps"], "tps": bench["tps"], "ttft_s": ttft, "depth": plan["depth"]},
+            "summary": {"pp_tps": bench["pp_tps"], "tps": bench["tps"], "ttft_s": ttft, "ttft_prompt_tokens": prompt_tokens,
+                        "depth": plan["depth"]},
             "memory": {"estimated_ram_bytes": estimated_ram, "estimated_vram_bytes": estimated_vram,
                        "peak_ram_bytes": peak.get("peak_ram_bytes"), "peak_vram_bytes": peak.get("peak_vram_bytes"),
                        "within_estimate": within, "note": note}}
@@ -480,14 +558,15 @@ def verdict(smoke, speed, speed_error=None, min_tps=None):
             return "works", f"The model works, but the speed test did not finish: {speed_error}"
         return "works", "The model loads and answers correctly. Run the speed test to see how fast it is."
     summary, memory = speed["summary"], speed["memory"]
-    delay = f", starts answering after {summary['ttft_s']:.1f} s" if summary.get("ttft_s") is not None else ""
-    speed_text = (f"writes about {summary['tps']:.1f} tokens per second (a token is about three quarters of a word){delay}, "
+    speed_text = (f"writes about {summary['tps']:.1f} tokens per second (a token is about three quarters of a word) "
                   f"with {summary['depth']:,} tokens of conversation already in memory.")
+    if summary.get("ttft_s") is not None:
+        size = f"a {summary['ttft_prompt_tokens']:,}-token" if summary.get("ttft_prompt_tokens") else "a"
+        speed_text += f" It starts answering {size} new message after {summary['ttft_s']:.1f} s."
     extra = " " + memory["note"] if memory.get("within_estimate") is False else ""
     if min_tps and summary["tps"] < min_tps:
         return "works_slowly", f"It works but is slower than your target of {min_tps:g}: it {speed_text}{extra}"
     return "works", f"It works: it {speed_text}{extra}"
-    return "works", text
 
 
 def run_tests(store, variant, config, commands, kind="full", hardware=None, progress=None, cancel=None, min_tps=None,

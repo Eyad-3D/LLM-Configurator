@@ -12,6 +12,7 @@ import math
 import os
 import re
 import subprocess
+import tempfile
 import time
 
 from . import launch
@@ -38,8 +39,7 @@ def _bench_value(name, value, config):
     if name == "gpu_layers":
         return str(launch.runtime_gpu_layers(value, config["total_layers"]))
     if name == "flash_attn":
-        # "1"/"0" work on every llama-bench: older builds take only 0/1, newer ones treat them as on/off.
-        return {"on": "1", "off": "0"}[value]
+        return value  # llama-bench --help documents on|off|auto (0/1 are also accepted); same words as llama-server
     return str(value)
 
 
@@ -86,33 +86,63 @@ def bench_args(config, n_prompt=512, n_gen=128, depth=0, repetitions=2, sweep=No
     if device:
         args += ["-dev", device]
     if not c["mmap"]:
-        args += ["-mmp", "0"]
-    return args + ["-r", str(repetitions), "-o", "json"]
+        args += ["-lm", "none"]  # llama-server's --no-mmap; -mmp 0 is deprecated in favour of --load-mode
+    # -v: without it llama-bench hides llama.cpp's own log, so an out-of-memory load reads only "failed to load model".
+    return args + ["-r", str(repetitions), "-o", "json", "-v"]
 
 
-def run_process(argv, env=None, timeout=DEFAULT_TIMEOUT, cancel=None):
-    """Run llama-bench; kills it on cancel (raising Cancelled) or on timeout."""
-    started = time.monotonic()
+def _kill_tree(process):
     try:
-        process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
-                                   errors="replace", creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
-    except OSError as error:
-        raise ValueError(f"llama-bench could not be started ({error}). Reinstall the runtime and try again.") from None
-    timed_out = False
-    while True:
+        import psutil
+        children = psutil.Process(process.pid).children(recursive=True)
+    except Exception:  # noqa: BLE001 - psutil missing or the process already gone
+        children = []
+    for child in children:
         try:
-            stdout, stderr = process.communicate(timeout=0.25)
-            break
-        except subprocess.TimeoutExpired:
-            if (cancel is not None and cancel.is_set()) or time.monotonic() - started > timeout:
-                process.kill()
-                stdout, stderr = process.communicate()
-                if cancel is not None and cancel.is_set():
-                    raise Cancelled("Cancelled by user") from None
-                timed_out = True
-                break
-    return {"returncode": process.returncode, "stdout": stdout or "", "stderr": stderr or "",
-            "seconds": time.monotonic() - started, "timed_out": timed_out}
+            child.kill()
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        process.kill()
+    except OSError:
+        pass
+    try:
+        process.wait(timeout=10)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def run_process(argv, env=None, timeout=DEFAULT_TIMEOUT, cancel=None, poll=0.2):
+    """Run llama-bench with a deadline; on cancel raises Cancelled. The process and anything it started are
+    always killed on the way out (cancel, timeout, errors). Output goes to temp files so pipes never stall."""
+    started = time.monotonic()
+    options = {"stdout": None, "stderr": None, "stdin": subprocess.DEVNULL, "env": env}
+    if os.name == "nt":
+        options["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        options["start_new_session"] = True  # the terminal's Ctrl+C goes to the app, which then cleans up
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        options.update(stdout=out, stderr=err)
+        try:
+            process = subprocess.Popen(argv, **options)
+        except OSError as error:
+            raise ValueError(f"llama-bench could not be started ({error}). Reinstall the runtime and try again.") from None
+        timed_out = False
+        try:
+            while process.poll() is None:
+                check_cancel(cancel)
+                if time.monotonic() - started > timeout:
+                    timed_out = True
+                    break
+                time.sleep(poll)
+        finally:
+            if process.poll() is None:
+                _kill_tree(process)
+        out.seek(0)
+        err.seek(0)
+        return {"returncode": process.returncode, "stdout": out.read().decode("utf-8", "replace"),
+                "stderr": err.read().decode("utf-8", "replace"), "seconds": time.monotonic() - started,
+                "timed_out": timed_out}
 
 
 def parse_rows(text):
@@ -166,16 +196,32 @@ def score(tps, pp_tps, goal):
     return tps ** BALANCED_WEIGHTS[0] * pp_tps ** BALANCED_WEIGHTS[1]
 
 
-def _plain_failure(result):
-    text = (result.get("stderr") or "") + (result.get("stdout") or "")
-    if result.get("timed_out"):
+_PATH = re.compile(r"'[^']*[/\\\\][^']*'|\"[^\"]*[/\\\\][^\"]*\"|(?:[A-Za-z]:)?[/\\\\][^\s'\"]+")
+
+
+def bench_failure(stderr, stdout="", returncode=None, timed_out=False):
+    """One plain sentence for a failed llama-bench run, without file paths (they stay on this computer)."""
+    text = (stderr or "") + "\n" + (stdout or "")
+    if timed_out:
         return "The test ran out of time."
     if OOM_TEXT.search(text):
         return "Ran out of memory with these settings."
-    if "unknown argument" in text or "invalid parameter" in text or "error: invalid" in text:
+    if re.search(r"unknown argument|invalid parameter|error: invalid|invalid device", text, re.I):
         return "This llama.cpp version does not support one of these settings."
-    tail = text.strip().splitlines()[-1:] or ["no error output"]
-    return f"llama-bench stopped with an error ({result.get('returncode')}): {tail[0][:200]}"
+    cause = re.search(r"error loading model: (.+)", text)
+    if cause:
+        return f"llama.cpp could not load the model: {_PATH.sub('<file>', cause.group(1).strip())[:200]}"
+    if "failed to load model" in text or "failed to create context" in text:
+        # llama-bench prints no reason (out of memory looks the same as a damaged file).
+        return ("llama.cpp could not load the model with these settings. They may need more memory than is free, "
+                "or the file may be damaged.")
+    lines = [line.strip() for line in (stderr or "").splitlines() if line.strip()]
+    tail = next((line for line in reversed(lines) if "error" in line.lower()), lines[-1] if lines else "no error output")
+    return f"llama-bench stopped with an error ({returncode}): {_PATH.sub('<file>', tail)[:200]}"
+
+
+def _plain_failure(result):
+    return bench_failure(result.get("stderr"), result.get("stdout"), result.get("returncode"), result.get("timed_out"))
 
 
 def default_memory_check(variant, hardware=None):
@@ -273,8 +319,8 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
         return budget_seconds - (clock() - started)
 
     def per_combo(reps):
-        # Pessimistic: the slowest seen cost per combination, scaled to the repetition count.
-        return max(costs[-3:]) * (reps + 1) / (repetitions + 1) if costs else None
+        # Pessimistic: the slowest seen cost per combination, scaled to the repetition count (never zero).
+        return max(max(costs[-3:]) * (reps + 1) / (repetitions + 1), 0.01) if costs else None
 
     def report(message, **extra):
         if progress:
@@ -299,7 +345,7 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
                 runnable.append(i)
             else:
                 state["skipped_memory"] = True
-                results[i] = {"status": "skipped_memory", "tps": None, "pp_tps": None}
+                results[i] = {"status": "skipped_memory", "tps": None, "pp_tps": None, "noise": 0.0, "row": None}
                 trials.append({"changes": changes_of(config), "tps": None, "pp_tps": None, "seconds": 0.0,
                                "status": "skipped_memory", "step": step,
                                "error": "Skipped: the memory check says this might not fit."})
@@ -312,7 +358,8 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
                      if len({c[k] for c in group_configs}) > 1}
             head = group_configs[0]
             argv = prefix + bench_args(head, n_prompt, n_gen, depth, reps, sweep or None)
-            deadline = min(timeout, max(remaining() + (per_combo(reps) or remaining()), 5))
+            # Nothing is known about the model's speed before the baseline, so it gets the full timeout.
+            deadline = timeout if step == "baseline" else min(timeout, max(remaining() + per_combo(reps), 5))
             outcome = run_bench(argv, launch.server_env(head), deadline, cancel)
             rows = parse_rows(outcome.get("stdout") or "")
             seconds = float(outcome.get("seconds") or 0) / len(indexes)
@@ -322,12 +369,15 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
             for i in indexes:
                 config = configs[i]
                 mine = [r for r in rows if all(_row_matches(r, k, config[k], config) for k in sweep)]
-                tg = next((_speed(r) for r in mine if r.get("n_gen") and not r.get("n_prompt")), None)
-                pp = next((_speed(r) for r in mine if r.get("n_prompt") and not r.get("n_gen")), None)
+                tg_row = next((r for r in mine if r.get("n_gen") and not r.get("n_prompt") and _speed(r)), None)
+                pp = next((_speed(r) for r in mine if r.get("n_prompt") and not r.get("n_gen") and _speed(r)), None)
+                tg = _speed(tg_row) if tg_row else None
                 ok = (tg or not n_gen) and (pp or not n_prompt)
                 result = {"status": "ok" if ok else "failed", "tps": tg[0] if tg else None,
                           "pp_tps": pp[0] if pp else None,
-                          "noise": _noise(tg, pp, goal), "seconds": round(seconds, 2)}
+                          "noise": _noise(tg, pp, goal), "seconds": round(seconds, 2),
+                          "row": tg_row or next((r for r in mine if _speed(r)), None),
+                          "timed_out": bool(outcome.get("timed_out")) and not ok}
                 if not ok:
                     result["error"] = ("Not tested: an earlier setting in the same run stopped llama-bench."
                                        if blamed else failure or "llama-bench gave no usable result for these settings.")
@@ -344,11 +394,18 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
     if first["status"] == "skipped_memory":
         raise ValueError("There is not enough free memory for these settings right now. Close other apps or "
                          "pick a smaller context, then try again.")
+    if first.get("timed_out"):
+        raise ValueError(f"Measuring your starting settings took longer than {int(timeout)} seconds, so this model is "
+                         "too slow to tune here. Try a smaller file or a shorter context.")
     if first["status"] != "ok" or not score(first["tps"], first["pp_tps"], goal):
         raise ValueError(f"The starting settings did not run: {first.get('error') or 'no speed was measured.'} "
                          "Try a smaller context or fewer GPU layers.")
     baseline = {"tps": first["tps"], "pp_tps": first["pp_tps"]}
-    best, best_result, best_noise = base, dict(baseline), first["noise"]
+    best, best_result, best_noise, best_row = base, dict(baseline), first["noise"], first["row"]
+    baseline_noise, step_notes = first["noise"], []
+    # llama-bench's stddev only covers the repetitions inside one process. The same settings re-measured in a later
+    # process show how much the machine drifts between runs; a "gain" must beat that too.
+    drift = 0.0
     stopped = None
 
     try:
@@ -361,12 +418,11 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
                 if not candidates:
                     continue
                 check_cancel(cancel)
-                swept = [k for k in FLAGS if len({c[k] for c in candidates}) > 1]
-                if any(best[k] in {None, "auto"} for k in swept):
-                    # "llama.cpp default" cannot join a comma list; reuse its earlier number, not a whole extra run.
-                    candidates = [c for c in candidates if c != best]
+                # The current settings are re-measured in the same step (in their own run when they use a
+                # "llama.cpp default", which a comma list cannot say): comparing with a number from minutes ago
+                # would crown machine drift as a gain.
                 unit = per_combo(repetitions)
-                fit = int((remaining() - (per_combo(confirm_repetitions) or 0)) // unit)
+                fit = max(0, int((remaining() - per_combo(confirm_repetitions)) // unit))
                 if fit < len(candidates):
                     # Short on time: drop the re-measure of the current settings, then the least likely values.
                     candidates = [c for c in candidates if c != best][:fit]
@@ -378,18 +434,22 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
                 current = next((r for c, r in zip(candidates, results) if c == best and r["status"] == "ok"), None)
                 if current and score(current["tps"], current["pp_tps"], goal):
                     # A fresh number from the same run is the fairest thing to compare against.
+                    drift = max(drift, abs(score(current["tps"], current["pp_tps"], goal) /
+                                           score(best_result["tps"], best_result["pp_tps"], goal) - 1))
                     best_result, best_noise = {"tps": current["tps"], "pp_tps": current["pp_tps"]}, current["noise"]
+                    best_row = current["row"] or best_row
                 ref, winner = score(best_result["tps"], best_result["pp_tps"], goal), None
                 for config, result in zip(candidates, results):
                     s = result["status"] == "ok" and score(result["tps"], result["pp_tps"], goal)
-                    if s and config != best and s > ref * (1 + max(min_gain, result["noise"] + best_noise)) \
+                    if s and config != best and s > ref * (1 + max(min_gain, result["noise"] + best_noise, drift)) \
                             and (winner is None or s > winner[2]):
                         winner = (config, result, s)
                 if winner:
                     config, result, _ = winner
                     new_result = {"tps": result["tps"], "pp_tps": result["pp_tps"]}
-                    notes.append(f"{_describe(best, config)} made {_gain_text(new_result, best_result, goal)}.")
+                    step_notes.append(f"{_describe(best, config)} made {_gain_text(new_result, best_result, goal)}.")
                     best, best_result, best_noise, improved = config, new_result, result["noise"], True
+                    best_row = result["row"] or best_row
             if stopped:
                 break
             if not improved:
@@ -412,16 +472,20 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
             notes.append("There was no time left to double-check the winner, so its speed comes from a shorter test.")
     if confirmed is not None:
         s = confirmed["status"] == "ok" and score(confirmed["tps"], confirmed["pp_tps"], goal)
-        if s and s > score(baseline["tps"], baseline["pp_tps"], goal):
+        # The longer check must still beat the start by more than the noise, like every step did.
+        if s and s > score(baseline["tps"], baseline["pp_tps"], goal) * \
+                (1 + max(min_gain, confirmed["noise"] + baseline_noise, drift)):
             best_result = {"tps": confirmed["tps"], "pp_tps": confirmed["pp_tps"]}
+            best_row = confirmed["row"] or best_row
         else:
             notes.append("The best settings did not hold up in a longer check, so your starting settings are kept.")
             best = base
     if best == base:
-        best_result = dict(baseline)
+        best_result, best_row = dict(baseline), first["row"]
         notes.insert(0, "Your starting settings were already the fastest we found.")
     else:
-        notes.insert(0, f"Overall, the tuned settings made {_gain_text(best_result, baseline, goal)} than where we started.")
+        notes[:0] = [f"Overall, the tuned settings made {_gain_text(best_result, baseline, goal)} than where we started."] + \
+            step_notes
     improvement = score(best_result["tps"], best_result["pp_tps"], goal) / score(baseline["tps"], baseline["pp_tps"], goal)
     failed = sum(t["status"] == "failed" for t in trials)
     skipped = sum(t["status"] == "skipped_memory" for t in trials)
@@ -436,7 +500,18 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
     return {"best": best, "baseline": baseline, "best_result": best_result, "improvement": round(improvement, 4),
             "trials": trials, "stopped": stopped, "notes": notes, "goal": goal, "seconds": round(clock() - started, 1),
             "confirmed": confirmed is not None and best != base,
-            "settings": {"n_prompt": n_prompt, "n_gen": n_gen, "depth": depth, "repetitions": repetitions}}
+            # How the speeds were measured. Not §2.3 `settings` (those are the llama.cpp settings in `best`).
+            "bench": {"n_prompt": n_prompt, "n_gen": n_gen, "depth": depth, "repetitions": repetitions},
+            "depth": depth, "drift": round(drift, 4), **_row_facts(best_row, best)}
+
+
+def _row_facts(row, config):
+    """What llama-bench reported for the winning run, for a §2.3 kind="tune" measurement: the build (runtime,
+    runtime_build) and the thread count it really used when the settings left threads to llama.cpp."""
+    from .testing import runtime_info
+    row = row or {}
+    threads = config["threads"] or (row.get("n_threads") if type(row.get("n_threads")) is int else None)
+    return {"runtime": runtime_info(row, config), "runtime_build": row.get("build_commit"), "threads": threads}
 
 
 _STEP_LABELS = {"gpu_layers": "how many layers go on the graphics card", "n_cpu_moe": "where the expert weights live",

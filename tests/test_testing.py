@@ -22,6 +22,10 @@ def get(flag, default=None):
 if os.environ.get("FAKE_BENCH_SLEEP"):
     open(os.environ["FAKE_BENCH_STARTED"], "w").close()
     time.sleep(float(os.environ["FAKE_BENCH_SLEEP"]))
+if os.environ.get("FAKE_BENCH_FAIL") == "load":
+    print("[")
+    sys.stderr.write("llama_bench: error: failed to load model '%s'\n" % get("-m"))
+    sys.exit(1)
 if os.environ.get("FAKE_BENCH_FAIL") == "oom":
     sys.stderr.write("ggml_backend_cuda_buffer_type_alloc_buffer: allocating 9000 MiB on device 0: cudaMalloc failed: out of memory\n")
     sys.exit(1)
@@ -40,8 +44,10 @@ print(json.dumps(rows, indent=2))
 class FakeServer:
     instances = []
     reply = "42"
+    reasoning = None
     fail = None
     pid = 4242
+    tokens_per_word = 1.0
 
     def __init__(self, command, config, log_path=None):
         self.command, self.config, self.stopped, self.calls = command, config, False, []
@@ -54,11 +60,21 @@ class FakeServer:
     def failure_reason(self):
         return "Out of memory: the model does not fit." if self.fail == "oom" else None
 
-    def chat(self, messages, max_tokens=256, temperature=0.0, seed=1, stop=None, timeout=300, chat_template_kwargs=None):
-        self.calls.append({"messages": messages, "max_tokens": max_tokens, "chat_template_kwargs": chat_template_kwargs})
-        return {"text": self.reply, "finish_reason": "stop",
+    # Same signature as llama_server.LlamaServer.chat (checked by test_fakes_match_the_real_server).
+    def chat(self, messages, max_tokens=256, temperature=0.0, seed=1, stop=None, timeout=300,
+             cache_prompt=False, enable_thinking=None, extra=None):
+        body = {"cache_prompt": cache_prompt, **({"chat_template_kwargs": {"enable_thinking": enable_thinking}}
+                                                  if enable_thinking is not None else {}), **(extra or {})}
+        self.calls.append({"messages": messages, "max_tokens": max_tokens, "body": body,
+                           "chat_template_kwargs": body.get("chat_template_kwargs")})
+        return {"text": self.reply, "reasoning": self.reasoning, "finish_reason": "stop",
                 "timings": {"prompt_n": 1500, "prompt_ms": 900.0, "prompt_per_second": 1666.0,
                             "predicted_n": 1, "predicted_ms": 40.0, "predicted_per_second": 25.0}, "usage": {}}
+
+    def tokenize(self, text, add_special=False, timeout=60):
+        if self.tokens_per_word is None:
+            raise ValueError("The model server sent an unreadable token list.")
+        return list(range(int(len(text.split()) * self.tokens_per_word)))
 
     def log_tail(self, chars=4000):
         return "log tail"
@@ -68,6 +84,7 @@ class FakeServer:
 
 
 class FakePeak:
+    started = False
     result = {"peak_ram_bytes": 1 * GIB, "peak_vram_bytes": None, "samples": 5}
 
     def __init__(self, pid, gpu_backend=None, interval=0.25):
@@ -75,6 +92,7 @@ class FakePeak:
 
     def start(self):
         self.running = True
+        FakePeak.started = True
 
     def stop(self):
         self.running = False
@@ -88,6 +106,7 @@ def hardware():
 class TestingBase(unittest.TestCase):
     def setUp(self):
         FakeServer.instances, FakeServer.reply, FakeServer.fail = [], "42", None
+        FakeServer.reasoning, FakeServer.tokens_per_word = None, 1.0
         FakePeak.result = {"peak_ram_bytes": 1 * GIB, "peak_vram_bytes": None, "samples": 5}
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -148,11 +167,45 @@ class SmokeTests(TestingBase):
         self.assertFalse(result["ok"])
         self.assertFalse(result["checks"][0]["ok"])
 
-    def test_old_server_without_template_kwargs(self):
-        class OldServer(FakeServer):
-            def chat(self, messages, max_tokens=256, temperature=0.0):
-                return {"text": "42", "timings": {}}
-        self.assertTrue(testing.smoke_test(["llama-server"], self.config, server_factory=OldServer)["ok"])
+    def test_fakes_match_the_real_server(self):
+        # The fake must not drift from the real class: the first build's fake accepted a keyword the real
+        # LlamaServer.chat never had, so thinking was silently never switched off.
+        import inspect
+        from llm_configurator.llama_server import LlamaServer, PeakMemory
+        for name in ["chat", "tokenize", "start", "stop", "log_tail"]:
+            self.assertEqual(inspect.signature(getattr(FakeServer, name)), inspect.signature(getattr(LlamaServer, name)), name)
+        self.assertEqual(inspect.signature(FakePeak.__init__), inspect.signature(PeakMemory.__init__))
+
+    def test_thinking_is_switched_off_in_the_request_body(self):
+        testing.smoke_test(["llama-server"], self.config, server_factory=FakeServer)
+        body = FakeServer.instances[0].calls[0]["body"]
+        self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": False, "reasoning_effort": "low"})
+        self.assertIs(body["cache_prompt"], False)
+
+    def test_only_thinking_is_explained(self):
+        FakeServer.reply, FakeServer.reasoning = "", "Let me think about 17 and 25..."
+        result = testing.smoke_test(["llama-server"], self.config, server_factory=FakeServer)
+        self.assertFalse(result["ok"])
+        self.assertIn("thinking", result["message"])
+
+    def test_a_type_error_inside_chat_is_not_retried(self):
+        class Buggy(FakeServer):
+            def chat(self, *args, **kwargs):
+                self.calls.append(kwargs)
+                raise TypeError("bug inside chat")
+        with self.assertRaises(TypeError):
+            testing.smoke_test(["llama-server"], self.config, server_factory=Buggy)
+        self.assertEqual(len(FakeServer.instances[0].calls), 1)
+        self.assertTrue(FakeServer.instances[0].stopped)
+
+    def test_loading_progress_keeps_the_tests_own_steps(self):
+        class Loading(FakeServer):
+            def start(self, timeout=300, progress=None, cancel=None):
+                progress({"stage": "loading", "done": 12.5, "total": 300, "message": "Loading the model into memory…"})
+        events = []
+        testing.smoke_test(["llama-server"], self.config, server_factory=Loading, progress=events.append)
+        loading = [e for e in events if "Loading the model into memory" in e["message"]]
+        self.assertEqual((loading[0]["done"], loading[0]["total"]), (0, 2))
 
     def test_cancel_before_start_stops_nothing_and_raises(self):
         cancel = threading.Event()
@@ -169,6 +222,8 @@ class BenchTests(TestingBase):
             plan = testing.bench_plan(context)
             self.assertLessEqual(plan["depth"] + plan["n_prompt"] + plan["n_gen"], context)
             self.assertGreaterEqual(plan["depth"], 0)
+        # Very long contexts are measured at a capped depth (and the record says which depth).
+        self.assertEqual(testing.bench_plan(131072)["depth"], testing.MAX_BENCH_DEPTH)
 
     def test_bench_args_mirror_launch_settings(self):
         config = dict(self.config, gpu_layers=self.variant.layers, flash_attn="on", cache_type_k="q8_0",
@@ -183,6 +238,23 @@ class BenchTests(TestingBase):
         self.assertEqual(len(testing.parse_bench_json('log line\n[{"a": 1}, {"b": 2}]\ntrailer')), 2)
         self.assertEqual(len(testing.parse_bench_json('{"a": 1}\nnoise\n{"b": 2}\n')), 2)
         self.assertEqual(testing.parse_bench_json("nothing here"), [])
+        # A crash leaves the array open; rows with their own [lists] must still come back whole.
+        rows = [{"n_prompt": 32, "n_gen": 0, "avg_ts": 1.5, "samples_ts": [1.5]}, {"n_prompt": 0, "n_gen": 8, "avg_ts": 2.0}]
+        cut = json.dumps(rows, indent=2)[:-3]
+        self.assertEqual(testing.parse_bench_json(cut), rows[:1])
+        self.assertEqual(testing.parse_bench_json("[\n"), [])
+
+    def test_mmap_off_is_passed_as_load_mode(self):
+        args = testing.bench_args(dict(self.config, mmap=False), 512, 128, 0)
+        self.assertEqual(args[args.index("-lm") + 1], "none")
+        self.assertIn("-v", args)  # llama.cpp's own reason for a failed load only shows with -v
+
+    def test_failed_load_is_plain_and_has_no_paths(self):
+        self.env(FAKE_BENCH_FAIL="load")
+        with self.assertRaises(ValueError) as caught:
+            testing.run_bench(self.bench, self.config, testing.bench_plan(4096))
+        self.assertIn("could not load the model", str(caught.exception))
+        self.assertNotIn(self.tmp.name, str(caught.exception))
 
     def test_run_bench_reads_both_speeds(self):
         result = testing.run_bench(self.bench, self.config, testing.bench_plan(4096))
@@ -224,9 +296,9 @@ class BenchTests(TestingBase):
 
 
 class SpeedTests(TestingBase):
-    def run_speed(self, **kwargs):
-        return testing.speed_test(self.bench, ["llama-server"], self.variant, self.config, hardware(),
-                                  server_factory=FakeServer, peak_factory=FakePeak, **kwargs)
+    def run_speed(self, config=None, **kwargs):
+        kwargs = {"server_factory": FakeServer, "peak_factory": FakePeak, **kwargs}
+        return testing.speed_test(self.bench, ["llama-server"], self.variant, config or self.config, hardware(), **kwargs)
 
     def test_success_builds_a_full_measurement(self):
         events = []
@@ -242,7 +314,9 @@ class SpeedTests(TestingBase):
         self.assertEqual(record["tps"], 21.5)
         self.assertEqual(record["pp_tps"], 812.5)
         self.assertEqual(record["depth"], 4096 - 640)
-        self.assertEqual(record["runtime"], {"version": "6500", "backend": "CUDA"})
+        # Build tag as llama.cpp names releases; the stand-in bench says "CUDA" but nothing was offloaded.
+        self.assertEqual(record["runtime"], {"version": "b6500", "backend": "cpu"})
+        self.assertEqual(record["ttft_prompt_tokens"], 1500)  # what the server says it read
         self.assertEqual(set(record["settings"]), {"flash_attn", "cache_type_k", "cache_type_v", "batch", "ubatch", "n_cpu_moe"})
         self.assertGreaterEqual(result["summary"]["ttft_s"], 0)
         self.assertEqual(result["summary"]["tps"], 21.5)
@@ -251,15 +325,60 @@ class SpeedTests(TestingBase):
         self.assertTrue(FakeServer.instances[0].stopped)
         self.assertTrue(all(e.keys() >= {"stage", "done", "total", "message"} for e in events))
         # The first-word prompt is realistic (well over a thousand tokens of text) and asks for one token.
-        first = FakeServer.instances[0].calls[0]
-        self.assertEqual(first["max_tokens"], 1)
+        warm, first = FakeServer.instances[0].calls[:2]  # a tiny warm-up request comes first
+        self.assertEqual((warm["max_tokens"], first["max_tokens"]), (1, 1))
         self.assertGreater(len(first["messages"][0]["content"].split()), 900)
+        self.assertIs(first["body"]["cache_prompt"], False)  # the whole prompt is read, never served from cache
+        self.assertIn("1,500-token new message", testing.verdict(None, result)[1])
         json.dumps(record)
+
+    def test_first_word_prompt_is_sized_with_the_models_tokenizer(self):
+        # A tokenizer that makes three tokens per word would overflow a short context with a word-count guess.
+        FakeServer.tokens_per_word = 3.0
+        config = dict(self.config, context=1024)
+        self.run_speed(config=config)
+        prompt = FakeServer.instances[0].calls[1]["messages"][0]["content"]
+        self.assertLessEqual(len(prompt.split()) * 3, 1024 - 256)
+        self.assertGreater(len(prompt.split()) * 3, (1024 - 256) * 0.7)
+
+    def test_first_word_prompt_without_tokenizer_falls_back_to_the_estimate(self):
+        FakeServer.tokens_per_word = None
+        self.assertIsNotNone(self.run_speed()["summary"]["ttft_s"])
+
+    def test_peak_memory_is_watched_while_loading(self):
+        seen = {}
+
+        class SlowLoad(FakeServer):
+            def start(self, timeout=300, progress=None, cancel=None):
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline and not FakePeak.started:
+                    time.sleep(0.01)
+                seen["monitor_running_during_load"] = FakePeak.started
+        FakePeak.started = False
+        self.run_speed(server_factory=SlowLoad)
+        self.assertTrue(seen["monitor_running_during_load"])
+
+    def test_runtime_info_names(self):
+        cpu = {"gpu_layers": 0, "gpu_backend": None}
+        gpu = {"gpu_layers": 20, "gpu_backend": "cuda"}
+        self.assertEqual(testing.runtime_info({"build_number": 1, "backends": "CPU"}, cpu), {"version": "b1", "backend": "cpu"})
+        self.assertEqual(testing.runtime_info({"build_number": 6500, "backends": "CUDA,CPU"}, gpu)["backend"], "cuda")
+        self.assertEqual(testing.runtime_info({"backends": "Vulkan"}, dict(gpu, gpu_backend="vulkan"))["backend"], "vulkan")
+        self.assertEqual(testing.runtime_info({"backends": "CPU"}, gpu)["backend"], "cpu")  # a CPU build ignores -ngl
+        self.assertEqual(testing.runtime_info({"build_commit": "4df29be"}, gpu), {"version": "4df29be", "backend": "cuda"})
 
     def test_record_is_accepted_by_matching_speed(self):
         record = self.run_speed()["measurement"]
         match = matching_speed([record], self.variant, hardware(), 4096, 0, None, 8)
         self.assertIs(match, record)
+
+    def test_record_survives_community_sharing(self):
+        from llm_configurator.community import anonymize
+        record = self.run_speed()["measurement"]
+        shared = anonymize(record, hardware(), self.variant)
+        self.assertEqual(shared["runtime"], {"version": "b6500", "backend": "cpu"})
+        self.assertEqual(shared["settings"]["cache_type_k"], "f16")
+        self.assertEqual(shared["settings"]["n_cpu_moe"], 0)
 
     def test_memory_over_estimate_is_reported(self):
         estimate = allocations(self.variant, 4096, 1, 0)["ram"]
