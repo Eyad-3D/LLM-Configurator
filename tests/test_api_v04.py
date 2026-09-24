@@ -855,6 +855,70 @@ class ServeProcessTests(unittest.TestCase):
                 process.stdout.close()
 
 
+REAL_RUNTIME = __import__("os").environ.get("LLM_CONFIG_REAL_RUNTIME")
+TINY_MODELS = __import__("os").environ.get("LLM_CONFIG_TINY_MODELS")
+
+
+@unittest.skipUnless(REAL_RUNTIME and TINY_MODELS, "set LLM_CONFIG_REAL_RUNTIME and LLM_CONFIG_TINY_MODELS (scripts/build_llama_cpp.sh)")
+class RealRuntimeHttpTests(unittest.TestCase):
+    """The HTTP API end to end against real llama.cpp, from a data folder whose name has a space in it."""
+
+    def test_smoke_test_serve_and_no_folder_reaches_the_page(self):
+        import shutil
+        from llm_configurator import runtime_install
+        with tempfile.TemporaryDirectory() as temp:
+            data, models = Path(temp) / "My Data", Path(temp) / "My Models"
+            models.mkdir()
+            model = models / "tiny-llama-Q4_K_M.gguf"
+            shutil.copy(Path(TINY_MODELS) / model.name, model)
+            store = Store(data)
+            runtime_install.use_directory(store, REAL_RUNTIME)
+            app.add_local_job(store, model)(lambda value: None, threading.Event())
+            server = make_server(store, port=0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            url = f"http://127.0.0.1:{server.server_port}"
+            try:
+                with urlopen(url) as response:
+                    token = re.search(r'name="session-token" content="([^"]+)"', response.read().decode())[1]
+                def call(path, body=None):
+                    request = Request(url + path, data=None if body is None else json.dumps(body).encode(),
+                                      headers={"X-Session-Token": token})
+                    try:
+                        with urlopen(request, timeout=300) as response:
+                            raw = response.read().decode()
+                    except HTTPError as error:
+                        raw = error.read().decode()
+                    for secret in (temp, REAL_RUNTIME, "My Models", "My Data"):
+                        self.assertNotIn(secret, raw, path)
+                    return json.loads(raw)
+                def job(path, body):
+                    found = call(path, body)
+                    self.assertIn("id", found, found)
+                    deadline = time.monotonic() + 300
+                    while found["state"] not in {"done", "failed", "cancelled"} and time.monotonic() < deadline:
+                        time.sleep(0.2)
+                        found = call(f"/api/jobs/{found['id']}")
+                    return found
+                self.assertTrue(call("/api/runtime")["installed"])
+                report = call("/api/recommend", {"context": 4096, "include_rankings": False})
+                chosen = next(c for c in report["candidates"] if c["quant"] == "Q4_K_M")
+                smoke = job("/api/test", {"candidate_id": chosen["id"], "kind": "smoke"})
+                self.assertEqual(smoke["state"], "done", smoke["error"])
+                self.assertTrue(smoke["result"]["smoke"]["ok"], smoke["result"])
+                started = job("/api/serve/start", {"candidate_id": chosen["id"]})
+                self.assertTrue(started["result"]["running"], started["error"])
+                status = call("/api/serve")
+                self.assertEqual((status["candidate_id"], status["config"]["model_path"]), (chosen["id"], model.name))
+                with urlopen(status["base_url"] + "/health", timeout=10) as response:
+                    self.assertEqual(response.status, 200)
+                self.assertFalse(call("/api/serve/stop", {})["running"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
+
+
 class DemoCatalogueTests(ApiCase):
     demo = True
 
