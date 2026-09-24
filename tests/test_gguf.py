@@ -216,6 +216,14 @@ class GGUFTest(unittest.TestCase):
         summary = gguf.read_metadata(self.write("g.gguf", build_gguf(llama_kvs(file_type=1024 | 7))))["summary"]
         self.assertEqual((summary["file_type"], summary["quant"]), (7, "Q8_0"))
 
+    def test_weights_cut_short_are_an_incomplete_download(self):
+        data = build_gguf(llama_kvs(), [("blk.0.attn_q.weight", [256, 256], 1)])
+        cut = self.write("cut.gguf", data[: len(data) - 1000])  # header intact, weights cut (like corrupt.gguf)
+        self.assertEqual(gguf.read_metadata(cut)["summary"]["layers"], 4)  # the header alone still reads
+        with self.assertRaisesRegex(ValueError, "download is incomplete"):
+            gguf.variant_from_file(cut)
+        gguf.variant_from_file(self.write("whole.gguf", data))
+
     def test_huge_block_count_does_not_hang(self):
         kvs = llama_kvs(arch="gemma3", extra=[("gemma3.attention.sliding_window", U32, 512)])
         kvs = [(k, U64 if k.endswith("block_count") else t, 2**62 if k.endswith("block_count") else v) for k, t, v in kvs]

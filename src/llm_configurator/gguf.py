@@ -173,7 +173,9 @@ def _value(reader, kind, depth=0):
 
 
 def _tensor_infos(reader, count):
+    """Totals for the weight table, plus the byte where the last known weight ends (relative to the data start)."""
     totals = {"count": count, "parameters": 0, "expert_parameters": 0, "bytes": 0, "expert_bytes": 0, "unknown_types": 0}
+    data_end = 0
     for _ in range(count):
         name = reader.string() or ""
         dims = reader.unpack("I")
@@ -183,9 +185,10 @@ def _tensor_infos(reader, count):
         for _ in range(dims):
             elements *= reader.unpack("Q")
         kind = reader.unpack("I")
-        reader.unpack("Q")  # data offset
+        offset = reader.unpack("Q")
         block, width = TENSOR_TYPES.get(kind, (None, None))
         nbytes = -(-elements // block) * width if block else None
+        data_end = max(data_end, offset + (nbytes or 0))
         expert = "_exps" in name  # routed experts; shared experts are "_shexp" and always run
         totals["parameters"] += elements
         totals["expert_parameters"] += elements if expert else 0
@@ -194,7 +197,7 @@ def _tensor_infos(reader, count):
         else:
             totals["bytes"] += nbytes
             totals["expert_bytes"] += nbytes if expert else 0
-    return totals
+    return totals, data_end
 
 
 def _parse(path, tensors=False):
@@ -241,7 +244,14 @@ def _parse_open(handle, size, tensors):
             skipped.append(key)
         else:
             values[key] = value
-    table = _tensor_infos(reader, tensor_count) if tensors else None
+    table = None
+    if tensors:
+        table, data_end = _tensor_infos(reader, tensor_count)
+        alignment = values.get("general.alignment", 32)
+        alignment = alignment if type(alignment) is int and 0 < alignment <= 1 << 20 else 32
+        start = -(-reader.pos // alignment) * alignment  # weights begin at the next aligned byte after the table
+        if start + data_end > size:  # what llama.cpp reports as "data is not within the file bounds"
+            raise _bad("its weights run past the end of the file, so the download is incomplete or cut short")
     return version, tensor_count, values, skipped, table, lengths
 
 
