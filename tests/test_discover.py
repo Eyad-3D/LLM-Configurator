@@ -336,5 +336,23 @@ class DiscoverTest(unittest.TestCase):
         self.assertEqual(discover.scan(self.store), [])
 
 
+    def test_local_variant_is_only_its_own_file(self):
+        data = model_bytes("mine")
+        path = self.write(self.root / "elsewhere/my-Q4_K_M.gguf", data)
+        discover.add_file(self.store, path)
+        variant = discover.local_variants(self.store)[0]
+        from llm_configurator.storage import models_dir
+        self.write(models_dir(self.store) / path.name, data)  # same name and size, but a different file
+        self.assertEqual(discover.find_for_variant(self.store, variant), path)
+        path.unlink()
+        self.assertIsNone(discover.find_for_variant(self.store, variant))
+
+    def test_scan_and_add_agree_on_the_local_id(self):
+        from llm_configurator import gguf
+        path = self.write(self.home / ".lmstudio/models/me/x/my-Q4_K_M.gguf", model_bytes("mine"))
+        scanned = discover.scan(self.store)[0]["local_variant_id"]
+        sha256 = discover.hash_cached(self.store, path)
+        self.assertEqual(gguf.variant_from_file(path, sha256=sha256).id, scanned)
+
 if __name__ == "__main__":
     unittest.main()

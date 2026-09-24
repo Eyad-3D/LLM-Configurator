@@ -424,14 +424,18 @@ def _candidates(store, variant, wanted):
     base = models_dir(store)
     real_base = base.resolve()
     direct = [base / f["filename"] for f in wanted]
-    if all(_inside(p.resolve(), real_base) for p in direct):  # catalogue file names never lead out of the folder
+    # a local model is one particular file: a same-named file in the models folder is not it
+    if variant.source != "local" and all(_inside(p.resolve(), real_base) for p in direct):  # catalogue file names never lead out of the folder
         yield [{"path": str(p), "filename": Path(f["filename"]).name, "size_bytes": f["size_bytes"], "sha256": None}
                for p, f in zip(direct, wanted)], None
     for record in store.get("local_files") or []:
         if not record.get("complete", True):
             continue
         files = _files(record)
-        if variant.id in {record.get("variant_id"), record.get("local_variant_id")} or _compare(files, wanted):
+        if variant.source == "local":
+            if record.get("local_variant_id") == variant.id:
+                yield files, record
+        elif record.get("variant_id") == variant.id or _compare(files, wanted):
             yield files, record
 
 
