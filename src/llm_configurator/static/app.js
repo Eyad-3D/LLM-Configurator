@@ -10,6 +10,21 @@ const esc = (value) =>
         c
       ],
   );
+// Model refreshes can return one warning per model (e.g. 40+ when offline). Show one
+// plain sentence for the "couldn't reach" group and at most a few others.
+function summarizeWarnings(list) {
+  const items = (Array.isArray(list) ? list : []).map(String).filter(Boolean);
+  const unreachable = items.filter((w) => /Metadata unavailable/i.test(w));
+  const others = items.filter((w) => !/Metadata unavailable/i.test(w));
+  const parts = [];
+  if (unreachable.length)
+    parts.push(
+      `Couldn’t get the latest details for ${unreachable.length} model${unreachable.length === 1 ? "" : "s"} (is the internet connected?). Using what’s already saved on this computer.`,
+    );
+  parts.push(...others.slice(0, 3));
+  if (others.length > 3) parts.push(`and ${others.length - 3} more notes`);
+  return parts.join(" · ");
+}
 let report = null;
 let appState = null;
 let includeRankings = false;
@@ -114,7 +129,7 @@ async function loadState() {
   hardware(state.hardware);
   $("demo").hidden = !state.demo;
   $("catalogue_status").textContent = state.status
-    ? `${state.status.variants} variants cached · Last refresh ${new Date(state.status.timestamp).toLocaleString()}. ${(state.status.warnings || []).join(" · ")}`
+    ? `${state.status.variants} variants cached · Last refresh ${new Date(state.status.timestamp).toLocaleString()}. ${summarizeWarnings(state.status.warnings)}`
     : "No metadata cached yet. Refresh to retrieve available GGUF variants.";
   $("mappings").innerHTML = state.definitions
     .map((entry, index) => {
@@ -180,6 +195,17 @@ function qualityPanel(c) {
     return `<section class="quality-panel quality-missing"><strong>Not ranked</strong><p>${q?.reason === "incomparable" ? "Benchmark versions or reference scores differ. Refresh and check the model mappings before comparing." : "No comparable benchmark score for this workload. Add your API key, refresh metadata and match the benchmark entry."}</p><button type="button" class="text-button" data-open-rank>Set up benchmark comparison →</button></section>`;
   }
   return `<section class="quality-panel"><div class="quality-heading"><div><span class="quality-label">${esc(metric)}</span><strong>${Number(c.quality_score).toFixed(1)} <small>index points</small></strong></div><div class="quality-rank"><strong>${q.tied ? "Joint " : ""}#${esc(q.rank)} <small>of ${esc(q.rated_models)} rated models</small></strong></div></div><p class="hint">Base-model benchmark · Exact quantisation quality is unmeasured.</p></section>`;
+}
+// The engine appends the verdict sentence to the explanation; the card already shows it above.
+const when = (value) => {
+  const date = value ? new Date(value) : null;
+  return date && !Number.isNaN(date.getTime()) ? date.toLocaleString() : value || "Unknown";
+};
+function explanationOf(c) {
+  const text = String(c.explanation ?? "");
+  return c.verdict_text && text.endsWith(c.verdict_text)
+    ? text.slice(0, -c.verdict_text.length).trim()
+    : text;
 }
 // Where the model runs. MoE models keep their "experts" (big, rarely used parts) in main memory.
 function placementLabel(c) {
@@ -283,10 +309,10 @@ function renderResults() {
             c.quality_score == null
               ? "No quality score"
               : `Base-model ${c.quality_metric} index: ${c.quality_score.toFixed(1)}`;
-          return `<article class="card"><div class="card-top"><div class="card-title"><h3>${esc(c.name)}</h3><span class="quant">${esc(c.quant)}</span></div><div class="card-tags">${verdictBadge(c)}<span class="tag ${c.speed_meets_target ? "" : "unknown"}">${esc(speed.tag)}</span></div></div>${c.verdict_text ? `<p class="verdict-text">${esc(c.verdict_text)}</p>` : ""}
+          return `<article class="card"><div class="card-top"><div class="card-title"><h3>${esc(c.name)}</h3><span class="quant">${esc(c.quant)}</span></div><div class="card-tags">${verdictBadge(c)}${c.verdict ? "" : `<span class="tag ${c.speed_meets_target ? "" : "unknown"}">${esc(speed.tag)}</span>`}</div></div>${c.verdict_text ? `<p class="verdict-text">${esc(c.verdict_text)}</p>` : ""}
       ${qualityPanel(c)}
       <div class="card-metrics concise"><div><strong>${c.context.toLocaleString()}</strong><span>context tokens per session</span></div><div><strong>${esc(speed.value)}</strong><span>${esc(speed.label)}</span></div><div><strong>${esc(placementLabel(c))}</strong><span>${c.scenario === "now" ? "Fits current resources (estimated)" : "May fit after closing apps"}</span></div></div>
-      <div class="card-bottom"><p>${esc(c.explanation)}</p><div class="card-actions"><button class="text-button" data-detail="${esc(c.id)}">View details ↗</button><button type="button" data-run="${esc(c.id)}">Get it running →</button></div></div></article>`;
+      <div class="card-bottom"><p>${esc(explanationOf(c))}</p><div class="card-actions"><button class="text-button" data-detail="${esc(c.id)}">View details ↗</button><button type="button" data-run="${esc(c.id)}">Get it running →</button></div></div></article>`;
         })
         .join("")
     : `<div class="empty"><h3>No qualifying configurations yet.</h3><p>${report.demo ? "Try reducing context or active users, or include unverified speed options." : "Refresh model metadata first. If models are cached, try a shorter context, fewer active users, or include unverified speed options."}</p><p class="hint">Rejections: ${esc(report.rejected?.context)} context · ${esc(report.rejected?.memory)} memory · ${esc(report.rejected?.speed)} speed</p></div>`;
@@ -339,7 +365,7 @@ function detail(c) {
   const variantArgument = `'${c.variant_id.replace(/'/g, "'\\''")}'`;
   $("detail_content").innerHTML =
     `<p class="eyebrow">DEPLOYMENT DETAILS</p><h3>${esc(c.name)} · ${esc(c.quant)}</h3><p>${esc(c.explanation)}</p>
-    <dl><dt>Quality rank among rated eligible models</dt><dd>${c.quality_comparison?.rank == null ? "Not ranked" : "#" + esc(c.quality_comparison.rank) + " of " + esc(c.quality_comparison.rated_models)}</dd><dt>Gap to highest reference score</dt><dd>${c.quality_comparison?.points_behind_best == null ? "Unavailable" : esc(c.quality_comparison.points_behind_best) + " index points"}</dd>${c.memory_total_bytes != null ? `<dt>Estimated memory in total</dt><dd>${GiB(c.memory_total_bytes)} GiB</dd>` : ""}<dt>Estimated system RAM</dt><dd>${GiB(c.ram_bytes)} GiB</dd><dt>${c.unified_memory ? "Of which the graphics chip uses (shared with RAM)" : "Estimated VRAM"}</dt><dd>${GiB(c.vram_bytes)} GiB</dd><dt>RAM headroom after reserve</dt><dd>${GiB(c.ram_headroom_bytes)} GiB</dd><dt>Memory-only context ceiling</dt><dd>${c.memory_max_context.toLocaleString()} tokens / session</dd><dt>Conversation memory (${esc({ f16: "full size", q8_0: "half size", q4_0: "quarter size" }[c.kv_cache_type] || "full size")}), all users</dt><dd>${GiB(c.kv_bytes)} GiB</dd><dt>Weight file size</dt><dd>${GiB(c.file_bytes)} GiB</dd><dt>Quality evidence</dt><dd>${esc(c.quality_evidence)}</dd><dt>Evaluation entry</dt><dd>${esc(c.score_settings || "Unmapped")}</dd><dt>Benchmark version</dt><dd>${esc(c.score_version || "Unavailable")}</dd><dt>Metadata retrieved</dt><dd>${esc(c.metadata_date)}</dd></dl>
+    <dl><dt>Quality rank among rated eligible models</dt><dd>${c.quality_comparison?.rank == null ? "Not ranked" : "#" + esc(c.quality_comparison.rank) + " of " + esc(c.quality_comparison.rated_models)}</dd><dt>Gap to highest reference score</dt><dd>${c.quality_comparison?.points_behind_best == null ? "Unavailable" : esc(c.quality_comparison.points_behind_best) + " index points"}</dd>${c.memory_total_bytes != null ? `<dt>Estimated memory in total</dt><dd>${GiB(c.memory_total_bytes)} GiB</dd>` : ""}<dt>Estimated system RAM</dt><dd>${GiB(c.ram_bytes)} GiB</dd><dt>${c.unified_memory ? "Of which the graphics chip uses (shared with RAM)" : "Estimated VRAM"}</dt><dd>${GiB(c.vram_bytes)} GiB</dd><dt>RAM headroom after reserve</dt><dd>${GiB(c.ram_headroom_bytes)} GiB</dd><dt>Memory-only context ceiling</dt><dd>${c.memory_max_context.toLocaleString()} tokens / session</dd><dt>Conversation memory (${esc({ f16: "full size", q8_0: "half size", q4_0: "quarter size" }[c.kv_cache_type] || "full size")}), all users</dt><dd>${GiB(c.kv_bytes)} GiB</dd><dt>Weight file size</dt><dd>${GiB(c.file_bytes)} GiB</dd><dt>Quality evidence</dt><dd>${esc(c.quality_evidence)}</dd><dt>Evaluation entry</dt><dd>${esc(c.score_settings || "Unmapped")}</dd><dt>Benchmark version</dt><dd>${esc(c.score_version || "Unavailable")}</dd><dt>Model details downloaded</dt><dd>${esc(when(c.metadata_date))}</dd></dl>
     ${/^https:\/\//.test(c.score_source || "") ? `<p>Source: <a href="${esc(c.score_source)}" target="_blank" rel="noreferrer">Artificial Analysis</a>. Scores apply to the evaluation entry above.</p>` : ""}
     <h3>Speed evidence</h3><p>${esc(speedPresentation(c).value)} · ${esc(speedPresentation(c).label)}</p>
     ${c.speed_estimate?.available ? `<p>${esc(c.speed_estimate.method)}. ${esc(c.speed_estimate.scope)}</p><p>${esc(c.speed_estimate.caveat)}</p><p>Calibrated: ${esc(c.speed_estimate.calibrated_at)}</p>` : ""}
@@ -411,7 +437,7 @@ $("refresh").addEventListener("click", async () => {
     message("Refreshing model and benchmark metadata…");
     const result = await refreshMetadata(true);
     message(
-      (result.warnings || []).join(" · ") ||
+      summarizeWarnings(result.warnings) ||
         "Metadata updated. You can now match benchmark entries.",
     );
   } catch (error) {

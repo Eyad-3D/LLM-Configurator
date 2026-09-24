@@ -1580,11 +1580,11 @@ body.has-jobs main {
     color: var(--text);
     border-color: var(--line);
   }
-  button:not(.secondary):not(.text-button):not(.step-toggle):not(.export-tab):not(.jobs-toggle):not(.select-trigger) {
+  button:not(.secondary):not(.text-button):not(.step-toggle):not(.export-tab):not(.jobs-toggle):not(.select-trigger):not(.qp-tab) {
     background: #2f7d55;
     color: #fff;
   }
-  button:not(.secondary):not(.text-button):not(.step-toggle):not(.export-tab):not(.jobs-toggle):not(.select-trigger):hover {
+  button:not(.secondary):not(.text-button):not(.step-toggle):not(.export-tab):not(.jobs-toggle):not(.select-trigger):not(.qp-tab):hover {
     background: #3a9467;
   }
   .secondary:hover,

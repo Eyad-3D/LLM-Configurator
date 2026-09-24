@@ -178,7 +178,7 @@ function answerRows() {
           ? ` · memory ${text("kv_cache_type").split(" (")[0].toLowerCase()}`
           : ""),
     ],
-    ["Concurrent sessions / agents", $("users").value],
+    ["Concurrent sessions / agents", `${$("users").value} at once`],
     ["Resources", text("resource-mode")],
   ];
 }
@@ -327,7 +327,7 @@ async function findConfigurations(rankings) {
     if (!appState.demo && !appState.status?.variants) await preparation;
     if (request !== generation) return;
     const warnings = [...(preparationResult?.warnings || [])];
-    if (warnings.length) message(warnings.join(" · "));
+    if (warnings.length) message(summarizeWarnings(warnings));
     if (request !== generation) return;
     $("loading-text").textContent =
       "Comparing configurations against your current resources…";
@@ -385,7 +385,7 @@ async function updateRankings(request, answers, preparation) {
     renderResults();
     message(
       result?.warnings?.length
-        ? result.warnings.join(" · ")
+        ? summarizeWarnings(result.warnings)
         : "Benchmark update complete.",
     );
   } catch (error) {

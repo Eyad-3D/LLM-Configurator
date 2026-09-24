@@ -9,6 +9,8 @@
   const fmt = () => window.Jobs?.format || { bytes: String, duration: String };
   const DEMO_TEXT =
     "Not available in demo mode. The demo models are made up, so they can’t be downloaded, tested or run. Restart the app normally (not the demo) to use real models.";
+  // Steps repeat only this short line; the full explanation shows once at the top.
+  const DEMO_SHORT = "Not available in demo mode (see the note at the top).";
   const STEPS = [
     {
       id: "runtime",
@@ -146,7 +148,7 @@
   }
   function problem(error) {
     if (error?.status === 409 && ctx?.demo)
-      return { status: "demo", reason: DEMO_TEXT };
+      return { status: "demo", reason: DEMO_SHORT };
     if (!error?.status)
       return {
         status: "failed",
@@ -182,13 +184,15 @@
 
   // ---- step status ----
   function prerequisite() {
-    if (ctx.demo) return DEMO_TEXT;
+    if (ctx.demo) return DEMO_SHORT;
     if (shared.runtime.status !== "done") return "Get the engine first (step 1).";
     if (mem.download.status !== "done")
       return "Download the model first (step 2).";
     return null;
   }
   function status(id) {
+    if (id === "runtime" && ctx.demo && !["done", "working"].includes(shared.runtime.status))
+      return { state: "demo", reason: DEMO_SHORT };
     if (id === "runtime" || id === "download") {
       const s = id === "runtime" ? shared.runtime : mem.download;
       return {
@@ -213,6 +217,7 @@
         : { state: "ready", reason: null };
     }
     const serve = shared.serve;
+    if (ctx.demo) return { state: "demo", reason: DEMO_SHORT };
     if (serve.status === "working") return { state: "working", reason: null };
     if (runningHere()) return { state: "done", reason: null };
     return { state: "ready", reason: null };
@@ -222,9 +227,9 @@
   function summary(c) {
     const parts = [
       `Remembers about ${Math.round((Number(c.context) || 0) * 0.75).toLocaleString()} words per chat`,
-      { cpu: "Runs on the processor", gpu: "Runs on the graphics card", split: "Graphics card + processor" }[
-        c.mode
-      ],
+      c.mode === "split" && c.n_cpu_moe > 0
+        ? "Graphics card, with experts on the processor"
+        : { cpu: "Runs on the processor", gpu: "Runs on the graphics card", split: "Graphics card + processor" }[c.mode],
     ].filter(Boolean);
     const notes = [];
     if (c.kv_cache_type && c.kv_cache_type !== "f16")
@@ -313,6 +318,7 @@
           ),
           window.verdictBadge ? verdictNode(c) : null,
           summary(c),
+          ctx.demo ? el("p", { class: "step-note", text: DEMO_TEXT }) : null,
         ),
       ),
       steps,
@@ -503,6 +509,7 @@
     if (s.status === "checking") return [hint("Checking for the engine…")];
     if (s.status === "working")
       return [progressView(s.job, () => cancelJob(s))];
+    if (ctx.demo && s.status !== "done") return [reasonView(DEMO_SHORT)];
     if (s.status === "done") {
       const where = {
         managed: "installed by this app",

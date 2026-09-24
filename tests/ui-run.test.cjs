@@ -645,6 +645,9 @@ test("demo mode explains that downloads, tests and serving are unavailable", asy
   await until(() => s.step("use").querySelector("[role=tab]"), "use step");
   assert.match(s.stepText("use"), /Not available in demo mode/);
   assert.equal(s.buttonIn("use", "Start server"), undefined);
+  assert.match(s.stepText("runtime"), /Demo/);
+  assert.equal(s.buttonIn("runtime", "Install the engine"), undefined, "no button that can only fail");
+  assert.equal(s.$("run-content").textContent.split("The demo models are made up").length - 1, 1, "long demo note shown once");
   await s.close();
 });
 
@@ -1099,5 +1102,15 @@ test("community results can be downloaded from the results page", async () => {
   s.update(importJob.id, { state: "done", result: { count: 120, rejected: 2, source: "x", fetched_at: "2026-09-01T00:00:00Z" } });
   await until(() => /Got 120 shared results \(2 skipped/.test(s.$("community-status").textContent), "done");
   assert.match(s.$("community-status").textContent, /Recalculate/);
+  await s.close();
+});
+
+test("many 'couldn't reach' warnings become one plain sentence", async () => {
+  const s = await setup();
+  const list = Array.from({ length: 44 }, (_, i) => `org/model-${i}: Metadata unavailable (URLError); cached results remain available`);
+  const text = s.run(`summarizeWarnings(${JSON.stringify([...list, "Scores need a key"])})`);
+  assert.match(text, /Couldn’t get the latest details for 44 models/);
+  assert.match(text, /Scores need a key/);
+  assert.doesNotMatch(text, /URLError|org\/model-3/);
   await s.close();
 });
