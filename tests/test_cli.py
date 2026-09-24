@@ -61,6 +61,8 @@ class CliCase(unittest.TestCase):
             return record
 
         discover.find_for_variant, discover.locations, discover.add_file = find_for_variant, locations, add_file
+        discover.remember_hash = lambda store, path, sha256: fakes.calls.append(("remember_hash", str(path), sha256))
+        self.fakes.modules["llama_server"].install_exit_handlers = lambda: fakes.calls.append(("exit_handlers",))
         discover.local_variants = lambda store: [Variant(**r["local_variant"]) for r in store.get("local_files") or [] if r.get("local_variant")]
         self.fakes.modules["gguf"].shard_paths = lambda path: [Path(path)]
 
@@ -203,9 +205,11 @@ class RuntimeAndSettingsTests(CliCase):
         with patch.object(llm_configurator.catalogue, "add_entry", create=True, return_value={"added": "a/b"}) as add, \
              patch.object(llm_configurator.catalogue, "refresh_entry", create=True, return_value={"base_repo": "a/b", "variants": 3}) as fetch, \
              patch.object(llm_configurator.catalogue, "remove_entry", create=True, return_value={"removed": "a/b"}) as remove:
-            code, out, _ = self.run_cli("models", "add", "a/b", "a/b-GGUF")
+            code, out, _ = self.run_cli("models", "add", "a/b", "a/b-GGUF", "--config-repo", "c/b")
             self.assertEqual(code, 0)
             self.assertIn("Added a/b: 3 downloadable versions", out)
+            self.assertEqual(add.call_args.kwargs["config_repo"], "c/b")
+            self.assertIsNotNone(fetch.call_args.kwargs["cancel"])
             fetch.side_effect = ValueError("Could not reach Hugging Face")
             code, out, _ = self.run_cli("models", "add", "a/b", "a/b-GGUF")
             self.assertEqual(code, 0)
@@ -248,7 +252,10 @@ class DownloadTests(CliCase):
         self.assertIn("Download Demo Small Q4_K_M", err)
         self.assertIn("Download · 100%", err)
         self.assertTrue(out.strip().endswith(Path(self.variant.filename).name))
-        self.assertEqual(self.fakes.calls[0][:2], ("download", self.variant.id))
+        self.assertEqual([c[:2] for c in self.fakes.calls if c[0] != "exit_handlers"][0], ("download", self.variant.id))
+        # The download checked the file's fingerprint, so the first test need not read it again.
+        self.assertIn(("remember_hash", str(Path(self.temp.name) / "models" / Path(self.variant.filename).name),
+                       self.variant.sha256), self.fakes.calls)
         # Second time: the local copy is reused, nothing downloaded.
         code, out, _ = self.run_cli("download", self.variant.id)
         self.assertIn("Already on this computer", out)
@@ -256,7 +263,7 @@ class DownloadTests(CliCase):
 
     def test_prompt_decline_unknown_model_and_disk_space(self):
         self.assertEqual(self.run_cli("download", self.variant.id, stdin=["n"])[0], 0)
-        self.assertEqual(self.fakes.calls, [])
+        self.assertEqual(self.fakes.calls, [("exit_handlers",)])
         code, _, err = self.run_cli("download", self.variant.id, tty=False)
         self.assertEqual(code, 1)
         self.assertIn("Add --yes", err)
@@ -301,7 +308,7 @@ class DownloadTests(CliCase):
         code, _, err = self.run_cli("download", "local:abc", "--yes")
         self.assertEqual(code, 1)
         self.assertIn("nothing to download", err)
-        self.assertEqual(self.fakes.calls, [])
+        self.assertEqual(self.fakes.calls, [("exit_handlers",)])
 
 
 class ModelCommandTests(CliCase):
@@ -358,8 +365,8 @@ class ModelCommandTests(CliCase):
                     "gpu_layers", "n_cpu_moe", "kv_cache_type", "timestamp"]:
             self.assertIn(key, record)
         self.assertNotIn("model_path", record["best"])
-        self.assertEqual((record["kv_cache_type"], record["users"]), ("f16", 1))
-        self.assertFalse(self.store.get("measurements"))  # shallow tune speeds are not "tested" speeds
+        self.assertEqual((record["kv_cache_type"], record["users"], record["gpu_layers"]), ("f16", 1, 0))
+        self.assertFalse(self.store.get("measurements"))  # without a known depth the speed is not a "tested" speed
         # A tune made for the f16 notepad does not apply to a q8_0 run.
         code, _, err = self.run_cli("export", self.variant.id, "--format", "llama-server", "--tuned", "--kv", "q8_0")
         self.assertEqual(code, 1)
@@ -370,6 +377,63 @@ class ModelCommandTests(CliCase):
         self.run_cli("test", self.variant.id, "--tuned")
         self.assertEqual(self.fakes.calls[-1][2]["threads"], 8)
 
+    def test_tune_saves_the_pinned_record_and_a_full_length_measurement(self):
+        self.downloaded()
+        tune = self.fakes.tune
+        def full_length(*args, **kwargs):
+            return {**tune(*args, **kwargs), "settings": {"depth": 7552}, "depth": 1024, "confirmed": True, "seconds": 58.1,
+                    "runtime": {"version": "b6000", "backend": "cpu"}, "runtime_build": "abc1234", "threads": 8}
+        self.fakes.modules["tuner"].tune = full_length
+        code, out, err = self.run_cli("tune", self.variant.id, "--budget", "60", "--json")
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertIs(result["saved"], True)
+        record = self.store.get("tuned")[-1]
+        self.assertEqual(result["record_id"], record["id"])
+        self.assertEqual((record["settings"], record["confirmed"], record["seconds"]), ({"depth": 7552}, True, 58.1))
+        self.assertEqual((record["depth"], record["runtime"], record["runtime_build"], record["n_cpu_moe"], record["kv_cache_type"]),
+                         (7552, {"version": "b6000", "backend": "cpu"}, "abc1234", 0, "f16"))
+        [measurement] = self.store.get("measurements")
+        self.assertEqual((measurement["kind"], measurement["depth"], measurement["tps"], measurement["threads"], measurement["context"]),
+                         ("tune", 7552, 12.0, 8, 8192))
+        self.assertEqual(set(measurement["settings"]), {"flash_attn", "cache_type_k", "cache_type_v", "batch", "ubatch", "n_cpu_moe"})
+        self.assertEqual(measurement["settings"]["flash_attn"], "on")
+        # The engine now counts the tune as measured at this length and applies its settings.
+        report = json.loads(self.run_cli("recommend", "--json", "--context", "8192", "--min-tps", "0")[1])
+        mine = [c for c in report["candidates"] if c["variant_id"] == self.variant.id and c["gpu_layers"] == 0]
+        self.assertTrue(mine and mine[0]["evidence"] in {"measured", "tuned"} and mine[0]["tps"] == 12.0, mine[:1])
+
+    def test_a_cancelled_tune_is_not_saved(self):
+        self.downloaded()
+        tune = self.fakes.tune
+        self.fakes.modules["tuner"].tune = lambda *a, **k: {**tune(*a, **k), "stopped": "cancelled", "depth": 1024}
+        code, out, _ = self.run_cli("tune", self.variant.id, "--budget", "60", "--json")
+        self.assertEqual((code, json.loads(out)["saved"], json.loads(out)["record_id"]), (0, False, None))
+        self.assertFalse(self.store.get("tuned"))
+        self.assertFalse(self.store.get("measurements"))
+
+    def test_tuned_settings_come_only_from_a_tune_of_this_placement(self):
+        self.downloaded()
+        base = {"variant_id": self.variant.id, "sha256": self.variant.sha256, "fingerprint": "fp", "context": 8192,
+                "gpu_layers": 0, "n_cpu_moe": 0, "kv_cache_type": "f16", "timestamp": __import__("llm_configurator.domain").domain.now(),
+                "best_result": {"tps": 9.0}, "best": {"gpu_layers": 0, "threads": 5, "batch": 1024, "cache_type_k": "f16"}}
+        # A tune that started from another placement (for example 48 of 48 layers of a MoE model) is never applied.
+        self.store.put("tuned", [{**base, "gpu_layers": 48, "best": {**base["best"], "gpu_layers": 48}}])
+        code, _, err = self.run_cli("test", self.variant.id, "--kind", "smoke", "--tuned")
+        self.assertEqual(code, 1)
+        self.assertIn("No saved tune", err)
+        # A tune of this placement adds its threads and batch size.
+        self.store.put("tuned", [base])
+        code, _, err = self.run_cli("test", self.variant.id, "--kind", "smoke", "--tuned")
+        self.assertEqual(code, 0, err)
+        config = self.fakes.calls[-1][2]
+        self.assertEqual((config["threads"], config["batch"], config["gpu_layers"]), (5, 1024, 0))
+        # The tuner moved work onto a GPU this CPU-only candidate does not use: keep the placement, use the rest.
+        self.store.put("tuned", [{**base, "best": {**base["best"], "gpu_layers": 7}}])
+        self.run_cli("test", self.variant.id, "--kind", "smoke", "--tuned")
+        config = self.fakes.calls[-1][2]
+        self.assertEqual((config["threads"], config["gpu_layers"]), (5, 0))
+
     def test_quiz_and_quant_check(self):
         self.downloaded()
         code, out, err = self.run_cli("quiz", self.variant.id, "--workload", "coding", "--needle")
@@ -377,7 +441,7 @@ class ModelCommandTests(CliCase):
         self.assertIn("3 of 4 correct (75%", out)
         self.assertIn("Long-document recall: 3 of 3 hidden facts found", out)
         quiz = self.store.get("quality_results")[0]
-        self.assertEqual([r["kind"] for r in self.store.get("quality_results")], ["quiz", "needle"])
+        self.assertEqual([r["kind"] for r in self.store.get("quality_results")], ["quiz"])  # one pinned record
         self.assertEqual((quiz["workload"], quiz["score"], quiz["needle"]["found"], quiz["result"]["correct"]), ("coding", 0.75, 3, 3))
         self.assertIn("candidate_id", quiz)
         code, _, err = self.run_cli("quant-check", self.other.id, self.variant.id)
@@ -390,7 +454,50 @@ class ModelCommandTests(CliCase):
         check = self.store.get("quality_results")[-1]
         self.assertEqual((check["kind"], check["variant_id"]), ("quant_check", self.other.id))
         self.assertIn("Q4_K_M", check["result"]["results"])
+        self.assertEqual((check["variant_ids"], check["reference_quant"]), ({"Q4_K_M": self.variant.id}, "Q8_0"))
         self.assertEqual(self.run_cli("quant-check", self.other.id, self.other.id)[0], 1)
+
+    def test_quant_check_passes_labels_and_work_folder_and_keeps_no_paths(self):
+        seen = {}
+        def kl_check(perplexity_command, reference_path, candidates, corpus_path=None, context=512, chunks=None, config=None,
+                     progress=None, cancel=None, reference_label=None, vocab_size=None, work_dir=None, timeout=3600, run=None):
+            seen.update(candidates=candidates, reference_label=reference_label, work_dir=work_dir)
+            return {"reference": {"label": reference_label, "file": "ref.gguf", "ppl": 5.0, "path": reference_path},
+                    "results": {label: {"plain": "Nearly identical.", "file": Path(path).name, "path": path}
+                                for label, path in candidates.items()},
+                    "corpus": {"name": "built-in", "path": f"{SECRET}/corpus.txt"}, "notes": []}
+        self.fakes.modules["quantcheck"].kl_check = kl_check
+        self.fakes.modules["quantcheck"].quant_label = lambda path: "IQ4_XS"
+        unnamed = Variant(**{**self.variant.to_dict(), "id": "local:ffff", "quant": None, "source": "local"})
+        self.store.put("local_files", [{"path": "x", "local_variant": unnamed.to_dict()}])
+        self.downloaded(unnamed)
+        self.downloaded(self.other)
+        code, out, err = self.run_cli("quant-check", self.other.id, unnamed.id, "--json")
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertEqual(list(seen["candidates"]), ["IQ4_XS"])  # no quant in the catalogue: named from the file
+        self.assertEqual(seen["reference_label"], "Q8_0")
+        self.assertEqual(Path(seen["work_dir"]), Path(self.temp.name) / "tmp")
+        self.assertEqual(result["variant_ids"], {"IQ4_XS": unnamed.id})
+        self.assertEqual((result["reference"]["label"], result["reference_quant"]), ("Q8_0", "Q8_0"))  # kl_check's dict kept
+        stored = self.store.get("quality_results")[-1]
+        for value in (out, json.dumps(stored)):
+            self.assertNotIn(self.temp.name, value)
+            self.assertNotIn(SECRET, value)
+        self.assertEqual(stored["result"]["reference"]["ppl"], 5.0)
+
+    def test_export_can_use_another_port(self):
+        code, out, err = self.run_cli("export", self.variant.id, "--format", "llama-server", "--json", "--port", "8091")
+        self.assertEqual(code, 0, err)
+        config = {}
+        self.fakes.modules["export"].export = lambda c, variant, fmt, platform="posix", server_command=None: config.update(c) or {
+            "content": "", "notes": []}
+        self.run_cli("export", self.variant.id, "--format", "llama-server", "--port", "8091")
+        self.assertEqual(config["port"], 8091)
+
+    def test_exit_handlers_are_installed_once_at_start(self):
+        self.run_cli("models")
+        self.assertEqual(self.fakes.calls, [("exit_handlers",)])
 
     def test_export_writes_content_and_rejects_unknown_formats(self):
         code, out, err = self.run_cli("export", self.variant.id, "--format", "ollama")
@@ -480,6 +587,25 @@ class LocalAndCommunityTests(CliCase):
         self.assertEqual(code, 0)
         self.assertIn("issues/new", out)
         self.assertIn("Nothing has been sent", err)
+        self.assertNotIn("left out", err)
+        self.fakes.modules["community"].share_payload = lambda store, ids: {
+            "json": "{}", "issue_url": "https://github.com/x/issues/new", "skipped": 2, "fits_in_url": False}
+        code, out, err = self.run_cli("community", "share", "a1b2c3", "d4e5f6")
+        self.assertEqual(code, 0)
+        self.assertIn("2 results were measured on different hardware and were left out.", err)
+        self.assertIn("paste it into the form", err)
+
+    def test_paths_that_are_not_valid_text_still_print(self):
+        broken = "/models/caf\udce9.gguf"  # how Python holds a Latin-1 file name on a UTF-8 system
+        self.store.put("local_files", [{"path": broken, "size_bytes": 5, "variant_id": None, "local_variant_id": "local:ab"}])
+        raw = io.BytesIO()
+        stream = io.TextIOWrapper(raw, encoding="utf-8")
+        with patch.object(cli.sys, "stdout", stream), redirect_stderr(io.StringIO()):
+            code = cli.main(["--data-dir", self.temp.name, "local"])
+            stream.flush()
+        self.assertEqual(code, 0)
+        self.assertIn("/models/caf?.gguf (5.0 B)".replace("5.0 B", cli.size(5)), raw.getvalue().decode())
+        self.assertIn("your own Model ID: local:ab", raw.getvalue().decode())
 
 
 class AppTests(unittest.TestCase):
@@ -508,14 +634,59 @@ class AppTests(unittest.TestCase):
         path.write_bytes(b"A" * 4096)
         self.assertEqual(app.local_model(self.store, wanted), path)
 
-    def test_best_tune_matches_users_and_notepad_format(self):
-        record = {"variant_id": "v", "context": 4096, "placement": "cpu", "fingerprint": "fp", "users": 1,
-                  "kv_cache_type": "f16", "best": {"threads": 8, "cache_type_k": "f16"}, "best_result": {"tps": 9}}
-        self.store.put("tuned", [record])
-        self.assertIsNotNone(app.best_tune(self.store, "v", 4096, "cpu", "fp", users=1, kv_cache_type="f16"))
-        self.assertIsNone(app.best_tune(self.store, "v", 4096, "cpu", "fp", users=4, kv_cache_type="f16"))
-        self.assertIsNone(app.best_tune(self.store, "v", 4096, "cpu", "fp", users=1, kv_cache_type="q4_0"))
-        self.assertIsNotNone(app.best_tune(self.store, "v", 4096, "cpu", "fp"))  # old callers keep working
+    def test_page_file_keeps_the_match_note_and_own_model_id_but_no_folder(self):
+        shown = app.page_file({"path": "/secret/folder/mine.gguf", "size_bytes": 5, "match_note": "Same name and size.",
+                               "local_variant_id": "local:ab"})
+        self.assertEqual((shown["filename"], shown["match_note"], shown["local_variant_id"]), ("mine.gguf", "Same name and size.", "local:ab"))
+        self.assertNotIn("/secret", json.dumps(shown))
+
+    def test_compare_keys_models_by_candidate_id_with_friendly_names(self):
+        from llm_configurator import evals
+        seen = {}
+        def run_comparison(store, prompts, runners, max_tokens=512, progress=None, cancel=None, names=None):
+            seen.update(runners=list(runners), names=names)
+            return "cmp"
+        variant = real_variant()
+        entries = [("Demo Small Q4_K_M", variant, {"id": "c1"}), ("Demo Small Q4_K_M (4,096 tokens, cpu)", variant, {"id": "c2"}),
+                   ("Again", variant, {"id": "c1"})]
+        with patch.object(app, "require_model", return_value=Path("x.gguf")), patch.object(evals, "run_comparison", run_comparison):
+            self.assertEqual(app.compare_job(self.store, entries, {}, ["hi"])(None, None), {"comparison_id": "cmp"})
+        self.assertEqual(seen["runners"], ["c1", "c2", "c1#3"])
+        self.assertEqual(seen["names"], {"c1": "Demo Small Q4_K_M", "c2": "Demo Small Q4_K_M (4,096 tokens, cpu)", "c1#3": "Again"})
+
+    def test_benchmark_mapping_goes_through_the_catalogue_lock(self):
+        from llm_configurator import catalogue
+        entry = {"base_repo": "org/base", "gguf_repo": "org/gguf", "aa_slug": None}
+        self.store.put("scores", {"data": [{"slug": "model-x", "name": "Model X"}]})
+        with patch.object(app, "definitions", return_value=[entry]), \
+             patch.object(catalogue, "set_slug", return_value={**entry, "aa_slug": "model-x"}) as set_slug:
+            self.assertEqual(app.map_benchmark(self.store, "org/base", "model-x"), {"base_repo": "org/base", "aa_slug": "model-x"})
+        set_slug.assert_called_once_with(self.store, "org/base", "model-x")
+        self.assertFalse((Path(self.temp.name) / "catalogue.tmp").exists())
+
+    def test_launch_uses_the_installed_runtime_backend(self):
+        from llm_configurator import runtime_install
+        candidate = {"variant_id": "v", "context": 4096, "gpu_layers": 10, "total_layers": 32, "gpu_index": 0, "users": 1}
+        hardware = {"gpus": [{"index": 0, "backend": "cuda", "uuid": "GPU-1"}]}
+        with patch.object(runtime_install, "detect", return_value={"backend": "vulkan"}):
+            self.assertEqual(app.launch_config(self.store, candidate, hardware, "m.gguf")["gpu_backend"], "vulkan")
+        with patch.object(runtime_install, "detect", side_effect=OSError("unreadable")):
+            self.assertEqual(app.launch_config(self.store, candidate, hardware, "m.gguf")["gpu_backend"], "cuda")
+
+    def test_a_finished_download_remembers_its_fingerprint(self):
+        from llm_configurator import discover, downloads
+        content = b"A" * 4096
+        wanted = self.variant(content)
+        def download(variant, directory, progress=None, cancel=None):
+            path = Path(directory) / "model-Q4_K_M.gguf"
+            path.write_bytes(content)
+            return path
+        with patch.object(downloads, "download_variant", download):
+            self.assertFalse(app.download_job(self.store, wanted)(None, None)["reused"])
+        self.assertEqual([e["sha256"] for e in self.store.get("hash_cache").values()], [wanted.sha256])
+        # The next use trusts the remembered fingerprint instead of reading the whole file again.
+        with patch.object(discover.hashlib, "sha256", side_effect=AssertionError("read again")):
+            self.assertEqual(app.local_model(self.store, wanted).name, "model-Q4_K_M.gguf")
 
     def test_scanned_own_models_become_variants(self):
         local = Variant(**{**real_variant().to_dict(), "id": "local:abc", "source": "local"})

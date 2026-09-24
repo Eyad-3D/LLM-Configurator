@@ -6,7 +6,6 @@ binaries from `runtime_install.binary`, never from browser input. Modules built 
 v0.4 workstreams are imported inside functions so this file loads without them.
 """
 import inspect
-import json
 from pathlib import Path
 import secrets
 
@@ -97,11 +96,8 @@ def map_benchmark(store, base_repo, slug):
     cache = store.get("scores")
     if slug and (not cache or not any(i.get("slug") == slug for i in cache["data"])):
         raise ValueError("Unknown benchmark slug; refresh Artificial Analysis data first")
-    entry["aa_slug"] = slug or None
-    path = store.directory / "catalogue.json"
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(entries, indent=2), encoding="utf-8")
-    temporary.replace(path)
+    from . import catalogue
+    entry = catalogue.set_slug(store, base_repo, slug)  # locked, atomic write of the user's catalogue copy
     models = [Variant(**v) for v in store.get("variants", [])]
     for variant in models:
         if variant.base_repo == base_repo:
@@ -131,21 +127,9 @@ def local_model(store, variant, verify=True, progress=None, cancel=None):
     if variant.demo:
         return None
     from . import discover
+    # discover also looks in the models folder, where downloads save every part flat (Q4_K_M/x.gguf -> x.gguf).
     found = _call(discover.find_for_variant, store, variant, verify=verify, progress=progress, cancel=cancel)
-    if found:
-        return Path(found)
-    # downloads saves shards flat in the models folder even when the catalogue name has a folder (Q4_K_M/x.gguf).
-    wanted = variant.all_files()
-    paths = [models_dir(store) / Path(f["filename"]).name for f in wanted]
-    try:
-        if not all(p.is_file() and p.stat().st_size == f["size_bytes"] for p, f in zip(paths, wanted)):
-            return None
-    except OSError:
-        return None
-    if verify and any(f.get("sha256") and discover.hash_cached(store, p, progress, cancel) != f["sha256"].lower()
-                      for p, f in zip(paths, wanted)):
-        return None
-    return paths[0]
+    return Path(found) if found else None
 
 
 def require_model(store, variant, progress=None, cancel=None):
@@ -176,8 +160,21 @@ def download_job(store, variant):
                              "Put it back, or scan for models again.")
         from . import downloads
         path = downloads.download_variant(variant, models_dir(store), progress=progress, cancel=cancel)
+        remember_download(store, variant, models_dir(store))
         return {"reused": False, "bytes": variant.size_bytes, "filename": Path(path).name, "variant_id": variant.id}
     return run
+
+
+def remember_download(store, variant, directory):
+    """downloads just checked every file's SHA-256; note it so the first test does not read the model again."""
+    from . import discover
+    remember = getattr(discover, "remember_hash", None)
+    for f in variant.all_files():
+        if f.get("sha256") and remember:
+            try:
+                remember(store, Path(directory) / Path(f["filename"]).name, f["sha256"])
+            except ValueError:
+                pass  # only a speed-up: the file is simply checked again before its first use
 
 
 def remove_download(store, variant):
@@ -193,33 +190,67 @@ def placement(candidate):
     return candidate.get("mode") or ("cpu" if not layers else "gpu" if layers == total else "split")
 
 
-def _tuned_kv(record):
-    return record.get("kv_cache_type") or (record.get("best") or {}).get("cache_type_k") or "f16"
+def runtime_backend(store):
+    """The installed llama.cpp build's backend (cuda, vulkan, metal, cpu…), or None when unknown.
+
+    It decides the GPU settings: a Vulkan build on an NVIDIA card must not get CUDA's."""
+    try:
+        from . import runtime_install
+        return (runtime_install.detect(store) or {}).get("backend")
+    except Exception:  # noqa: BLE001 - no runtime yet, or an unreadable one: fall back to the hardware's backend
+        return None
 
 
-def best_tune(store, variant_id, context, where, fingerprint=None, users=None, kv_cache_type=None):
-    """Highest-speed stored tune for this variant, context and placement on this computer.
+def _gpu_uuid(candidate, hardware):
+    if not candidate.get("gpu_layers") or candidate.get("gpu_index") is None:
+        return None
+    gpu = next((g for g in (hardware or {}).get("gpus") or [] if g.get("index") == candidate["gpu_index"]), None)
+    return gpu.get("uuid") if gpu else None
 
-    A tune is measured for one user and one notepad (KV cache) format, so with `users` or
-    `kv_cache_type` given, only tunes made for the same values count.
+
+def _fits_now(store, variant, candidate, hardware, layers, moe):
+    """True when the engine lists this placement as fitting in memory now, at the candidate's context."""
+    kv = candidate.get("kv_cache_type") or "f16"
+    requirements = Requirements(context=candidate["context"], min_tps=0, include_rankings=False, kv_cache_type=kv)
+    try:
+        report = recommend([variant], hardware, requirements, store.get("measurements", []), store.get("calibration"))
+    except (ValueError, KeyError, TypeError):
+        return False
+    return any(c["context"] == candidate["context"] and c["scenario"] == "now" and c["gpu_layers"] == layers
+               and (c.get("n_cpu_moe") or 0) == moe for c in report["candidates"])
+
+
+def tuned_changes(store, candidate, hardware):
+    """Launch settings from the saved tune that started from this candidate (engine.matching_tuned).
+
+    The tune is matched on the candidate's own model, context, GPU layers, expert offload and notepad
+    format, so a tune of another placement is never applied. When the tuner moved layers or experts,
+    that placement is used only if it still fits in memory now. Raises ValueError when there is no tune.
     """
-    matches = [r for r in store.get("tuned", []) if r.get("variant_id") == variant_id and r.get("context") == context
-               and r.get("placement") == where and (fingerprint is None or r.get("fingerprint") == fingerprint)
-               and (users is None or (r.get("users") or 1) == users)
-               and (kv_cache_type is None or _tuned_kv(r) == kv_cache_type)
-               and isinstance(r.get("best"), dict)]
-    return max(matches, key=lambda r: ((r.get("best_result") or {}).get("tps") or 0, r.get("timestamp") or ""), default=None)
+    from .engine import matching_tuned
+    variant = find_variant(store, candidate["variant_id"])
+    kv, moe = candidate.get("kv_cache_type") or "f16", candidate.get("n_cpu_moe") or 0
+    tune = None
+    if (candidate.get("users") or 1) == 1:
+        tune = matching_tuned(store.get("tuned", []), variant, hardware or {}, candidate["context"], candidate["gpu_layers"],
+                              kv, moe, _gpu_uuid(candidate, hardware))
+    if not tune:
+        raise ValueError("No saved tune for this model, context, placement and notepad format yet. Run a tune first.")
+    changes = dict(tune["settings"])
+    if kv != "f16" and changes.get("flash_attn") == "off":
+        changes.pop("flash_attn")  # llama.cpp needs flash attention for a compressed notepad
+    moved = tune["best_placement"]
+    on_gpu = bool(candidate["gpu_layers"])
+    if not tune["same_placement"] and moved["cache_type_k"] == kv and bool(moved["gpu_layers"]) == on_gpu \
+            and 0 <= (moved["gpu_layers"] or 0) <= variant.layers and _fits_now(store, variant, candidate, hardware or {}, moved["gpu_layers"] or 0, moved["n_cpu_moe"]):
+        changes.update(gpu_layers=moved["gpu_layers"] or 0, n_cpu_moe=moved["n_cpu_moe"])
+    return changes
 
 
 def launch_config(store, candidate, hardware, model_path=None, tuned=False, **overrides):
-    changes = {}
-    if tuned:
-        record = best_tune(store, candidate["variant_id"], candidate["context"], placement(candidate), hardware.get("fingerprint"),
-                           users=candidate.get("users") or 1, kv_cache_type=candidate.get("kv_cache_type") or "f16")
-        if not record:
-            raise ValueError("No saved tune for this model, context, placement and notepad format yet. Run a tune first.")
-        changes = {k: record["best"][k] for k in TUNABLE if k in record["best"]}
-    return from_candidate(candidate, model_path, hardware, **{**changes, **overrides})
+    """Launch settings for a candidate. tuned=True adds the saved tune's settings (see tuned_changes)."""
+    changes = tuned_changes(store, candidate, hardware) if tuned else {}
+    return from_candidate(candidate, model_path, hardware, runtime_backend=runtime_backend(store), **{**changes, **overrides})
 
 
 def candidate_for(store, variant, hardware, context=None, gpu_layers=None, kv_cache_type="f16"):
@@ -293,22 +324,50 @@ def tune_job(store, variant, candidate, hardware, budget_seconds=300, goal="gene
         # Paths stay on this computer: the page and the store get the tuned settings, not the model's folder.
         best = {k: v for k, v in (result.get("best") or {}).items() if k != "model_path"}
         changes = {k: best[k] for k in TUNABLE if k in best and best[k] != base.get(k)}
-        # Pinned shape (FIXUPS.md): {**tune_result, variant_id, sha256, fingerprint, context, gpu_layers, n_cpu_moe,
-        # kv_cache_type, timestamp}; id, users, placement, goal and budget_seconds are extra keys best_tune reads.
-        # kv_cache_type is the notepad format the user asked for, so --tuned finds the tune again even when the
-        # tuner had to compress the notepad to fit (that choice stays in best.cache_type_k).
-        record = {**result, "best": best, "id": secrets.token_hex(6), "variant_id": variant.id, "sha256": variant.sha256,
-                  "fingerprint": hardware.get("fingerprint"), "context": candidate["context"],
-                  "gpu_layers": best.get("gpu_layers", candidate["gpu_layers"]),
-                  "n_cpu_moe": best.get("n_cpu_moe", candidate.get("n_cpu_moe") or 0),
-                  "kv_cache_type": kv, "timestamp": now(), "goal": goal,
-                  "users": candidate.get("users") or 1, "placement": placement(candidate), "budget_seconds": budget_seconds}
-        # No §2.3 "tune" measurement: the tuner measures at a shallow depth and engine.matching_speed would show
-        # that faster number as "tested on this computer" at the full context.
-        if result.get("stopped") != "cancelled":
+        saved = result.get("stopped") != "cancelled"
+        if saved:
+            record, measurement = tune_records(result, best, variant, candidate, hardware, goal, budget_seconds)
             store.append("tuned", record)
-        return {**result, "best": best, "changes": changes, "record_id": record["id"]}
+            if measurement:
+                store.append("measurements", measurement)
+        return {**result, "best": best, "changes": changes, "saved": saved, "record_id": record["id"] if saved else None}
     return run
+
+
+def tune_records(result, best, variant, candidate, hardware, goal=None, budget_seconds=None):
+    """The pinned tuned record (FIXUPS.md) and, when the tune measured a speed, a §2.3 kind="tune" measurement.
+
+    Tuned record: {**tune_result, variant_id, sha256, fingerprint, context, gpu_layers, n_cpu_moe, kv_cache_type,
+    timestamp}. context, gpu_layers, n_cpu_moe and kv_cache_type describe the candidate the tune started from, as
+    engine.matching_tuned reads them; where the tuner ended up is in `best`. The measurement says at which depth
+    (tokens already in memory) it was taken, so the engine counts it as "tested" only when that was the full length.
+    """
+    settings = result.get("settings") if isinstance(result.get("settings"), dict) else {}
+    depth = settings.get("depth") if type(settings.get("depth")) is int else result.get("depth")
+    record = {**result, "best": best, "id": secrets.token_hex(6), "variant_id": variant.id, "sha256": variant.sha256,
+              "fingerprint": hardware.get("fingerprint"), "context": candidate["context"],
+              "gpu_layers": candidate["gpu_layers"], "n_cpu_moe": candidate.get("n_cpu_moe") or 0,
+              "kv_cache_type": candidate.get("kv_cache_type") or "f16", "depth": depth,
+              "runtime": result.get("runtime"), "runtime_build": result.get("runtime_build"), "timestamp": now(),
+              "goal": goal or result.get("goal"), "users": candidate.get("users") or 1, "placement": placement(candidate),
+              "budget_seconds": budget_seconds}
+    speed = result.get("best_result") or {}
+    if type(depth) is not int:  # the engine reads a record without depth as a full-length test
+        return record, None
+    if not isinstance(speed.get("tps"), (int, float)) or isinstance(speed.get("tps"), bool) or not speed["tps"] > 0:
+        return record, None
+    layers = best.get("gpu_layers", candidate["gpu_layers"]) or 0
+    measurement = {"id": secrets.token_hex(6), "kind": "tune", "variant_id": variant.id, "sha256": variant.sha256,
+                   "fingerprint": hardware.get("fingerprint"), "timestamp": record["timestamp"],
+                   "context": candidate["context"], "users": best.get("parallel") or 1, "gpu_layers": layers,
+                   "gpu_uuid": best.get("gpu_uuid") if layers else None,
+                   "threads": result.get("threads") or best.get("threads"), "tps": speed["tps"], "pp_tps": speed.get("pp_tps"),
+                   "depth": depth, "runtime": result.get("runtime"), "runtime_build": result.get("runtime_build"),
+                   "settings": {k: best.get(k) for k in ["flash_attn", "cache_type_k", "cache_type_v", "batch", "ubatch", "n_cpu_moe"]},
+                   "raw": {"tuned_record": record["id"]},
+                   "note": "Measured on this computer with llama-bench while tuning, with the given depth of conversation "
+                           "already in memory. Other programs running can change speed."}
+    return record, measurement
 
 
 def start_server(store, variant, candidate, hardware, tuned=False, progress=None, cancel=None):
@@ -344,8 +403,6 @@ def quiz_job(store, variant, candidate, hardware, workload="general", include_ne
             store.append("quality_results", _quality_record(
                 "quiz", variant, candidate, candidate_id=candidate.get("id"), workload=workload,
                 **{k: quiz.get(k) for k in ["score", "ci_low", "ci_high", "correct", "total"]}, needle=needle, result=quiz))
-            if needle is not None:  # pre-fix-up readers look for a separate needle record
-                store.append("quality_results", _quality_record("needle", variant, candidate, candidate_id=candidate.get("id"), result=needle))
             return {"quiz": quiz, "needle": needle}
         finally:
             server.stop()
@@ -381,7 +438,10 @@ class _Chat:
 
 
 def compare_job(store, entries, hardware, prompts, max_tokens=512):
-    """entries: [(label, variant, candidate)]. Models run one after another because of memory."""
+    """entries: [(label, variant, candidate)]. Models run one after another because of memory.
+
+    The comparison is keyed by candidate id with the labels as friendly names, so evals.reveal returns
+    candidate ids in `mapping`/`tallies` and the names in `labels` (FIXUPS.md reveal shape)."""
     def run(progress, cancel):
         from . import evals
         for _, variant, _ in entries:
@@ -393,9 +453,14 @@ def compare_job(store, entries, hardware, prompts, max_tokens=512):
                 sessions.append(session)
                 return session
             return make
-        runners = {label: factory(variant, candidate) for label, variant, candidate in entries}
+        runners, names = {}, {}
+        for label, variant, candidate in entries:
+            key = candidate.get("id") or label
+            key = key if key not in runners else f"{key}#{len(runners) + 1}"  # the same candidate twice still gets two slots
+            runners[key], names[key] = factory(variant, candidate), label
         try:
-            comparison_id = evals.run_comparison(store, prompts, runners, max_tokens=max_tokens, progress=progress, cancel=cancel)
+            comparison_id = _call(evals.run_comparison, store, prompts, runners, max_tokens=max_tokens, progress=progress,
+                                  cancel=cancel, names=names)
         finally:
             for session in sessions:
                 session.close()
@@ -428,38 +493,48 @@ def _check_config(store, variant, hardware, path):
 
 
 def quant_check_job(store, reference, others, hardware=None):
+    """Compression check of `others` against `reference` with llama-perplexity (quantcheck.kl_check).
+
+    Results are keyed by quant label; `variant_ids` maps each label back to its model ID. Nothing stored
+    or returned holds a folder name. Temporary files go to the app's data folder, not the system's
+    temporary folder (on Linux often held in memory)."""
     def run(progress, cancel):
         from . import quantcheck
         reference_path = require_model(store, reference, _stage(progress, "verify"), cancel)
-        labels = {}
+        labels, paths = {}, {}
         for variant in others:
-            label = variant.quant if variant.quant not in labels else variant.id
-            labels[label] = variant
-        paths = {label: str(require_model(store, variant, _stage(progress, "verify"), cancel)) for label, variant in labels.items()}
+            path = require_model(store, variant, _stage(progress, "verify"), cancel)
+            label = variant.quant or quantcheck.quant_label(path)
+            label = label if label not in labels else variant.id
+            labels[label], paths[label] = variant, str(path)
+        reference_label = reference.quant or quantcheck.quant_label(reference_path)
         config = _check_config(store, reference, hardware or scan(False), reference_path)
         result = _without_paths(_call(quantcheck.kl_check, binary(store, "llama-perplexity"), str(reference_path), paths,
-                                      config=config, progress=progress, cancel=cancel))
-        by_variant = {labels[label].id: value for label, value in (result.get("results") or {}).items() if label in labels}
+                                      config=config, progress=progress, cancel=cancel, reference_label=reference_label,
+                                      work_dir=str(store.directory / "tmp")))
+        variant_ids = {label: v.id for label, v in labels.items()}
+        by_variant = {variant_ids[label]: value for label, value in (result.get("results") or {}).items() if label in labels}
         # Pinned shape (FIXUPS.md): {kind, variant_id: <reference>, result, timestamp}; the rest are extra keys.
         store.append("quality_results", {"kind": "quant_check", "variant_id": reference.id, "result": result, "timestamp": now(),
                                          "reference_variant_id": reference.id, "name": reference.name,
-                                         "reference_quant": reference.quant, "variant_ids": [v.id for v in others],
+                                         "reference_quant": reference_label, "variant_ids": variant_ids,
                                          "results": by_variant, "notes": result.get("notes", [])})
-        return {**result, "reference": reference.quant, "reference_result": result.get("reference"),
-                "variant_ids": {label: v.id for label, v in labels.items()}}
+        return {**result, "reference_quant": reference_label, "reference_variant_id": reference.id, "variant_ids": variant_ids}
     return run
 
 
 # ---- Export, runtime, local files -----------------------------------------------------
 
-def export_config(store, variant, candidate, hardware, fmt, platform="posix", tuned=False):
+def export_config(store, variant, candidate, hardware, fmt, platform="posix", tuned=False, port=None):
+    """port: the port of the server already running (it may have moved off the default when that was taken)."""
     from . import export
     if fmt not in {f["id"] for f in export.formats()}:
         raise ValueError("Unknown export format")
     if platform not in {"posix", "windows"}:
         raise ValueError("Platform must be posix or windows")
     path = local_model(store, variant, verify=False)
-    config = launch_config(store, candidate, hardware, path or models_dir(store) / Path(variant.all_files()[0]["filename"]).name, tuned)
+    config = launch_config(store, candidate, hardware, path or models_dir(store) / Path(variant.all_files()[0]["filename"]).name, tuned,
+                           **({"port": port} if port else {}))
     try:
         command = binary(store, "llama-server")
     except ValueError:
@@ -482,7 +557,8 @@ def page_file(record):
     path = Path(record.get("path") or "")
     return {"filename": path.name, "size_bytes": record.get("size_bytes"), "sha256": record.get("sha256"),
             "source": record.get("source"), "variant_id": record.get("variant_id"), "gguf": record.get("gguf"),
-            "mtime": record.get("mtime"), "verified": bool(record.get("verified"))}
+            "mtime": record.get("mtime"), "verified": bool(record.get("verified")),
+            "match_note": record.get("match_note"), "local_variant_id": record.get("local_variant_id")}
 
 
 def page_location(location):
