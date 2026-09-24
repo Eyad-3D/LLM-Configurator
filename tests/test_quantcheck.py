@@ -471,7 +471,7 @@ class KlCheckTests(unittest.TestCase):
             result = self.check(vocab_size=None, candidates={"Q4_K_M": self.q4})
         self.assertEqual(result["estimated_temp_bytes"],
                          estimate_logits_bytes(quantcheck.ASSUMED_VOCAB, 512, result["corpus"]["chunks"]))
-        self.assertIn("at most", result["notes"][0])
+        self.assertIn("assumes a very large one", result["notes"][0])
 
     def test_reference_failure_is_plain_and_cleans_up(self):
         with mock.patch.dict(os.environ, {"FAKE_SHORT": "1"}):
@@ -516,12 +516,82 @@ class KlCheckTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 15)
         self.assertEqual(os.listdir(self.work), [])
 
-    def test_timeout_is_plain_and_cleans_up(self):
+    def test_candidate_timeout_is_reported_per_model(self):
         with mock.patch.dict(os.environ, {"FAKE_SLEEP": "30"}):
-            with self.assertRaises(ValueError) as caught:
-                self.check(timeout=1)
+            result = self.check(timeout=1)
+        for label in ["Q4_K_M", "Q6_K"]:
+            entry = result["results"][label]
+            self.assertIn("took longer than", entry["error"])
+            self.assertIsNone(entry["verdict"])
+            self.assertEqual(entry["attempts"], 1)
+        self.assertEqual(result["reference"]["ppl"], 6.2316)
+        self.assertEqual(os.listdir(self.work), [])
+
+    def test_reference_timeout_is_plain_and_cleans_up(self):
+        def run(argv, **_):
+            raise quantcheck._TimedOut("llama-perplexity took longer than 1 minutes and was stopped.")
+        with self.assertRaises(ValueError) as caught:
+            self.check(run=run)
         self.assertIn("took longer than", str(caught.exception))
         self.assertEqual(os.listdir(self.work), [])
+
+    def test_timeout_on_a_retry_keeps_the_partial_result(self):
+        cut = KLD_CURRENT[:KLD_CURRENT.index("Same top p:")]
+        outputs = [(0, cut)]
+
+        def run(argv, **_):
+            if "--kl-divergence" not in argv:
+                Path(argv[argv.index("--kl-divergence-base") + 1]).write_bytes(b"_logits_" + b"\0" * 64)
+                return 0, REFERENCE_RUN
+            if outputs:
+                return outputs.pop()
+            raise quantcheck._TimedOut("llama-perplexity took longer than 1 minutes and was stopped.")
+        q4 = self.check(run=run, candidates={"Q4_K_M": self.q4})["results"]["Q4_K_M"]
+        self.assertIsNone(q4["error"])
+        self.assertEqual(q4["mean_kld"], 0.031273)
+        self.assertIn("Partial result", q4["plain"])
+        self.assertEqual(q4["attempts"], 2)
+
+    def test_output_lost_mid_line_is_not_trusted(self):
+        text = KLD_CURRENT[:KLD_CURRENT.index("Same top p:") + len("Same top p: 9")]
+        outputs = [(0, KLD_CURRENT), (0, text)]
+        events = []
+
+        def run(argv, on_line=None, **_):
+            if "--kl-divergence" not in argv:
+                Path(argv[argv.index("--kl-divergence-base") + 1]).write_bytes(b"_logits_" + b"\0" * 64)
+                return 0, REFERENCE_RUN
+            code, output = outputs.pop()
+            for line in output.splitlines(keepends=True):
+                on_line(line)
+            return code, output
+        q4 = self.check(run=run, candidates={"Q4_K_M": self.q4}, progress=events.append)["results"]["Q4_K_M"]
+        self.assertEqual(q4["attempts"], 2)
+        self.assertEqual(q4["same_top_p"], 91.901)
+        dones = [event["done"] for event in events]
+        self.assertEqual(dones, sorted(dones))                  # the re-run does not move the bar back
+
+    def test_unrelated_server_settings_do_not_block_the_check(self):
+        seen = []
+
+        def run(argv, env=None, **_):
+            seen.append(argv)
+            if "--kl-divergence" not in argv:
+                Path(argv[argv.index("--kl-divergence-base") + 1]).write_bytes(b"_logits_" + b"\0" * 64)
+            return 0, KLD_CURRENT
+        config = {"gpu_layers": 0, "cache_type_v": "q8_0", "flash_attn": "off", "draft_max": 8, "host": "0.0.0.0",
+                  "threads": 4, "surprise": True}
+        self.check(candidates={"Q4_K_M": self.q4}, config=config, run=run)
+        self.assertIn("-t 4", " ".join(seen[1]))
+
+    def test_missing_work_dir_is_created_and_chunk_count_follows_llama_cpp(self):
+        work = self.work / "new" / "folder"
+        reference = REFERENCE_RUN.replace("over 12 chunks", "over 9 chunks")
+        with mock.patch.dict(os.environ, {"FAKE_REFERENCE": str(_write(self.dir / "r9.txt", reference))}):
+            result = self.check(work_dir=work, candidates={"Q4_K_M": self.q4})
+        self.assertEqual(os.listdir(work), [])
+        self.assertEqual(result["corpus"]["chunks"], 9)
+        self.assertEqual(result["corpus"]["tokens"], 9 * 512)
 
     def test_unexpected_error_cleans_up(self):
         def run(argv, **_):
@@ -648,7 +718,7 @@ class KlCheckTests(unittest.TestCase):
             self.assertEqual(quantcheck._vocab_size(self.reference), 151936)
             result = self.check(vocab_size=None, candidates={"Q4_K_M": self.q4})
         self.assertEqual(result["estimated_temp_bytes"], estimate_logits_bytes(151936, 512, result["corpus"]["chunks"]))
-        self.assertNotIn("at most", result["notes"][0])
+        self.assertNotIn("assumes", result["notes"][0])
         without = {"metadata": {"llama.vocab_size": 32000}, "architecture": "llama", "summary": {"layers": 4}}
         with mock.patch.object(gguf, "read_metadata", return_value=without):
             self.assertEqual(quantcheck._vocab_size(self.reference), 32000)

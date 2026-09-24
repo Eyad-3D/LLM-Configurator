@@ -39,7 +39,8 @@ MAX_ATTEMPTS = 3              # runs per candidate when the output comes back cu
 # Q3_K_M 0.10, Q2_K 0.33-0.45, IQ1 1.4+. Rough guidance, not a guarantee.
 KLD_BANDS = [(0.01, "negligible"), (0.05, "small"), (0.15, "moderate"), (0.5, "large"), (math.inf, "severe")]
 # Fallback when only "Same top p" is known: share of positions where the top word differs.
-# Same scoreboard: Q8_0 2.3%, Q6_K 4.0%, Q4_K_M 8.1%, Q2_K 28.9%.
+# From the same README's "LLaMA 2 vs. LLaMA 3" table (LLaMA 3 8B vs FP16): Q8_0 2.3%, Q6_K 4.0%,
+# Q4_K_M 8.1%, Q2_K 28.9%. Small models and short samples drift more, so these stay rough.
 DIFFERENT_TOP_BANDS = [(5.0, "negligible"), (10.0, "small"), (18.0, "moderate"), (35.0, "large"),
                        (math.inf, "severe")]
 VERDICTS = {
@@ -198,6 +199,11 @@ def _default_chunks(context, corpus_bytes):
     return max(1, min(wanted, available, 64))
 
 
+# Launch settings the check reuses; the rest (cache types, draft model, port, ...) are left out, so
+# a server-only setting can neither reach llama-perplexity nor fail validation here.
+_CONFIG_KEYS = {"gpu_layers", "total_layers", "gpu_uuid", "gpu_backend", "device", "threads", "n_cpu_moe"}
+
+
 def _common_args(config, context):
     """Flags llama-perplexity shares with llama-server: GPU layers, device, threads, MoE offload.
     Server-only flags (host, port, alias, jinja, parallel, draft) and KV-cache compression are left
@@ -206,7 +212,7 @@ def _common_args(config, context):
     env = None
     if config:
         from . import launch
-        c = launch.normalize({k: v for k, v in config.items() if k in launch.DEFAULTS})
+        c = launch.normalize({k: v for k, v in config.items() if k in _CONFIG_KEYS})
         args += ["-ngl", str(launch.runtime_gpu_layers(c["gpu_layers"], c["total_layers"]))]
         device = c["device"] or ("none" if c["gpu_layers"] == 0 and c["gpu_backend"] not in {None, "cpu"} else None)
         if device:
@@ -217,6 +223,10 @@ def _common_args(config, context):
             args += ["--n-cpu-moe", str(c["n_cpu_moe"])]
         env = launch.server_env(c)
     return args, env
+
+
+class _TimedOut(ValueError):
+    pass
 
 
 def _run_process(argv, env=None, timeout=3600, cancel=None, on_line=None):
@@ -265,12 +275,15 @@ def _run_process(argv, env=None, timeout=3600, cancel=None, on_line=None):
             on_line(pending)
         return process.wait(timeout=30), "".join(output)
     except TimeoutError:
-        raise ValueError(f"llama-perplexity took longer than {max(1, timeout // 60)} minutes and was stopped. "
+        raise _TimedOut(f"llama-perplexity took longer than {max(1, timeout // 60)} minutes and was stopped. "
                          "Try fewer chunks or a smaller context.") from None
     finally:
         if process.poll() is None:
             process.kill()
-            process.wait(timeout=30)
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:  # keep the original error; the OS reaps it later
+                pass
         process.stdout.close()
 
 
@@ -304,10 +317,19 @@ def _failure(output):
 
 
 def _redact(text, paths):
-    """Replace absolute paths with bare file names, so messages never reveal folder names."""
-    for path in sorted({str(p) for p in paths if p}, key=len, reverse=True):
-        text = text.replace(path, Path(path).name)
+    """Replace absolute paths with bare file names, so messages never reveal folder names.
+    Whole folders are removed too, which also covers the other parts of a split model."""
+    folders = {str(Path(p).parent) for p in paths if p} | {str(p) for p in paths if p and Path(p).is_dir()}
+    for folder in sorted(folders, key=len, reverse=True):
+        if len(folder) > 1:
+            text = text.replace(folder + os.sep, "").replace(folder, Path(folder).name)
     return text
+
+
+def _whole_lines(text):
+    """Drop a last line that has no newline: output lost mid-line can end in "Same top p: 1"."""
+    text = text or ""
+    return text if not text or text.endswith(("\n", "\r")) else text[:max(text.rfind("\n"), text.rfind("\r")) + 1]
 
 
 _MISSING_NAMES = [("median_kld", "median"), ("kld_99", "worst 1%"), ("same_top_p", "same top word"),
@@ -364,16 +386,20 @@ def kl_check(perplexity_command, reference_path, candidates, corpus_path=None, c
     known_vocab = vocab_size or _vocab_size(reference_path)
     estimate = estimate_logits_bytes(known_vocab or ASSUMED_VOCAB, context, chunks)
     temp_root = Path(work_dir) if work_dir else Path(tempfile.gettempdir())
-    free = shutil.disk_usage(temp_root).free
+    try:
+        temp_root.mkdir(parents=True, exist_ok=True)
+        free = shutil.disk_usage(temp_root).free
+    except OSError as exc:
+        raise ValueError(f"The folder for temporary files cannot be used ({exc.strerror or type(exc).__name__}).") from None
     where = "the work folder" if work_dir else "the system's temporary folder"
     if free < estimate + DISK_MARGIN_BYTES:
         raise ValueError(f"The check needs about {estimate / GIB:.1f} GB of temporary space in {where}, "
                          f"but only {free / GIB:.1f} GB is free. Free up some space or use fewer chunks.")
     notes = [f"Temporary predictions file: about {estimate / GIB:.2f} GB"
-             + ("" if known_vocab else " at most (vocabulary size unknown, assumed the largest common one)")
+             + ("" if known_vocab else " (vocabulary size unknown, so this assumes a very large one)")
              + f" in {where}; it is deleted afterwards.",
-             f"Reads about {chunks * context} tokens of sample text in {chunks} windows of {context}; "
-             "a short sample gives a quick, rough answer.",
+             f"Reads about {chunks * context} tokens of sample text in {chunks} windows of {context} and scores "
+             "the second half of each window; a short sample gives a quick, rough answer.",
              "Verdicts are rough guidance based on llama.cpp's published measurements, not a guarantee."]
 
     order = [("reference", reference_label, reference_path)] + [("candidate", label, path) for label, path in paths.items()]
@@ -399,7 +425,8 @@ def kl_check(perplexity_command, reference_path, candidates, corpus_path=None, c
                 chunk = int(row.group(1)) if row else None
             if chunk:
                 done = min(chunks, round(chunk * chunks / state["chunks"]))
-                report(stage, label, f"{label}: window {chunk} of {state['chunks']}", done)
+                state["peak"] = max(state.get("peak", 0), done)   # a re-run starts over; the bar does not
+                report(stage, label, f"{label}: window {chunk} of {state['chunks']}", state["peak"])
         return on_line
 
     temp_dir = tempfile.mkdtemp(prefix="llmc-quantcheck-", dir=work_dir)
@@ -426,7 +453,9 @@ def kl_check(perplexity_command, reference_path, candidates, corpus_path=None, c
         last_progress = _number(progress_values[-1][1]) if progress_values else None
         reference.update(ppl=parsed["final_ppl"] or parsed["ppl"] or last_progress, logits_bytes=logits.stat().st_size)
         state["done"] += chunks
+        reported_chunks = state["chunks"]
         for label, path in paths.items():
+            state["peak"] = 0
             check_cancel(cancel)
             report("candidate", label, f"Comparing {label} with {reference_label}")
             argv = command + ["-m", str(path), "-f", str(corpus), "--kl-divergence-base", str(logits),
@@ -434,9 +463,16 @@ def kl_check(perplexity_command, reference_path, candidates, corpus_path=None, c
             best, attempts = None, 0
             while attempts < MAX_ATTEMPTS:
                 attempts += 1
-                code, output = run(argv, env=env, timeout=timeout, cancel=cancel,
-                                   on_line=on_line_for("candidate", label))
+                try:
+                    code, output = run(argv, env=env, timeout=timeout, cancel=cancel,
+                                       on_line=on_line_for("candidate", label))
+                except _TimedOut as exc:   # one slow file must not throw away the others
+                    code, output = None, str(exc)
                 check_cancel(cancel)
+                if code is None:
+                    best = best or (code, parse_kld_output(""), output)   # keep an earlier partial result
+                    break
+                output = _whole_lines(output)
                 parsed = parse_kld_output(output)
                 if best is None or (parsed["complete"], parsed["chunks_done"] or 0) > \
                         (best[1]["complete"], best[1]["chunks_done"] or 0):
@@ -445,13 +481,15 @@ def kl_check(perplexity_command, reference_path, candidates, corpus_path=None, c
                 if parsed["complete"] or code != 0 or _failure(output):
                     break
                 report("candidate", label, f"{label}: llama-perplexity's report came back cut short; "
-                                           f"running it again (try {attempts + 1} of {MAX_ATTEMPTS})")
+                                           f"running it again (try {attempts + 1} of {MAX_ATTEMPTS})", state["peak"])
             code, parsed, output = best
             parsed = {key: value for key, value in parsed.items() if key != "final_ppl"}
             if parsed["ppl_base"] is None:
                 parsed["ppl_base"] = reference["ppl"]
             error = None
-            if code != 0 or (parsed["mean_kld"] is None and parsed["same_top_p"] is None):
+            if code is None:
+                error = output
+            elif code != 0 or (parsed["mean_kld"] is None and parsed["same_top_p"] is None):
                 error = _failure(output) or f"llama-perplexity gave no comparison:\n{tail(output)}"
             summary = interpret(parsed, reference_label)
             partial = None
@@ -468,6 +506,6 @@ def kl_check(perplexity_command, reference_path, candidates, corpus_path=None, c
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
     return {"reference": reference, "results": results,
-            "corpus": {"file": corpus.name, "bytes": corpus_bytes, "context": context, "chunks": chunks,
-                       "tokens": chunks * context},
+            "corpus": {"file": corpus.name, "bytes": corpus_bytes, "context": context, "chunks": reported_chunks,
+                       "tokens": reported_chunks * context},
             "notes": notes, "estimated_temp_bytes": estimate}
