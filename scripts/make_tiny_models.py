@@ -108,7 +108,7 @@ def next_token_table(tokens):
 
 
 def write_model(path, arch, *, n_embd=512, n_layer=4, n_head=8, n_head_kv=4, n_ff=512, n_expert=0, n_expert_used=0,
-                context=4096, arch_name=None):
+                context=16384, arch_name=None):
     rng = np.random.default_rng(SEED)
     tokens, merges = bpe_vocab()
     table = byte_unicode()

@@ -38,13 +38,13 @@ $ llama-bench -m tiny-llama-F16.gguf -r 1 -o json -p 32 -n 8 -t 1,2 -fa 0,1 -b 6
     "n_prompt": 32,
     "n_gen": 0,
     "n_depth": 0,
-    "test_time": "2026-09-24T12:40:01Z",
-    "avg_ns": 6659407,
+    "test_time": "2026-09-24T12:48:15Z",
+    "avg_ns": 6942735,
     "stddev_ns": 0,
-    "avg_ts": 4805.232658,
+    "avg_ts": 4609.134585,
     "stddev_ts": 0.000000,
-    "samples_ns": [ 6659407 ],
-    "samples_ts": [ 4805.23 ]
+    "samples_ns": [ 6942735 ],
+    "samples_ts": [ 4609.13 ]
   },
   {
     "build_commit": "4df29be",
@@ -82,13 +82,13 @@ $ llama-bench -m tiny-llama-F16.gguf -r 1 -o json -p 32 -n 8 -t 1,2 -fa 0,1 -b 6
     "n_prompt": 0,
     "n_gen": 8,
     "n_depth": 0,
-    "test_time": "2026-09-24T12:40:01Z",
-    "avg_ns": 8354635,
+    "test_time": "2026-09-24T12:48:15Z",
+    "avg_ns": 9065345,
     "stddev_ns": 0,
-    "avg_ts": 957.552305,
+    "avg_ts": 882.481582,
     "stddev_ts": 0.000000,
-    "samples_ns": [ 8354635 ],
-    "samples_ts": [ 957.552 ]
+    "samples_ns": [ 9065345 ],
+    "samples_ts": [ 882.482 ]
   },
   {
     "build_commit": "4df29be",
@@ -126,13 +126,13 @@ $ llama-bench -m tiny-llama-F16.gguf -r 1 -o json -p 32 -n 8 -t 1,2 -fa 0,1 -b 6
     "n_prompt": 32,
     "n_gen": 0,
     "n_depth": 0,
-    "test_time": "2026-09-24T12:40:01Z",
-    "avg_ns": 4908605,
+    "test_time": "2026-09-24T12:48:15Z",
+    "avg_ns": 4208042,
     "stddev_ns": 0,
-    "avg_ts": 6519.163795,
+    "avg_ts": 7604.486837,
     "stddev_ts": 0.000000,
-    "samples_ns": [ 4908605 ],
-    "samples_ts": [ 6519.16 ]
+    "samples_ns": [ 4208042 ],
+    "samples_ts": [ 7604.49 ]
   },
   {
     "build_commit": "4df29be",
@@ -170,13 +170,13 @@ $ llama-bench -m tiny-llama-F16.gguf -r 1 -o json -p 32 -n 8 -t 1,2 -fa 0,1 -b 6
     "n_prompt": 0,
     "n_gen": 8,
     "n_depth": 0,
-    "test_time": "2026-09-24T12:40:01Z",
-    "avg_ns": 5652873,
+    "test_time": "2026-09-24T12:48:15Z",
+    "avg_ns": 5531951,
     "stddev_ns": 0,
-    "avg_ts": 1415.209576,
+    "avg_ts": 1446.144407,
     "stddev_ts": 0.000000,
-    "samples_ns": [ 5652873 ],
-    "samples_ts": [ 1415.21 ]
+    "samples_ns": [ 5531951 ],
+    "samples_ts": [ 1446.14 ]
   },
   {
     "build_commit": "4df29be",
@@ -214,13 +214,13 @@ $ llama-bench -m tiny-llama-F16.gguf -r 1 -o json -p 32 -n 8 -t 1,2 -fa 0,1 -b 6
     "n_prompt": 32,
     "n_gen": 0,
     "n_depth": 0,
-    "test_time": "2026-09-24T12:40:01Z",
-    "avg_ns": 7808991,
+    "test_time": "2026-09-24T12:48:15Z",
+    "avg_ns": 7347660,
     "stddev_ns": 0,
-    "avg_ts": 4097.840553,
+    "avg_ts": 4355.128027,
     "stddev_ts": 0.000000,
-    "samples_ns": [ 7808991 ],
-    "samples_ts": [ 4097.84 ]
+    "samples_ns": [ 7347660 ],
+    "samples_ts": [ 4355.13 ]
   },
   {
     "build_commit": "4df29be",
@@ -258,13 +258,13 @@ $ llama-bench -m tiny-llama-F16.gguf -r 1 -o json -p 32 -n 8 -t 1,2 -fa 0,1 -b 6
     "n_prompt": 0,
     "n_gen": 8,
     "n_depth": 0,
-    "test_time": "2026-09-24T12:40:01Z",
-    "avg_ns": 5697526,
+    "test_time": "2026-09-24T12:48:15Z",
+    "avg_ns": 5399668,
     "stddev_ns": 0,
-    "avg_ts": 1404.118208,
+    "avg_ts": 1481.572571,
     "stddev_ts": 0.000000,
-    "samples_ns": [ 5697526 ],
-    "samples_ts": [ 1404.12 ]
+    "samples_ns": [ 5399668 ],
+    "samples_ts": [ 1481.57 ]
   },
   {
     "build_commit": "4df29be",
@@ -302,13 +302,13 @@ $ llama-bench -m tiny-llama-F16.gguf -r 1 -o json -p 32 -n 8 -t 1,2 -fa 0,1 -b 6
     "n_prompt": 32,
     "n_gen": 0,
     "n_depth": 0,
-    "test_time": "2026-09-24T12:40:01Z",
-    "avg_ns": 3868511,
+    "test_time": "2026-09-24T12:48:15Z",
+    "avg_ns": 3764749,
     "stddev_ns": 0,
-    "avg_ts": 8271.916507,
+    "avg_ts": 8499.902650,
     "stddev_ts": 0.000000,
-    "samples_ns": [ 3868511 ],
-    "samples_ts": [ 8271.92 ]
+    "samples_ns": [ 3764749 ],
+    "samples_ts": [ 8499.9 ]
   },
   {
     "build_commit": "4df29be",
@@ -346,13 +346,13 @@ $ llama-bench -m tiny-llama-F16.gguf -r 1 -o json -p 32 -n 8 -t 1,2 -fa 0,1 -b 6
     "n_prompt": 0,
     "n_gen": 8,
     "n_depth": 0,
-    "test_time": "2026-09-24T12:40:01Z",
-    "avg_ns": 3249229,
+    "test_time": "2026-09-24T12:48:15Z",
+    "avg_ns": 3282507,
     "stddev_ns": 0,
-    "avg_ts": 2462.122553,
+    "avg_ts": 2437.161596,
     "stddev_ts": 0.000000,
-    "samples_ns": [ 3249229 ],
-    "samples_ts": [ 2462.12 ]
+    "samples_ns": [ 3282507 ],
+    "samples_ts": [ 2437.16 ]
   },
   {
     "build_commit": "4df29be",
@@ -390,13 +390,13 @@ $ llama-bench -m tiny-llama-F16.gguf -r 1 -o json -p 32 -n 8 -t 1,2 -fa 0,1 -b 6
     "n_prompt": 32,
     "n_gen": 0,
     "n_depth": 0,
-    "test_time": "2026-09-24T12:40:01Z",
-    "avg_ns": 6444210,
+    "test_time": "2026-09-24T12:48:15Z",
+    "avg_ns": 5768104,
     "stddev_ns": 0,
-    "avg_ts": 4965.697890,
+    "avg_ts": 5547.750179,
     "stddev_ts": 0.000000,
-    "samples_ns": [ 6444210 ],
-    "samples_ts": [ 4965.7 ]
+    "samples_ns": [ 5768104 ],
+    "samples_ts": [ 5547.75 ]
   },
   {
     "build_commit": "4df29be",
@@ -434,13 +434,13 @@ $ llama-bench -m tiny-llama-F16.gguf -r 1 -o json -p 32 -n 8 -t 1,2 -fa 0,1 -b 6
     "n_prompt": 0,
     "n_gen": 8,
     "n_depth": 0,
-    "test_time": "2026-09-24T12:40:01Z",
-    "avg_ns": 7983812,
+    "test_time": "2026-09-24T12:48:15Z",
+    "avg_ns": 8929999,
     "stddev_ns": 0,
-    "avg_ts": 1002.027603,
+    "avg_ts": 895.856763,
     "stddev_ts": 0.000000,
-    "samples_ns": [ 7983812 ],
-    "samples_ts": [ 1002.03 ]
+    "samples_ns": [ 8929999 ],
+    "samples_ts": [ 895.857 ]
   },
   {
     "build_commit": "4df29be",
@@ -478,13 +478,13 @@ $ llama-bench -m tiny-llama-F16.gguf -r 1 -o json -p 32 -n 8 -t 1,2 -fa 0,1 -b 6
     "n_prompt": 32,
     "n_gen": 0,
     "n_depth": 0,
-    "test_time": "2026-09-24T12:40:01Z",
-    "avg_ns": 4030281,
+    "test_time": "2026-09-24T12:48:15Z",
+    "avg_ns": 3867146,
     "stddev_ns": 0,
-    "avg_ts": 7939.893025,
+    "avg_ts": 8274.836275,
     "stddev_ts": 0.000000,
-    "samples_ns": [ 4030281 ],
-    "samples_ts": [ 7939.89 ]
+    "samples_ns": [ 3867146 ],
+    "samples_ts": [ 8274.84 ]
   },
   {
     "build_commit": "4df29be",
@@ -522,13 +522,13 @@ $ llama-bench -m tiny-llama-F16.gguf -r 1 -o json -p 32 -n 8 -t 1,2 -fa 0,1 -b 6
     "n_prompt": 0,
     "n_gen": 8,
     "n_depth": 0,
-    "test_time": "2026-09-24T12:40:01Z",
-    "avg_ns": 5353285,
+    "test_time": "2026-09-24T12:48:15Z",
+    "avg_ns": 5358620,
     "stddev_ns": 0,
-    "avg_ts": 1494.409507,
+    "avg_ts": 1492.921685,
     "stddev_ts": 0.000000,
-    "samples_ns": [ 5353285 ],
-    "samples_ts": [ 1494.41 ]
+    "samples_ns": [ 5358620 ],
+    "samples_ts": [ 1492.92 ]
   },
   {
     "build_commit": "4df29be",
@@ -566,13 +566,13 @@ $ llama-bench -m tiny-llama-F16.gguf -r 1 -o json -p 32 -n 8 -t 1,2 -fa 0,1 -b 6
     "n_prompt": 32,
     "n_gen": 0,
     "n_depth": 0,
-    "test_time": "2026-09-24T12:40:01Z",
-    "avg_ns": 7232516,
+    "test_time": "2026-09-24T12:48:15Z",
+    "avg_ns": 7404127,
     "stddev_ns": 0,
-    "avg_ts": 4424.463078,
+    "avg_ts": 4321.913981,
     "stddev_ts": 0.000000,
-    "samples_ns": [ 7232516 ],
-    "samples_ts": [ 4424.46 ]
+    "samples_ns": [ 7404127 ],
+    "samples_ts": [ 4321.91 ]
   },
   {
     "build_commit": "4df29be",
@@ -610,13 +610,13 @@ $ llama-bench -m tiny-llama-F16.gguf -r 1 -o json -p 32 -n 8 -t 1,2 -fa 0,1 -b 6
     "n_prompt": 0,
     "n_gen": 8,
     "n_depth": 0,
-    "test_time": "2026-09-24T12:40:01Z",
-    "avg_ns": 6245855,
+    "test_time": "2026-09-24T12:48:15Z",
+    "avg_ns": 5499007,
     "stddev_ns": 0,
-    "avg_ts": 1280.849459,
+    "avg_ts": 1454.808114,
     "stddev_ts": 0.000000,
-    "samples_ns": [ 6245855 ],
-    "samples_ts": [ 1280.85 ]
+    "samples_ns": [ 5499007 ],
+    "samples_ts": [ 1454.81 ]
   },
   {
     "build_commit": "4df29be",
@@ -654,13 +654,13 @@ $ llama-bench -m tiny-llama-F16.gguf -r 1 -o json -p 32 -n 8 -t 1,2 -fa 0,1 -b 6
     "n_prompt": 32,
     "n_gen": 0,
     "n_depth": 0,
-    "test_time": "2026-09-24T12:40:01Z",
-    "avg_ns": 3757193,
+    "test_time": "2026-09-24T12:48:15Z",
+    "avg_ns": 4214872,
     "stddev_ns": 0,
-    "avg_ts": 8516.996598,
+    "avg_ts": 7592.164127,
     "stddev_ts": 0.000000,
-    "samples_ns": [ 3757193 ],
-    "samples_ts": [ 8517 ]
+    "samples_ns": [ 4214872 ],
+    "samples_ts": [ 7592.16 ]
   },
   {
     "build_commit": "4df29be",
@@ -698,13 +698,13 @@ $ llama-bench -m tiny-llama-F16.gguf -r 1 -o json -p 32 -n 8 -t 1,2 -fa 0,1 -b 6
     "n_prompt": 0,
     "n_gen": 8,
     "n_depth": 0,
-    "test_time": "2026-09-24T12:40:01Z",
-    "avg_ns": 3040238,
+    "test_time": "2026-09-24T12:48:15Z",
+    "avg_ns": 3345771,
     "stddev_ns": 0,
-    "avg_ts": 2631.372939,
+    "avg_ts": 2391.078170,
     "stddev_ts": 0.000000,
-    "samples_ns": [ 3040238 ],
-    "samples_ts": [ 2631.37 ]
+    "samples_ns": [ 3345771 ],
+    "samples_ts": [ 2391.08 ]
   }
 ]
 # ---- stderr ----

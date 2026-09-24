@@ -38,13 +38,13 @@ $ llama-bench -m tiny-qwen3moe-Q4_K_M.gguf -r 1 -o json -p 32 -n 8 -t 2 -ncmoe 0
     "n_prompt": 32,
     "n_gen": 0,
     "n_depth": 0,
-    "test_time": "2026-09-24T12:40:01Z",
-    "avg_ns": 4975265,
+    "test_time": "2026-09-24T12:48:16Z",
+    "avg_ns": 4367718,
     "stddev_ns": 0,
-    "avg_ts": 6431.818205,
+    "avg_ts": 7326.480327,
     "stddev_ts": 0.000000,
-    "samples_ns": [ 4975265 ],
-    "samples_ts": [ 6431.82 ]
+    "samples_ns": [ 4367718 ],
+    "samples_ts": [ 7326.48 ]
   },
   {
     "build_commit": "4df29be",
@@ -82,13 +82,13 @@ $ llama-bench -m tiny-qwen3moe-Q4_K_M.gguf -r 1 -o json -p 32 -n 8 -t 2 -ncmoe 0
     "n_prompt": 0,
     "n_gen": 8,
     "n_depth": 0,
-    "test_time": "2026-09-24T12:40:01Z",
-    "avg_ns": 2414977,
+    "test_time": "2026-09-24T12:48:16Z",
+    "avg_ns": 3202701,
     "stddev_ns": 0,
-    "avg_ts": 3312.660949,
+    "avg_ts": 2497.891623,
     "stddev_ts": 0.000000,
-    "samples_ns": [ 2414977 ],
-    "samples_ts": [ 3312.66 ]
+    "samples_ns": [ 3202701 ],
+    "samples_ts": [ 2497.89 ]
   },
   {
     "build_commit": "4df29be",
@@ -126,13 +126,13 @@ $ llama-bench -m tiny-qwen3moe-Q4_K_M.gguf -r 1 -o json -p 32 -n 8 -t 2 -ncmoe 0
     "n_prompt": 32,
     "n_gen": 0,
     "n_depth": 0,
-    "test_time": "2026-09-24T12:40:01Z",
-    "avg_ns": 4419945,
+    "test_time": "2026-09-24T12:48:16Z",
+    "avg_ns": 5068719,
     "stddev_ns": 0,
-    "avg_ts": 7239.909094,
+    "avg_ts": 6313.232199,
     "stddev_ts": 0.000000,
-    "samples_ns": [ 4419945 ],
-    "samples_ts": [ 7239.91 ]
+    "samples_ns": [ 5068719 ],
+    "samples_ts": [ 6313.23 ]
   },
   {
     "build_commit": "4df29be",
@@ -170,13 +170,13 @@ $ llama-bench -m tiny-qwen3moe-Q4_K_M.gguf -r 1 -o json -p 32 -n 8 -t 2 -ncmoe 0
     "n_prompt": 0,
     "n_gen": 8,
     "n_depth": 0,
-    "test_time": "2026-09-24T12:40:01Z",
-    "avg_ns": 2600727,
+    "test_time": "2026-09-24T12:48:16Z",
+    "avg_ns": 2788410,
     "stddev_ns": 0,
-    "avg_ts": 3076.062962,
+    "avg_ts": 2869.018545,
     "stddev_ts": 0.000000,
-    "samples_ns": [ 2600727 ],
-    "samples_ts": [ 3076.06 ]
+    "samples_ns": [ 2788410 ],
+    "samples_ts": [ 2869.02 ]
   }
 ]
 # ---- stderr ----

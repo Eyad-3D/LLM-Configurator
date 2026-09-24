@@ -5,11 +5,11 @@ $ llama-perplexity -f tiny_corpus.txt -c 128 -b 128 -t 2 --chunks 4 -m tiny-llam
 [1]58946.0603,[2]51222.4351,[3]56253.0662,[4]55470.5168,
 
 # ---- stderr ----
-0.00.009.428 I cmn          init: llama threadpool init, n_threads = 2
-0.00.010.126 I 
-0.00.010.178 I system_info: n_threads = 2 (n_threads_batch = 2) / 4 | CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX_VNNI = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | BMI2 = 1 | AVX512 = 1 | AVX512_VBMI = 1 | AVX512_VNNI = 1 | AVX512_BF16 = 1 | AMX_INT8 = 1 | LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 | 
-0.00.010.228 I perplexity: saving all logits to tests/integration/kld-base.bin
-0.00.010.238 I perplexity: tokenizing the input ..
-0.00.012.101 I perplexity: tokenization took 1.861 ms
-0.00.012.115 I perplexity: calculating perplexity over 4 chunks, n_ctx=128, batch_size=128, n_seq=1
-0.00.018.358 I perplexity: 0.01 seconds per pass - ETA 0.00.036.210 I Final estimate: PPL = 55470.5168 +/- 4384.27345
+0.00.011.727 I cmn          init: llama threadpool init, n_threads = 2
+0.00.012.543 I 
+0.00.012.599 I system_info: n_threads = 2 (n_threads_batch = 2) / 4 | CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX_VNNI = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | BMI2 = 1 | AVX512 = 1 | AVX512_VBMI = 1 | AVX512_VNNI = 1 | AVX512_BF16 = 1 | AMX_INT8 = 1 | LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 | 
+0.00.012.644 I perplexity: saving all logits to tests/integration/kld-base.bin
+0.00.012.649 I perplexity: tokenizing the input ..
+0.00.014.769 I perplexity: tokenization took 2.119 ms
+0.00.014.785 I perplexity: calculating perplexity over 4 chunks, n_ctx=128, batch_size=128, n_seq=1
+0.00.021.209 I perplexity: 0.01 seconds per pass - ETA 0.00.039.428 I Final estimate: PPL = 55470.5168 +/- 4384.27345

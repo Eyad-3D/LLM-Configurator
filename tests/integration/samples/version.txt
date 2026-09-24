@@ -8,7 +8,7 @@ built with GNU 13.3.0 for Linux x86_64
 $ llama-bench --version
 # exit code: 1
 # ---- stdout ----
-usage: /opt/llama-work/llama_cpp_python-0.3.35/vendor/llama.cpp/build/bin/llama-bench [options]
+usage: /opt/llama-work/bin/llama-bench [options]
 
 options:
   -h, --help
@@ -89,7 +89,7 @@ built with GNU 13.3.0 for Linux x86_64
 $ llama-quantize --version
 # exit code: 1
 # ---- stdout ----
-usage: /opt/llama-work/llama_cpp_python-0.3.35/vendor/llama.cpp/build/bin/llama-quantize [--help] [--allow-requantize] [--leave-output-tensor] [--pure] [--imatrix] [--include-weights]
+usage: /opt/llama-work/bin/llama-quantize [--help] [--allow-requantize] [--leave-output-tensor] [--pure] [--imatrix] [--include-weights]
        [--exclude-weights] [--output-tensor-type] [--token-embedding-type] [--tensor-type] [--tensor-type-file]
        [--prune-layers] [--keep-split] [--override-kv] [--dry-run]
        model-f32.gguf [model-quant.gguf] type [nthreads]

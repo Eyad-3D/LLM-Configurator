@@ -90,7 +90,7 @@ def tiny_variant(path, quant="F16", moe=False):
     size = Path(path).stat().st_size
     return Variant(id=f"local/{Path(path).name}", name=Path(path).name, base_repo="local/tiny", repo="local/tiny",
                    revision="local", base_revision="local", filename=Path(path).name, sha256=digest(path), quant=quant,
-                   size_bytes=size, layers=4, kv_heads=2, head_dim=64, max_context=4096,
+                   size_bytes=size, layers=4, kv_heads=4, head_dim=64, max_context=16384,
                    architecture="qwen3_moe" if moe else "llama", experts=8 if moe else 0, active_experts=2 if moe else 0,
                    expert_fraction=0.5 if moe else 0.0, source="local")
 
@@ -339,7 +339,9 @@ class ModuleTests(unittest.TestCase):
         testing = module("testing")
         hardware = module("hardware").scan(False)
         path = model("tiny-llama-F16.gguf")
-        result = testing.speed_test(tool("llama-bench"), tool("llama-server"), tiny_variant(path), config(path), hardware)
+        # The tiny vocabulary spends ~1.3 characters per token (real models ~4), so give the filler prompt room.
+        result = testing.speed_test(tool("llama-bench"), tool("llama-server"), tiny_variant(path), config(path, context=8192),
+                                    hardware)
         summary = result["summary"]
         self.assertGreater(summary["tps"], 0)
         self.assertGreater(summary["pp_tps"], 0)

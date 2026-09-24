@@ -50,9 +50,9 @@ RMS Δp    :  0.014 ± 0.005 %
 Same top p: 100.000 ± 0.000 %
 
 # ---- stderr ----
-0.00.012.533 I cmn          init: llama threadpool init, n_threads = 2
-0.00.014.062 I 
-0.00.014.121 I system_info: n_threads = 2 (n_threads_batch = 2) / 4 | CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX_VNNI = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | BMI2 = 1 | AVX512 = 1 | AVX512_VBMI = 1 | AVX512_VNNI = 1 | AVX512_BF16 = 1 | AMX_INT8 = 1 | LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 | 
-0.00.014.143 W kl_divergence: calculated n_seq=16 exceeds context's n_seq_max=4, capping at 4
-0.00.014.181 I kl_divergence: computing over 4 chunks, n_ctx=128, batch_size=2048, n_seq=4
-0.00.042.213 I kl_divergence: 0.03 seconds per pass - ETA 
+0.00.015.625 I cmn          init: llama threadpool init, n_threads = 2
+0.00.017.212 I 
+0.00.017.271 I system_info: n_threads = 2 (n_threads_batch = 2) / 4 | CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX_VNNI = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | BMI2 = 1 | AVX512 = 1 | AVX512_VBMI = 1 | AVX512_VNNI = 1 | AVX512_BF16 = 1 | AMX_INT8 = 1 | LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 | 
+0.00.017.303 W kl_divergence: calculated n_seq=16 exceeds context's n_seq_max=4, capping at 4
+0.00.017.708 I kl_divergence: computing over 4 chunks, n_ctx=128, batch_size=2048, n_seq=4
+0.00.048.463 I kl_divergence: 0.03 seconds per pass - ETA 

@@ -90,13 +90,13 @@
     "timings": {
       "cache_n": 0,
       "prompt_n": 5,
-      "prompt_ms": 1.146,
-      "prompt_per_token_ms": 0.2292,
-      "prompt_per_second": 4363.001745200699,
+      "prompt_ms": 1.486,
+      "prompt_per_token_ms": 0.2972,
+      "prompt_per_second": 3364.7375504710635,
       "predicted_n": 6,
-      "predicted_ms": 2.575,
-      "predicted_per_token_ms": 0.515,
-      "predicted_per_second": 1941.7475728155339
+      "predicted_ms": 2.558,
+      "predicted_per_token_ms": 0.5115999999999999,
+      "predicted_per_second": 1954.6520719311961
     }
   }
 }

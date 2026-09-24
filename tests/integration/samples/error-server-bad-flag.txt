@@ -1,4 +1,4 @@
-$ llama-server -c 512 -ngl 0 --host 127.0.0.1 --port 46925 -m tiny-llama-F16.gguf --no-such-flag
+$ llama-server -c 512 -ngl 0 --host 127.0.0.1 --port 45383 -m tiny-llama-F16.gguf --no-such-flag
 # exit code: 1
 # ---- stdout ----
 # ---- stderr ----
