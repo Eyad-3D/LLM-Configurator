@@ -138,6 +138,8 @@ def add_entry(store, base_repo, gguf_repo, config_repo=None, family=None, tags=N
         entries = definitions(store)
         if any(e["base_repo"] == base_repo for e in entries):
             raise ValueError(f"{base_repo} is already in the catalogue")
+        if any(e["gguf_repo"] == gguf_repo for e in entries):
+            raise ValueError(f"{gguf_repo} is already used by another catalogue entry")
         if sum(bool(e.get("user")) for e in entries) >= MAX_USER_ENTRIES:
             raise ValueError(f"You can add up to {MAX_USER_ENTRIES} models; remove one first")
         _write_user_copy(store, entries + [entry])

@@ -296,6 +296,8 @@ class UserEntryTests(unittest.TestCase):
             add_entry(self.store, "me/Model-7B", "other/gguf")
         with self.assertRaisesRegex(ValueError, "already"):
             add_entry(self.store, self.shipped[0]["base_repo"], "other/gguf")
+        with self.assertRaisesRegex(ValueError, "already used"):
+            add_entry(self.store, "me/Other", "me/Model-7B-GGUF")
         for bad in ["noslash", "a/b/c", "../etc", "a/..", "a/.hidden", "a b/c", ""]:
             with self.assertRaisesRegex(ValueError, "Invalid Hugging Face repository"):
                 add_entry(self.store, bad, "me/gguf")
