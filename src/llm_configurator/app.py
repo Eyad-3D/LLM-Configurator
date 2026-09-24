@@ -25,15 +25,23 @@ TUNABLE = ("gpu_layers", "threads", "batch", "ubatch", "flash_attn", "cache_type
 
 
 def variants(store, demo=False):
+    """Catalogue variants plus the user's own GGUFs (source "local"), which can be sized and run but never downloaded."""
     if demo:
         return demo_variants()
     result = [Variant(**v) for v in store.get("variants", [])]
     known = {v.id for v in result}
-    for record in store.get("local_variants", []):
+    local = []
+    for record in store.get("local_variants", []):  # registered by `local --add` before v0.4's fix-up round
         try:
-            variant = Variant(**record["variant"])
+            local.append(Variant(**record["variant"]))
         except (KeyError, TypeError, ValueError):
             continue
+    try:
+        from . import discover
+        local += getattr(discover, "local_variants", lambda store: [])(store)
+    except ImportError:
+        pass
+    for variant in local:
         if variant.id not in known:
             result.append(variant)
             known.add(variant.id)
@@ -45,6 +53,17 @@ def find_variant(store, variant_id, demo=False):
     if not variant:
         raise ValueError("Model ID not found. Run 'llm-config models' after refreshing metadata to see the exact IDs.")
     return variant
+
+
+def _call(function, *args, **kwargs):
+    """Call a module built by another workstream, leaving out keyword options its version does not take yet."""
+    try:
+        accepted = inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        return function(*args, **kwargs)
+    if any(p.kind is p.VAR_KEYWORD for p in accepted.values()):
+        return function(*args, **kwargs)
+    return function(*args, **{k: v for k, v in kwargs.items() if k in accepted})
 
 
 def engine_extras(store, function=recommend):
@@ -100,28 +119,41 @@ def binary(store, name):
     return runtime_install.binary(store, name)
 
 
-def local_model(store, variant, verify=True):
-    """A complete local copy of every file of this variant, or None. Never downloads."""
+def local_model(store, variant, verify=True, progress=None, cancel=None):
+    """A complete local copy of every file of this variant, or None. Never downloads.
+
+    With verify=True a file is only returned when its SHA-256 matches the catalogue, so a
+    same-name, same-size file with other contents is never mistaken for the model.
+    """
     for record in store.get("local_variants", []):
         if record.get("variant", {}).get("id") == variant.id and Path(record.get("path", "")).is_file():
             return Path(record["path"])
     if variant.demo:
         return None
     from . import discover
-    found = discover.find_for_variant(store, variant, verify=verify)
+    found = _call(discover.find_for_variant, store, variant, verify=verify, progress=progress, cancel=cancel)
     if found:
         return Path(found)
-    # A finished download in the models folder that discover has not indexed yet.
-    from . import downloads
-    plan = downloads.plan(variant, models_dir(store))
-    if plan["files"] and all(f.get("present") for f in plan["files"]):
-        return models_dir(store) / Path(variant.all_files()[0]["filename"]).name
-    return None
+    # downloads saves shards flat in the models folder even when the catalogue name has a folder (Q4_K_M/x.gguf).
+    wanted = variant.all_files()
+    paths = [models_dir(store) / Path(f["filename"]).name for f in wanted]
+    try:
+        if not all(p.is_file() and p.stat().st_size == f["size_bytes"] for p, f in zip(paths, wanted)):
+            return None
+    except OSError:
+        return None
+    if verify and any(f.get("sha256") and discover.hash_cached(store, p, progress, cancel) != f["sha256"].lower()
+                      for p, f in zip(paths, wanted)):
+        return None
+    return paths[0]
 
 
-def require_model(store, variant):
-    path = local_model(store, variant)
+def require_model(store, variant, progress=None, cancel=None):
+    path = local_model(store, variant, progress=progress, cancel=cancel)
     if not path:
+        if variant.source == "local":
+            raise ValueError(f"The file for {variant.name} {variant.quant} is no longer where it was found. "
+                             "Run: llm-config local --scan")
         raise ValueError(f"{variant.name} {variant.quant} is not on this computer yet. Download it first.")
     return path
 
@@ -134,8 +166,10 @@ def download_plan(store, variant):
 
 
 def download_job(store, variant):
+    if variant.source == "local":
+        raise ValueError("This model is a file on your computer, so there is nothing to download.")
     def run(progress, cancel):
-        existing = local_model(store, variant)
+        existing = local_model(store, variant, progress=_stage(progress, "verify"), cancel=cancel)
         if existing:
             return {"reused": True, "bytes": 0, "filename": existing.name, "variant_id": variant.id}
         from . import downloads
@@ -157,10 +191,20 @@ def placement(candidate):
     return candidate.get("mode") or ("cpu" if not layers else "gpu" if layers == total else "split")
 
 
-def best_tune(store, variant_id, context, where, fingerprint=None):
-    """Highest-speed stored tune for this variant, context and placement on this computer."""
+def _tuned_kv(record):
+    return record.get("kv_cache_type") or (record.get("best") or {}).get("cache_type_k") or "f16"
+
+
+def best_tune(store, variant_id, context, where, fingerprint=None, users=None, kv_cache_type=None):
+    """Highest-speed stored tune for this variant, context and placement on this computer.
+
+    A tune is measured for one user and one notepad (KV cache) format, so with `users` or
+    `kv_cache_type` given, only tunes made for the same values count.
+    """
     matches = [r for r in store.get("tuned", []) if r.get("variant_id") == variant_id and r.get("context") == context
                and r.get("placement") == where and (fingerprint is None or r.get("fingerprint") == fingerprint)
+               and (users is None or (r.get("users") or 1) == users)
+               and (kv_cache_type is None or _tuned_kv(r) == kv_cache_type)
                and isinstance(r.get("best"), dict)]
     return max(matches, key=lambda r: ((r.get("best_result") or {}).get("tps") or 0, r.get("timestamp") or ""), default=None)
 
@@ -168,9 +212,10 @@ def best_tune(store, variant_id, context, where, fingerprint=None):
 def launch_config(store, candidate, hardware, model_path=None, tuned=False, **overrides):
     changes = {}
     if tuned:
-        record = best_tune(store, candidate["variant_id"], candidate["context"], placement(candidate), hardware.get("fingerprint"))
+        record = best_tune(store, candidate["variant_id"], candidate["context"], placement(candidate), hardware.get("fingerprint"),
+                           users=candidate.get("users") or 1, kv_cache_type=candidate.get("kv_cache_type") or "f16")
         if not record:
-            raise ValueError("No saved tune for this model, context and placement yet. Run a tune first.")
+            raise ValueError("No saved tune for this model, context, placement and notepad format yet. Run a tune first.")
         changes = {k: record["best"][k] for k in TUNABLE if k in record["best"]}
     return from_candidate(candidate, model_path, hardware, **{**changes, **overrides})
 
@@ -214,18 +259,20 @@ def _stage(progress, step):
 
 # ---- Test, tune, quality ------------------------------------------------------------
 
-def test_job(store, variant, candidate, hardware, kind="full", tuned=False):
+def test_job(store, variant, candidate, hardware, kind="full", tuned=False, min_tps=None):
+    """min_tps: the speed the user asked for; below it the verdict is "works, but slowly"."""
     if kind not in TEST_KINDS:
         raise ValueError("Test kind must be smoke, speed or full")
     def run(progress, cancel):
         from . import testing
-        path = require_model(store, variant)
+        path = require_model(store, variant, _stage(progress, "verify"), cancel)
         config = launch_config(store, candidate, hardware, path, tuned)
         server = binary(store, "llama-server")
         bench = binary(store, "llama-bench") if kind != "smoke" else None
         # Both naming styles so the testing module can read either.
         commands = {"server": server, "bench": bench, "llama-server": server, "llama-bench": bench}
-        return testing.run_tests(store, variant, config, commands, kind=kind, hardware=hardware, progress=progress, cancel=cancel)
+        return _call(testing.run_tests, store, variant, config, commands, kind=kind, hardware=hardware, progress=progress,
+                     cancel=cancel, min_tps=min_tps or None)
     return run
 
 
@@ -236,27 +283,35 @@ def tune_job(store, variant, candidate, hardware, budget_seconds=300, goal="gene
         raise ValueError("Goal must be generation, balanced or prompt")
     def run(progress, cancel):
         from . import tuner
-        path = require_model(store, variant)
+        path = require_model(store, variant, _stage(progress, "verify"), cancel)
         base = launch_config(store, candidate, hardware, path)
-        result = tuner.tune(binary(store, "llama-bench"), variant, base, hardware, budget_seconds=budget_seconds,
-                            goal=goal, progress=progress, cancel=cancel)
+        kv = candidate.get("kv_cache_type") or "f16"
+        result = _call(tuner.tune, binary(store, "llama-bench"), variant, base, hardware, budget_seconds=budget_seconds,
+                       goal=goal, progress=progress, cancel=cancel, allow_kv_compression=False)
+        # Paths stay on this computer: the page and the store get the tuned settings, not the model's folder.
         best = {k: v for k, v in (result.get("best") or {}).items() if k != "model_path"}
-        record = {"id": secrets.token_hex(6), "variant_id": variant.id, "sha256": variant.sha256, "context": candidate["context"],
-                  "users": candidate.get("users", 1), "placement": placement(candidate), "gpu_layers": candidate["gpu_layers"],
-                  "fingerprint": hardware.get("fingerprint"), "timestamp": now(), "goal": goal, "budget_seconds": budget_seconds,
-                  "best": best, "baseline": result.get("baseline"), "best_result": result.get("best_result"),
-                  "improvement": result.get("improvement"), "stopped": result.get("stopped"), "notes": result.get("notes", []),
-                  "trials": len(result.get("trials") or [])}
+        changes = {k: best[k] for k in TUNABLE if k in best and best[k] != base.get(k)}
+        # Pinned shape (FIXUPS.md): {**tune_result, variant_id, sha256, fingerprint, context, gpu_layers, n_cpu_moe,
+        # kv_cache_type, timestamp}; id, users, placement, goal and budget_seconds are extra keys best_tune reads.
+        # kv_cache_type is the notepad format the user asked for, so --tuned finds the tune again even when the
+        # tuner had to compress the notepad to fit (that choice stays in best.cache_type_k).
+        record = {**result, "best": best, "id": secrets.token_hex(6), "variant_id": variant.id, "sha256": variant.sha256,
+                  "fingerprint": hardware.get("fingerprint"), "context": candidate["context"],
+                  "gpu_layers": best.get("gpu_layers", candidate["gpu_layers"]),
+                  "n_cpu_moe": best.get("n_cpu_moe", candidate.get("n_cpu_moe") or 0),
+                  "kv_cache_type": kv, "timestamp": now(), "goal": goal,
+                  "users": candidate.get("users") or 1, "placement": placement(candidate), "budget_seconds": budget_seconds}
+        # No §2.3 "tune" measurement: the tuner measures at a shallow depth and engine.matching_speed would show
+        # that faster number as "tested on this computer" at the full context.
         if result.get("stopped") != "cancelled":
             store.append("tuned", record)
-        # Paths stay on this computer: the page gets the tuned settings, not the model's folder.
-        return {**result, "best": best, "record_id": record["id"]}
+        return {**result, "best": best, "changes": changes, "record_id": record["id"]}
     return run
 
 
 def start_server(store, variant, candidate, hardware, tuned=False, progress=None, cancel=None):
     from . import llama_server
-    path = require_model(store, variant)
+    path = require_model(store, variant, progress, cancel)
     config = launch_config(store, candidate, hardware, path, tuned)
     server = llama_server.LlamaServer(binary(store, "llama-server"), config)
     server.start(progress=progress, cancel=cancel)
@@ -276,13 +331,19 @@ def quiz_job(store, variant, candidate, hardware, workload="general", include_ne
         server, config = start_server(store, variant, candidate, hardware, progress=_stage(progress, "start"), cancel=cancel)
         try:
             quiz = evals.run_quiz(server.chat, workload, progress=_stage(progress, "quiz"), cancel=cancel)
-            store.append("quality_results", _quality_record("quiz", variant, candidate, workload=workload,
-                         **{k: quiz.get(k) for k in ["correct", "total", "score", "ci_low", "ci_high", "seconds", "note"]}))
             needle = None
             if include_needle:
                 check_cancel(cancel)
-                needle = evals.needle_test(server.chat, server.tokenize, config["context"], progress=_stage(progress, "needle"), cancel=cancel)
-                store.append("quality_results", _quality_record("needle", variant, candidate, result=needle))
+                try:
+                    needle = evals.needle_test(server.chat, server.tokenize, config["context"], progress=_stage(progress, "needle"), cancel=cancel)
+                except ValueError as error:  # keep the finished quiz; say why the recall test did not run
+                    needle = {"kind": "needle", "error": str(error), "note": f"The long-document test could not run: {error}"}
+            # Pinned shape (FIXUPS.md): one record per quiz run, the needle result inside it.
+            store.append("quality_results", _quality_record(
+                "quiz", variant, candidate, candidate_id=candidate.get("id"), workload=workload,
+                **{k: quiz.get(k) for k in ["score", "ci_low", "ci_high", "correct", "total"]}, needle=needle, result=quiz))
+            if needle is not None:  # pre-fix-up readers look for a separate needle record
+                store.append("quality_results", _quality_record("needle", variant, candidate, candidate_id=candidate.get("id"), result=needle))
             return {"quiz": quiz, "needle": needle}
         finally:
             server.stop()
@@ -322,7 +383,7 @@ def compare_job(store, entries, hardware, prompts, max_tokens=512):
     def run(progress, cancel):
         from . import evals
         for _, variant, _ in entries:
-            require_model(store, variant)  # fail before loading anything
+            require_model(store, variant, _stage(progress, "verify"), cancel)  # fail before loading anything
         sessions = []
         def factory(variant, candidate):
             def make():
@@ -340,23 +401,50 @@ def compare_job(store, entries, hardware, prompts, max_tokens=512):
     return run
 
 
-def quant_check_job(store, reference, others):
+def _without_paths(value):
+    """Results kept in the store reach the browser page; folder names stay on this computer."""
+    if isinstance(value, dict):
+        return {k: _without_paths(v) for k, v in value.items() if k != "path"}
+    if isinstance(value, list):
+        return [_without_paths(v) for v in value]
+    return value
+
+
+def _check_config(store, variant, hardware, path):
+    """Placement for llama-perplexity: as many GPU layers as fit at its short context, else the CPU.
+
+    None (llama.cpp's own default) when the hardware cannot be read."""
+    context = min(512, variant.max_context)
+    try:
+        try:
+            candidate = candidate_for(store, variant, hardware, context=context)
+        except ValueError:
+            candidate = candidate_for(store, variant, hardware, context=context, gpu_layers=0)
+        return launch_config(store, candidate, hardware, path)
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def quant_check_job(store, reference, others, hardware=None):
     def run(progress, cancel):
         from . import quantcheck
-        reference_path = require_model(store, reference)
+        reference_path = require_model(store, reference, _stage(progress, "verify"), cancel)
         labels = {}
         for variant in others:
             label = variant.quant if variant.quant not in labels else variant.id
             labels[label] = variant
-        paths = {label: str(require_model(store, variant)) for label, variant in labels.items()}
-        result = quantcheck.kl_check(binary(store, "llama-perplexity"), str(reference_path), paths,
-                                     progress=progress, cancel=cancel)
+        paths = {label: str(require_model(store, variant, _stage(progress, "verify"), cancel)) for label, variant in labels.items()}
+        config = _check_config(store, reference, hardware or scan(False), reference_path)
+        result = _without_paths(_call(quantcheck.kl_check, binary(store, "llama-perplexity"), str(reference_path), paths,
+                                      config=config, progress=progress, cancel=cancel))
         by_variant = {labels[label].id: value for label, value in (result.get("results") or {}).items() if label in labels}
-        store.append("quality_results", {"kind": "quant_check", "variant_id": reference.id, "reference_variant_id": reference.id,
-                                         "name": reference.name, "reference_quant": reference.quant,
-                                         "variant_ids": [v.id for v in others], "results": by_variant,
-                                         "notes": result.get("notes", []), "timestamp": now()})
-        return {**result, "reference": reference.quant, "variant_ids": {label: v.id for label, v in labels.items()}}
+        # Pinned shape (FIXUPS.md): {kind, variant_id: <reference>, result, timestamp}; the rest are extra keys.
+        store.append("quality_results", {"kind": "quant_check", "variant_id": reference.id, "result": result, "timestamp": now(),
+                                         "reference_variant_id": reference.id, "name": reference.name,
+                                         "reference_quant": reference.quant, "variant_ids": [v.id for v in others],
+                                         "results": by_variant, "notes": result.get("notes", [])})
+        return {**result, "reference": reference.quant, "reference_result": result.get("reference"),
+                "variant_ids": {label: v.id for label, v in labels.items()}}
     return run
 
 
@@ -413,16 +501,21 @@ def scan_job(store, extra_dirs=()):
 
 
 def add_local_job(store, path):
-    """Register any GGUF on disk so it can be tested, tuned and served like a catalogue model."""
-    path = Path(path).expanduser().resolve()
-    if not path.is_file() or path.suffix.lower() != ".gguf":
-        raise ValueError("Choose an existing .gguf file")
+    """Register any GGUF on disk so it can be tested, tuned and served like a catalogue model.
+
+    Any part of a split model selects the whole model (llama.cpp loads the first part). The file is
+    hashed first, so a catalogue copy is recognised exactly and a local model gets a stable ID. Files
+    without a .gguf name (Ollama blobs) are accepted when their contents are GGUF.
+    """
+    path = Path(path).expanduser().absolute()
+    if not path.is_file():
+        raise ValueError(f"{path.name} was not found. Check the path and try again.")
     def run(progress, cancel):
         from . import discover, gguf
-        sha = discover.hash_cached(store, path, progress=progress, cancel=cancel)
-        variant = gguf.variant_from_file(path, sha256=sha)
-        record = {"variant": variant.to_dict(), "path": str(path), "added_at": now()}
-        store.update("local_variants", lambda items: [r for r in (items or []) if r.get("variant", {}).get("id") != variant.id] + [record], [])
-        return record
+        parts = gguf.shard_paths(path)
+        for part in parts:
+            discover.hash_cached(store, part, progress=progress, cancel=cancel)
+        record = discover.add_file(store, parts[0])
+        return {**record, "model_id": record.get("variant_id") or record.get("local_variant_id")}
     return run
 
