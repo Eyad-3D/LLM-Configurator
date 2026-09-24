@@ -153,7 +153,8 @@ class _Progress:
         name = self.info.get("file", "")
         default = {"checking": f"Checking {name} already on disk", "downloading": f"Downloading {name}",
                    "verifying": f"Checking {name} is complete and undamaged", "done": "Download complete"}
-        self.callback({"stage": stage, "done": self.done, "total": self.total, "message": message or default.get(stage, name),
+        self.callback({"stage": stage, "done": self.done, "total": self.total, "unit": "bytes",
+                       "message": message or default.get(stage, name),
                        "bytes_per_second": speed, "eta_seconds": eta, **self.info})
 
 

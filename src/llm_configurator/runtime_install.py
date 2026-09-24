@@ -99,6 +99,16 @@ def _normal_system(system, machine):
 
 
 def _gpu_kinds(hardware):
+    """(NVIDIA cards, other cards) among the scan's `gpus`, the ones whose free memory can be read.
+
+    `other_gpus` (Windows AMD/Intel adapters, NVIDIA without nvidia-smi) are deliberately left out: the engine
+    never places layers on a GPU whose free memory is unknown, so a GPU build would only add a larger download
+    and a driver that can fail to start. Once hardware.py can read such a card, it moves to `gpus` and the
+    Vulkan (or CUDA) build is chosen here.
+
+    Rule for callers: whenever the installed build has a GPU backend, a CPU-only run must pass `-dev none`
+    (launch config `gpu_layers=0` with `gpu_backend` set; engine sets it from any GPU it sees, `other_gpus`
+    included). Otherwise llama.cpp still uses the GPU for its work buffers, outside the memory budget."""
     gpus = [g for g in (hardware or {}).get("gpus") or [] if isinstance(g, dict)]
     nvidia = [g for g in gpus if (g.get("vendor") or "").lower() == "nvidia" or g.get("backend") == "cuda"
               or "nvidia" in (g.get("name") or "").lower()]
@@ -162,6 +172,10 @@ def choose_asset(release, hardware, system=None, machine=None, allow_unverified=
         by_backend.setdefault(info["backend"], []).append(info)
     nvidia, others = _gpu_kinds(hardware)
     notes, order = [], []
+    unread = [g for g in (hardware or {}).get("other_gpus") or [] if isinstance(g, dict) and g.get("backend") != "metal"]
+    if unread and not (nvidia or others) and system != "macos":
+        notes.append(f"{unread[0].get('name') or 'a graphics card'} was found, but its free memory cannot be read, so "
+                     "the app would never place a model on it")
     if system == "macos":
         order = ["metal", "cpu"] if machine == "arm64" else ["cpu", "metal"]
     elif nvidia:
@@ -361,7 +375,7 @@ def _stream(response, part, have, size, hasher, record, progress, cancel, done_b
                 speed = round(received / elapsed) if elapsed >= 0.5 else None
                 remaining = (grand_total or size) - (done_before + written)
                 progress({"stage": "download", "done": done_before + written, "total": grand_total or size,
-                          "message": f"Downloading {record['name']}", "bytes_per_second": speed,
+                          "unit": "bytes", "message": f"Downloading {record['name']}", "bytes_per_second": speed,
                           "eta_seconds": round(remaining / speed) if speed else None})
 
 
@@ -929,10 +943,8 @@ def install(store, hardware, progress=None, cancel=None, release=None, allow_unv
         notes = [f"The {choice['backend']} build would not start here, so the CPU-only build was installed instead. "
                  "Updating your graphics driver may let the faster build work."]
         choice = cpu
+    notes += _forget_chosen_folder(store)
     result = detect(store)
-    if result["source"] == "configured":
-        notes.append("The new llama.cpp was installed, but the app keeps using the llama.cpp folder you chose earlier "
-                     "with 'llm-config runtime use'. Remove that setting to switch to the new install.")
     result["warnings"] = notes + result["warnings"]
     result["reason"] = choice["reason"]
     if choice.get("unverified"):
@@ -975,7 +987,20 @@ def install_archive(store, archive_path, progress=None, cancel=None):
             "cuda": ".".join(map(str, guess["cuda"])) if guess.get("cuda") else None, "source": "archive",
             "asset": archive.name, "sha256": _sha256(archive), "companions": []}
     _finish(store, [archive], info, progress, cancel)
-    return detect(store)
+    notes = _forget_chosen_folder(store)
+    result = detect(store)
+    result["warnings"] = notes + result["warnings"]
+    return result
+
+
+def _forget_chosen_folder(store):
+    """An install the user just asked for (web page or CLI) must be the one used. detect() prefers a folder
+    chosen with 'runtime use', so that choice is cleared, and the returned note says so."""
+    if not (store.get("settings") or {}).get("runtime_dir"):
+        return []
+    store.update("settings", lambda saved: {k: v for k, v in (saved or {}).items() if k != "runtime_dir"}, {})
+    return ["The app now uses this new llama.cpp instead of the folder you chose earlier with 'llm-config runtime use'. "
+            "To go back to that folder, run 'llm-config runtime use' with it again."]
 
 
 def use_directory(store, directory):

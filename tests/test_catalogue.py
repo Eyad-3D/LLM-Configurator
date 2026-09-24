@@ -493,5 +493,60 @@ class RefreshTests(unittest.TestCase):
             self.assertEqual(sorted(v["base_repo"] for v in store.get("variants")), ["t/a", "t/b"])
 
 
+class RedirectHeaderTests(unittest.TestCase):
+    """get_json must not carry HF_TOKEN or the rankings key to another host on a redirect (like downloads.py)."""
+
+    def serve(self, handler):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        server = ThreadingHTTPServer(("127.0.0.1", 0), type("H", (BaseHTTPRequestHandler,), {
+            "do_GET": handler, "log_message": lambda *a: None}))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server.server_address[1]
+
+    def redirect_through(self, target_host):
+        """A server that redirects /api to `target_host` (same port) and records the headers /final receives."""
+        seen, port = [], []
+
+        def handle(handler):
+            if handler.path == "/api":
+                handler.send_response(302)
+                handler.send_header("Location", f"http://{target_host}:{port[0]}/final")
+                handler.send_header("Content-Length", "0")
+                handler.end_headers()
+                return
+            seen.append({k.lower(): v for k, v in handler.headers.items()})
+            body = b'{"ok": true}'
+            handler.send_response(200)
+            handler.send_header("Content-Length", str(len(body)))
+            handler.end_headers()
+            handler.wfile.write(body)
+        port.append(self.serve(handle))
+        # Local servers only: keep the machine's proxy settings out of the way.
+        with patch.dict("os.environ", {"no_proxy": "*", "NO_PROXY": "*"}):
+            result = catalogue.get_json(f"http://127.0.0.1:{port[0]}/api",
+                                        {"Authorization": "Bearer hf_secret", "x-api-key": "aa_secret"})
+        self.assertEqual(result, {"ok": True})
+        return seen[0]
+
+    def test_cross_host_redirect_drops_credentials(self):
+        headers = self.redirect_through("localhost")
+        self.assertNotIn("authorization", headers)
+        self.assertNotIn("x-api-key", headers)
+        self.assertIn("user-agent", headers)
+
+    def test_same_host_redirect_keeps_credentials(self):
+        headers = self.redirect_through("127.0.0.1")
+        self.assertEqual(headers.get("authorization"), "Bearer hf_secret")
+        self.assertEqual(headers.get("x-api-key"), "aa_secret")
+
+    def test_https_to_http_redirect_is_refused(self):
+        from urllib.request import Request
+        request = Request("https://huggingface.co/api/models/x", headers={"Authorization": "Bearer hf_secret"})
+        with self.assertRaisesRegex(ValueError, "HTTPS"):
+            catalogue._MetadataRedirect().redirect_request(request, None, 302, "Found", {}, "http://cdn.example/x")
+
+
 if __name__ == "__main__":
     unittest.main()
