@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -32,6 +33,8 @@ MAX_EXTRACTED_BYTES = 8 * GIB      # stops "zip bombs" (tiny archives that unpac
 MAX_MEMBERS = 20000
 VERSION_TIMEOUT = 15
 CHUNK = 1024**2
+PROGRESS_INTERVAL = 0.2            # at most five progress updates a second, like model downloads
+_clock = time.monotonic
 HOMEBREW_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin", "~/.linuxbrew/bin")
 
 # Oldest NVIDIA driver that fully supports each CUDA toolkit (Linux, Windows). Source: NVIDIA CUDA
@@ -335,6 +338,7 @@ def _download(record, folder, progress=None, cancel=None, done_before=0, grand_t
 
 
 def _stream(response, part, have, size, hasher, record, progress, cancel, done_before, grand_total):
+    started, last, received = _clock(), None, 0
     with part.open("ab" if have else "wb") as output:
         written = have
         while True:
@@ -349,9 +353,16 @@ def _stream(response, part, have, size, hasher, record, progress, cancel, done_b
                 raise ValueError(f"{record['name']} is bigger than GitHub said it would be; stopped and deleted it.")
             output.write(chunk)
             hasher.update(chunk)
-            if progress:
+            received += len(chunk)
+            moment = _clock()
+            if progress and (last is None or moment - last >= PROGRESS_INTERVAL or written == size):
+                last = moment
+                elapsed = moment - started
+                speed = round(received / elapsed) if elapsed >= 0.5 else None
+                remaining = (grand_total or size) - (done_before + written)
                 progress({"stage": "download", "done": done_before + written, "total": grand_total or size,
-                          "message": f"Downloading {record['name']}"})
+                          "message": f"Downloading {record['name']}", "bytes_per_second": speed,
+                          "eta_seconds": round(remaining / speed) if speed else None})
 
 
 def _sha256(path):
@@ -916,6 +927,9 @@ def install(store, hardware, progress=None, cancel=None, release=None, allow_unv
                  "Updating your graphics driver may let the faster build work."]
         choice = cpu
     result = detect(store)
+    if result["source"] == "configured":
+        notes.append("The new llama.cpp was installed, but the app keeps using the llama.cpp folder you chose earlier "
+                     "with 'llm-config runtime use'. Remove that setting to switch to the new install.")
     result["warnings"] = notes + result["warnings"]
     result["reason"] = choice["reason"]
     if choice.get("unverified"):

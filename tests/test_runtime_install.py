@@ -159,7 +159,7 @@ class Base(unittest.TestCase):
         patches = [mock.patch.object(ri, "_run_version", side_effect=fake_run),
                    mock.patch.object(ri, "_run_devices", side_effect=fake_devices),
                    mock.patch.object(ri, "_path_candidates", return_value=iter(())),
-                   mock.patch.object(ri, "CHUNK", 16)]
+                   mock.patch.object(ri, "CHUNK", 16), mock.patch.object(ri, "PROGRESS_INTERVAL", 0)]
         for patch in patches:
             patch.start()
             self.addCleanup(patch.stop)
@@ -474,7 +474,17 @@ class DownloadTests(Base):
             path = ri._download(self.record, self.folder, progress=events.append)
         self.assertEqual(path.read_bytes(), self.data)
         self.assertEqual(events[-1]["done"], len(self.data))
-        self.assertEqual(set(events[0]), {"stage", "done", "total", "message"})
+        self.assertEqual(set(events[0]), {"stage", "done", "total", "message", "bytes_per_second", "eta_seconds"})
+
+    def test_progress_is_throttled_and_has_speed(self):
+        events, ticks = [], iter(range(10**6))
+        with mock.patch.object(ri, "_open", FakeNet({self.record["name"]: self.data})), \
+                mock.patch.object(ri, "PROGRESS_INTERVAL", 1000), mock.patch.object(ri, "_clock", lambda: next(ticks)):
+            ri._download(self.record, self.folder, progress=events.append)
+        self.assertEqual(len(events), 2)          # the first update and the last one, not one per chunk
+        self.assertEqual(events[-1]["done"], len(self.data))
+        self.assertGreater(events[-1]["bytes_per_second"], 0)
+        self.assertEqual(events[-1]["eta_seconds"], 0)
 
     def test_bad_hash_deletes_partial(self):
         with mock.patch.object(ri, "_open", FakeNet({self.record["name"]: self.data[:-1] + b"!"})):
@@ -631,6 +641,16 @@ class InstallTests(Base):
         folder = Path(result["directory"])
         self.assertTrue((folder / "libcudart.so.13").is_file())
         self.assertFalse((folder / "libggml-evil.so").exists() or (folder / "libggml-evil.so").is_symlink())
+
+    def test_install_says_when_a_chosen_folder_still_wins(self):
+        mine = self.root / "mine"
+        mine.mkdir()
+        (mine / "llama-server").write_text(GOOD)
+        (mine / "llama-server").chmod(0o755)
+        self.store.put("settings", {"runtime_dir": str(mine)})
+        result = self.run_install({"llama-b11158-bin-ubuntu-x64.tar.gz": tar_bytes(server_tree())}, NONE)
+        self.assertEqual(result["source"], "configured")
+        self.assertIn("keeps using the llama.cpp folder you chose", result["warnings"][0])
 
     def test_damaged_archive_is_a_plain_error(self):
         archive = self.root / "llama-b1-bin-ubuntu-x64.tar.gz"
