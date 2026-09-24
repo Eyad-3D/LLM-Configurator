@@ -10,24 +10,24 @@ LLM Configurator looks at your hardware and walks you through one loop:
 4. **Tune** – it tries different settings and keeps the fastest safe ones.
 5. **Use** – it gives the model an address that chat apps and code on your computer can connect to (the same way they'd connect to ChatGPT), or ready-made settings for Ollama, LM Studio and more.
 
+The app has no chat window of its own: you chat through an app you connect to it, such as Open WebUI, Ollama or LM Studio.
+
 It never makes up numbers. If something is unknown, it says "unknown". If something is an estimate, it says "estimate".
 
 > **Status:** v0.4 is new. The memory and speed maths still need checking on more real machines. Test a setup before you rely on it.
 
 ## Quick start
 
-You need **[Python](https://www.python.org/downloads/) 3.10 or newer**. Type the commands below in a terminal (**PowerShell** on Windows, **Terminal** on macOS). Most computers with 8 GB of memory or more can run small models; more memory means bigger, smarter models.
-
-> **Right now, use "From source".** The shorter `uvx` / `pipx` options work once v0.4.0 is published on PyPI (the Python package store).
-
-**From source** (needs [Git](https://git-scm.com/downloads), or download the ZIP from GitHub and unzip it):
+You need **[Python](https://www.python.org/downloads/) 3.10 or newer** (on Windows, tick **"Add python.exe to PATH"** when installing). Open a terminal (**PowerShell** on Windows, not Command Prompt; **Terminal** on macOS) and type these lines **one at a time**. The install line takes about a minute and ends with `Successfully installed ...`. Most computers with 8 GB of memory or more can run small models; more memory means bigger, smarter models.
 
 <details open>
 <summary>Windows (PowerShell)</summary>
 
 ```powershell
-git clone https://github.com/Eyad-3D/LLM-Configurator.git; cd LLM-Configurator
-py -m venv .venv; .\.venv\Scripts\python.exe -m pip install .
+git clone https://github.com/Eyad-3D/LLM-Configurator.git
+cd LLM-Configurator
+py -m venv .venv
+.\.venv\Scripts\python.exe -m pip install .
 .\.venv\Scripts\llm-config.exe serve
 ```
 </details>
@@ -36,51 +36,29 @@ py -m venv .venv; .\.venv\Scripts\python.exe -m pip install .
 <summary>macOS / Linux</summary>
 
 ```bash
-git clone https://github.com/Eyad-3D/LLM-Configurator.git && cd LLM-Configurator
-python3 -m venv .venv && .venv/bin/python -m pip install .
+git clone https://github.com/Eyad-3D/LLM-Configurator.git
+cd LLM-Configurator
+python3 -m venv .venv
+.venv/bin/python -m pip install .
 .venv/bin/llm-config serve
 ```
 </details>
 
-To start it again later, open a terminal in the `LLM-Configurator` folder and run just the last line.
+No [Git](https://git-scm.com/downloads)? Download the ZIP from GitHub, unzip it, open a terminal in the `LLM-Configurator-main` folder and start from the third line. [Getting started](https://github.com/Eyad-3D/LLM-Configurator/blob/main/docs/getting-started.md) walks through this step by step.
 
-**One command with [uv](https://docs.astral.sh/uv/getting-started/installation/)** (install uv first):
+Your browser opens **http://127.0.0.1:8765** (`127.0.0.1` means "this computer"; paste the address into your browser if nothing opens). **Keep the terminal open** while you use the app; press **Ctrl+C** in it to stop. To start again later, open a terminal in the project folder and run just the last line. To look around first with made-up models (no internet, no downloads), add `--demo` to the end of that line. Stuck? See [Troubleshooting](https://github.com/Eyad-3D/LLM-Configurator/blob/main/docs/troubleshooting.md).
 
-```bash
-uvx llm-configurator serve
-```
-
-**Or with [pipx](https://pipx.pypa.io/stable/installation/)** (install pipx first; it keeps the app in its own box, away from your other Python tools):
-
-```bash
-pipx install llm-configurator
-llm-config serve
-```
-
-Your browser opens **http://127.0.0.1:8765** (if it doesn't, paste that address into your browser). Stop the app with **Ctrl+C** in the terminal. Want to look around first, with no internet and no downloads? Add `--demo` to the last command.
-
-More detail: [Getting started](https://github.com/Eyad-3D/LLM-Configurator/blob/main/docs/getting-started.md).
+**After v0.4.0 is published on PyPI** (the Python package store; not yet), one command will do: `uvx llm-configurator serve` (with [uv](https://docs.astral.sh/uv/getting-started/installation/)) or `pipx install llm-configurator` then `llm-config serve` (with [pipx](https://pipx.pypa.io/stable/installation/)).
 
 ## What happens on your computer
 
 > - **Runs locally.** The app and any model server it starts listen on `127.0.0.1` only (your own computer). Other devices on your network cannot reach them.
 > - **Nothing is downloaded without you asking.** Model files and the llama.cpp engine are only fetched when you click **Download** / **Install the engine** or run the matching command. Downloads are checked against their published fingerprint (a unique code that changes if even one byte is different) before use.
-> - **No tracking.** The app sends no usage data. It only contacts Hugging Face (model info and files), GitHub (the llama.cpp engine, community results you choose to import) and, if you add a key, Artificial Analysis (quality rankings).
+> - **No tracking.** The app sends no usage data. It only contacts Hugging Face (the main website where AI models are shared: model info and files), GitHub (the llama.cpp engine, community results you choose to import) and, if you add a key, Artificial Analysis (quality rankings).
 > - **Your key stays in your system's password store** (Windows Credential Manager, macOS Keychain, or a Linux keyring). Never in a plain file.
 > - **Sharing is manual.** Community sharing only opens a pre-filled GitHub page. You review it and press submit yourself.
 >
 > Full details: [Privacy and safety](https://github.com/Eyad-3D/LLM-Configurator/blob/main/docs/privacy-and-safety.md).
-
-## Screenshots
-
-_Screenshots to be added. What to capture:_
-
-1. _The guided questions screen (one question, e.g. "What will you mainly use it for?")._
-2. _The results screen with three recommendation cards showing verdict badges ("Runs well", "Not tested yet")._
-3. _The "Get it running" panel, mid-download, with the progress bar and the six steps._
-4. _The test results: reading speed, first-word delay, writing speed and memory used vs estimate._
-5. _The "Use it" step with the OpenAI address shown and the export tabs._
-6. _The Quality panel's blind "Try my prompts" comparison._
 
 ## Learn more
 
