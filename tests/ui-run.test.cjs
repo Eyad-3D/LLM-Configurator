@@ -271,7 +271,7 @@ test("Get it running opens a six-step panel with states and never shows file pat
   assert.match(s.panel().textContent, /compressed notes \(KV cache\)/i);
   await until(() => /Not installed/.test(s.stepText("runtime")), "runtime state");
   assert.match(s.stepText("download"), /Not downloaded/);
-  assert.match(s.stepText("test"), /Waiting/);
+  assert.match(s.stepText("test"), /Not yet/);
   assert.match(s.stepText("test"), /Get the engine first/);
   assert.equal(s.$("run-step-runtime-toggle").getAttribute("aria-expanded"), "true");
   assert.doesNotMatch(s.panel().textContent, /\/home\/alice/);
@@ -393,7 +393,7 @@ test("not enough disk space blocks the download with a plain reason", async () =
   });
   await s.open();
   await until(() => /Not enough free disk space/.test(s.stepText("download")), "blocked");
-  assert.match(s.stepText("download"), /Waiting/);
+  assert.match(s.stepText("download"), /Not yet/);
   await s.close();
 });
 
@@ -758,4 +758,78 @@ test("quality step mounts QualityPanel with the agreed context, or a placeholder
   plain.expand("quality");
   await until(() => /aren’t available in this version yet/.test(plain.stepText("quality")), "placeholder");
   await plain.close();
+});
+
+test("job errors never show file paths and repeat clicks start one job", async () => {
+  let starts = 0;
+  let release;
+  const gate = new Promise((resolve) => (release = resolve));
+  const s = await setup({
+    routes: {
+      "POST /api/downloads": async (body, s) => {
+        starts++;
+        await gate;
+        return s.job("download", "Download Model A", {
+          state: "failed",
+          error: "[Errno 28] No space left on device: '/home/alice/models/model-a.gguf.part'",
+        });
+      },
+    },
+  });
+  await s.open();
+  s.expand("download");
+  await until(() => s.buttonIn("download", /^Download/), "download button");
+  const start = s.buttonIn("download", /^Download/);
+  start.click();
+  start.click();
+  release();
+  await until(() => /No space left on device/.test(s.stepText("download")), "error");
+  assert.equal(starts, 1);
+  assert.doesNotMatch(s.panel().textContent + s.$("jobs-tray").textContent, /\/home\/alice/);
+  assert.match(s.stepText("download"), /a file in the app’s folder/);
+  await s.close();
+});
+
+test("a download already running after a reload is picked up and finishes", async () => {
+  let plans = 0;
+  const s = await setup({
+    routes: {
+      "POST /api/downloads/plan": () => ({
+        files: [],
+        total_bytes: 4 * GiB,
+        remaining_bytes: plans++ === 0 ? 3 * GiB : 0,
+        disk_free: 100 * GiB,
+        enough_space: true,
+        local_copy: false,
+      }),
+    },
+  });
+  const job = s.job("download", "Download Model A", {
+    subject: { variant_id: "v1" },
+    progress: { done: GiB, total: 4 * GiB },
+  });
+  await s.open();
+  await until(() => /Working/.test(s.stepText("download")), "reattached");
+  assert.equal(s.$("run-step-download-toggle").getAttribute("aria-expanded"), "true");
+  s.update(job.id, { state: "done", result: { reused: false, bytes: 4 * GiB } });
+  await until(() => /Done/.test(s.stepText("download")), "finished after reattach");
+  await s.close();
+});
+
+test("an unreachable app gives a plain message instead of a browser error", async () => {
+  const s = await setup({
+    routes: {
+      "GET /api/runtime": installed,
+      "POST /api/downloads/plan": downloadedPlan,
+      "POST /api/test": () => {
+        throw new TypeError("Failed to fetch");
+      },
+    },
+  });
+  await s.open();
+  await until(() => s.buttonIn("test", "Run the full test"), "test button");
+  s.buttonIn("test", "Run the full test").click();
+  await until(() => /didn’t respond/.test(s.stepText("test")), "plain network error");
+  assert.doesNotMatch(s.stepText("test"), /Failed to fetch/);
+  await s.close();
 });

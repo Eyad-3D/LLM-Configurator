@@ -24,6 +24,14 @@
     if (s < 3600) return `${Math.round(s / 60)} min`;
     return `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min`;
   }
+  // Job errors can quote OS messages; keep file paths off the page.
+  const plain = (text) =>
+    text == null
+      ? text
+      : String(text).replace(
+          /(^|[\s'"(=])(?:[A-Za-z]:[\\/]|\/)[^\s'"]*[\\/][^\s'")]*/g,
+          "$1a file in the app’s folder",
+        );
   const isBytes = (job, p) =>
     p.bytes_per_second != null ||
     /download|install|runtime/.test(job.kind || "") ||
@@ -37,7 +45,7 @@
     if (job.state === "done") return { fraction: 1, text: "Finished" };
     if (job.state === "cancelled") return { fraction: null, text: "Stopped" };
     if (job.state === "failed")
-      return { fraction: null, text: job.error || "Something went wrong" };
+      return { fraction: null, text: plain(job.error) || "Something went wrong" };
     const p = job.progress || {};
     const total = Number(p.total);
     const done = Number(p.done);
@@ -56,7 +64,6 @@
       if (p.message) parts.unshift(p.message);
     } else {
       if (p.message) parts.push(p.message);
-      else if (p.stage) parts.push(p.stage.replace(/_/g, " "));
       if (total > 0 && Number.isFinite(done) && !isBytes(job, p))
         parts.push(`step ${Math.min(done, total)} of ${total}`);
     }
@@ -168,13 +175,47 @@
       return hideAfter.get(job.id) > now;
     });
   }
-  function progressBar(fraction, label) {
+  const announced = new Map(); // id -> last state announced
+  function announce(job) {
+    const live = tray?.querySelector("#jobs-live");
+    const was = announced.get(job.id);
+    const state = FINAL.has(job.state) ? job.state : "active";
+    if (!live || was === state) return;
+    announced.set(job.id, state);
+    const title = job.title || "Task";
+    const text = {
+      active: `${title} started.`,
+      done: `${title} finished.`,
+      failed: `${title} failed.`,
+      cancelled: `${title} stopped.`,
+    }[state];
+    if (was !== undefined || state === "active") live.textContent = text;
+  }
+  function row(job) {
+    const item = document.createElement("li");
+    item.dataset.job = job.id;
+    const title = document.createElement("strong");
     const bar = document.createElement("progress");
     bar.max = 1;
-    if (fraction != null) bar.value = fraction;
-    bar.setAttribute("aria-label", label);
-    return bar;
+    const text = document.createElement("span");
+    text.className = "job-text";
+    const stop = document.createElement("button");
+    stop.type = "button";
+    stop.className = "secondary small";
+    stop.textContent = "Cancel";
+    stop.addEventListener("click", async () => {
+      stop.disabled = true;
+      try {
+        await cancel(job.id);
+      } catch (error) {
+        text.textContent = error.message;
+        stop.disabled = false;
+      }
+    });
+    item.append(title, bar, text, stop);
+    return item;
   }
+  // Rows are updated in place so focus and clicks survive each poll.
   function render() {
     if (!tray) return;
     const jobs = visibleJobs();
@@ -188,41 +229,31 @@
         : "All done";
     const listEl = tray.querySelector("#jobs-list");
     if (!listEl) return;
-    listEl.replaceChildren(
-      ...jobs.map((job) => {
-        const info = describe(job);
-        const item = document.createElement("li");
-        item.className = `job job-${job.state}`;
-        item.dataset.job = job.id;
-        const title = document.createElement("strong");
-        title.textContent = job.title || job.kind || "Task";
-        const text = document.createElement("span");
-        text.className = "job-text";
-        text.textContent = info.text;
-        item.append(title);
-        if (!FINAL.has(job.state))
-          item.append(progressBar(info.fraction, `${title.textContent} progress`));
-        item.append(text);
-        if (!FINAL.has(job.state)) {
-          const stop = document.createElement("button");
-          stop.type = "button";
-          stop.className = "secondary small";
-          stop.textContent = "Cancel";
-          stop.setAttribute("aria-label", `Cancel ${title.textContent}`);
-          stop.addEventListener("click", async () => {
-            stop.disabled = true;
-            try {
-              await cancel(job.id);
-            } catch (error) {
-              text.textContent = error.message;
-              stop.disabled = false;
-            }
-          });
-          item.append(stop);
-        }
-        return item;
-      }),
+    const rows = new Map(
+      [...listEl.children].map((item) => [item.dataset.job, item]),
     );
+    jobs.forEach((job, index) => {
+      const item = rows.get(job.id) || row(job);
+      rows.delete(job.id);
+      const info = describe(job);
+      const running = !FINAL.has(job.state);
+      const name = job.title || "Task";
+      item.className = `job job-${job.state}`;
+      item.querySelector("strong").textContent = name;
+      const bar = item.querySelector("progress");
+      bar.hidden = !running;
+      bar.setAttribute("aria-label", `${name} progress`);
+      if (info.fraction != null) bar.value = info.fraction;
+      else bar.removeAttribute("value");
+      item.querySelector(".job-text").textContent = info.text;
+      const stop = item.querySelector("button");
+      stop.hidden = !running;
+      stop.setAttribute("aria-label", `Cancel ${name}`);
+      if (listEl.children[index] !== item)
+        listEl.insertBefore(item, listEl.children[index] || null);
+      announce(job);
+    });
+    rows.forEach((item) => item.remove());
     clearTimeout(fadeTimer);
     if (jobs.some((j) => FINAL.has(j.state)))
       fadeTimer = setTimeout(render, 6100); // Finished rows leave the tray.

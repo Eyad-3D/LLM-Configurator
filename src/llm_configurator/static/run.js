@@ -8,7 +8,7 @@
   const call = (path, body) => window.api(path, body);
   const fmt = () => window.Jobs?.format || { bytes: String, duration: String };
   const DEMO_TEXT =
-    "Not available in demo mode. The demo models are made up, so they can’t be downloaded, tested or run. Start the app without --demo to use real models.";
+    "Not available in demo mode. The demo models are made up, so they can’t be downloaded, tested or run. Restart the app normally (not the demo) to use real models.";
   const STEPS = [
     {
       id: "runtime",
@@ -46,18 +46,18 @@
     { id: "ollama", label: "Ollama" },
     { id: "lmstudio", label: "LM Studio" },
     { id: "open-webui", label: "Open WebUI" },
-    { id: "continue", label: "Continue" },
+    { id: "continue", label: "Continue (VS Code)" },
     { id: "openai-python", label: "Python" },
     { id: "docker-compose", label: "Docker" },
   ];
   const SETTING_LABELS = {
     threads: "CPU threads",
-    batch: "Reading batch size",
-    ubatch: "Reading micro-batch size",
+    batch: "Text read in one go",
+    ubatch: "Text read per small step",
     flash_attn: "Flash attention (a faster way to do the maths)",
-    cache_type_k: "Compressed notes (keys)",
-    cache_type_v: "Compressed notes (values)",
-    n_cpu_moe: "Expert layers kept in main memory",
+    cache_type_k: "Compressed conversation memory (part 1)",
+    cache_type_v: "Compressed conversation memory (part 2)",
+    n_cpu_moe: "Model parts kept in main memory",
     gpu_layers: "Layers on the graphics card",
     context: "Context size",
     parallel: "Chats at once",
@@ -65,7 +65,7 @@
   const STATE_LABELS = {
     checking: "Checking…",
     ready: "Ready",
-    blocked: "Waiting",
+    blocked: "Not yet",
     working: "Working…",
     paused: "Paused",
     done: "Done",
@@ -128,14 +128,40 @@
       "";
     return /win/i.test(text) ? "windows" : "posix";
   }
+  // Server messages can quote OS errors; never show the page a file path.
+  function plain(text) {
+    if (text == null) return text;
+    return String(text).replace(
+      /(^|[\s'"(=])(?:[A-Za-z]:[\\/]|\/)[^\s'"]*[\\/][^\s'")]*/g,
+      "$1a file in the app’s folder",
+    );
+  }
   function problem(error) {
     if (error?.status === 409 && ctx?.demo)
       return { status: "demo", reason: DEMO_TEXT };
+    if (!error?.status)
+      return {
+        status: "failed",
+        reason: "The app didn’t respond. Is it still running? Try again.",
+      };
     return {
       status: "failed",
-      reason: error?.message || "Something went wrong.",
+      reason: plain(error.message) || "Something went wrong.",
     };
   }
+  const pending = new Set();
+  // Ignore repeat clicks while the first request is still on its way.
+  const once = (key, fn) =>
+    async function (...args) {
+      const id = typeof key === "function" ? key() : key;
+      if (pending.has(id)) return;
+      pending.add(id);
+      try {
+        return await fn(...args);
+      } finally {
+        pending.delete(id);
+      }
+    };
   function fresh() {
     return {
       download: { status: "checking" },
@@ -187,7 +213,7 @@
   // ---- panel frame ----
   function summary(c) {
     const parts = [
-      `${Number(c.context || 0).toLocaleString()} tokens per chat`,
+      `Remembers about ${Math.round((Number(c.context) || 0) * 0.75).toLocaleString()} words per chat`,
       { cpu: "Runs on the processor", gpu: "Runs on the graphics card", split: "Graphics card + processor" }[
         c.mode
       ],
@@ -375,7 +401,7 @@
       "div",
       { class: "job-progress" },
       bar,
-      el("p", { class: "job-text", role: "status", text: info.text }),
+      el("p", { class: "job-text", text: info.text }),
       el(
         "div",
         { class: "step-actions" },
@@ -438,7 +464,7 @@
     }
     renderAll();
   }
-  async function installRuntime() {
+  const installRuntime = once("runtime", async function () {
     const s = shared.runtime;
     try {
       const job = await call("/api/runtime/install", {});
@@ -462,7 +488,7 @@
       Object.assign(s, problem(error));
       render("runtime");
     }
-  }
+  });
   function runtimeView() {
     const s = shared.runtime;
     const info = s.info || {};
@@ -489,7 +515,7 @@
           `Engine ready${info.version ? ` · version ${info.version}` : ""}${where ? ` · ${where}` : ""}.`,
         ),
         backend ? hint(`Uses your ${backend}.`) : null,
-        (info.warnings || []).map((w) => el("p", { class: "step-note", text: w })),
+        (info.warnings || []).map((w) => el("p", { class: "step-note", text: plain(w) })),
       ];
     }
     return [
@@ -536,7 +562,7 @@
     }
     if (current(candidate.id)) renderAll();
   }
-  async function startDownload() {
+  const startDownload = once(() => "download:" + ctx.candidate.id, async function () {
     const state = mem.download;
     const candidate = ctx.candidate;
     state.intent = null;
@@ -558,14 +584,14 @@
           }
         } else {
           state.status = "failed";
-          state.reason = done.error || "The download stopped.";
+          state.reason = plain(done.error) || "The download stopped.";
         }
       });
     } catch (error) {
       Object.assign(state, problem(error));
       render("download");
     }
-  }
+  });
   async function removeDownload(candidate = ctx.candidate, afterCancel = false) {
     const state = memory.get(candidate.id).download;
     try {
@@ -680,7 +706,7 @@
   }
 
   // ---- 3. test ----
-  async function startTest(kind) {
+  const startTest = once(() => "test:" + ctx.candidate.id, async function (kind) {
     const state = mem.test;
     const candidate = ctx.candidate;
     try {
@@ -693,14 +719,14 @@
         } else if (done.state === "cancelled") state.status = state.result ? "done" : "idle";
         else {
           state.status = "failed";
-          state.reason = done.error || "The test did not finish.";
+          state.reason = plain(done.error) || "The test did not finish.";
         }
       });
     } catch (error) {
       Object.assign(state, problem(error));
       render("test");
     }
-  }
+  });
   function metricBox(label, value, sub) {
     return el(
       "div",
@@ -832,7 +858,7 @@
   }
 
   // ---- 4. tune ----
-  async function startTune() {
+  const startTune = once(() => "tune:" + ctx.candidate.id, async function () {
     const state = mem.tune;
     const candidate = ctx.candidate;
     try {
@@ -849,14 +875,14 @@
         } else if (done.state === "cancelled") state.status = state.result ? "done" : "idle";
         else {
           state.status = "failed";
-          state.reason = done.error || "Tuning did not finish.";
+          state.reason = plain(done.error) || "Tuning did not finish.";
         }
       });
     } catch (error) {
       Object.assign(state, problem(error));
       render("tune");
     }
-  }
+  });
   function speedChange(label, before, after) {
     if (before == null && after == null) return null;
     const b = rate(before);
@@ -942,6 +968,7 @@
           el("input", {
             type: "radio",
             name,
+            id: `run-budget-${seconds}`,
             value: String(seconds),
             checked: s.budget === seconds,
             onchange: () => (s.budget = seconds),
@@ -950,7 +977,7 @@
         ),
       ),
     );
-    const goalId = `run-goal-${Math.random().toString(36).slice(2, 8)}`;
+    const goalId = "run-goal";
     const goal = el(
       "select",
       { id: goalId, onchange: (e) => (s.goal = e.target.value) },
@@ -1086,7 +1113,7 @@
     }
     const message = ok ? "Copied." : "Couldn’t copy automatically. Select the text and press Ctrl+C (⌘C on Mac).";
     if (statusNode) statusNode.textContent = message;
-    announce(message);
+    else announce(message);
     return ok;
   }
   function exportView() {
@@ -1206,7 +1233,7 @@
     }
     render("use");
   }
-  async function startServe() {
+  const startServe = once("serve", async function () {
     const state = shared.serve;
     state.reason = null;
     try {
@@ -1229,7 +1256,7 @@
       state.reason = p.reason;
       render("use");
     }
-  }
+  });
   async function stopServe() {
     try {
       shared.serve = { status: "ready", info: await call("/api/serve/stop", {}) };
@@ -1257,15 +1284,15 @@
           { class: runningHere() ? "step-done" : "step-note" },
           runningHere()
             ? "Running. Apps on this computer can now use the model."
-            : `Another model is running${info.model ? ` (${info.model})` : ""}. Starting this one replaces it.`,
+            : `Another model is running${info.model ? ` (${plain(info.model)})` : ""}. Starting this one replaces it.`,
         ),
         el(
           "div",
           { class: "code-head" },
-          el("span", {}, "OpenAI address: ", el("code", { class: "base-url", text: address })),
+          el("span", {}, "Address for other apps: ", el("code", { class: "base-url", text: address })),
           el("span", {}, copyStatus, button("Copy", () => copy(address, copyStatus), "secondary small", { "data-copy": "url" })),
         ),
-        hint("Paste this address into any app that works with OpenAI (use any text as the API key). It only listens on this computer."),
+        hint("Paste this address into any app that works with OpenAI. If it asks for a key, type anything. Only apps on this computer can reach it."),
       );
     } else nodes.push(hint("Starts the model in the background with the settings above. Other apps on this computer can then chat with it."));
     if (s.reason) nodes.push(reasonView(s.reason));
@@ -1306,11 +1333,26 @@
         for (const job of running) {
           const kind = String(job.kind || "");
           if (/runtime/.test(kind) && shared.runtime.status !== "working")
-            follow("runtime", shared.runtime, job, () => checkRuntime());
-          else if (/download/.test(kind) && mine(job) && mem.download.status !== "working")
-            follow("download", mem.download, job, () => planDownload());
+            follow("runtime", shared.runtime, job, () => {
+              shared.runtime.status = "checking";
+              void checkRuntime();
+            });
+          else if (/download/.test(kind) && mine(job) && mem.download.status !== "working") {
+            const candidate = ctx.candidate;
+            const state = mem.download;
+            follow("download", state, job, (done) => {
+              state.status = "checking";
+              if (done.state === "failed") {
+                state.status = "failed";
+                state.reason = plain(done.error) || "The download stopped.";
+              } else void planDownload(candidate);
+            });
+          }
           else if (/serve/.test(kind) && shared.serve.status !== "working")
-            follow("serve", shared.serve, job, () => checkServe());
+            follow("serve", shared.serve, job, () => {
+              shared.serve.status = "checking";
+              void checkServe();
+            });
         }
       },
       () => {},
