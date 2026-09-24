@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -81,7 +82,7 @@ def classify(name):
             info["backend"] = info["backend"] or "cpu"
         else:
             extras.append(token)
-    if extras or not info["os"] or not info["arch"]:
+    if extras or not info["os"] or not info["arch"] or (info["backend"] == "cuda" and not info["cuda"]):
         info["backend"] = None
     elif info["backend"] is None:
         info["backend"] = "metal" if (info["os"], info["arch"]) == ("macos", "arm64") else "cpu"
@@ -303,25 +304,19 @@ def _download(record, folder, progress=None, cancel=None, done_before=0, grand_t
                              "again; it will continue where it stopped.") from None
         with response:
             status = getattr(response, "status", None) or response.getcode()
+            content_range = (getattr(response, "headers", None) or {}).get("Content-Range") or f"bytes {have}-"
+            if have and status == 206 and not content_range.startswith(f"bytes {have}-"):
+                part.unlink(missing_ok=True)      # server resumed from the wrong place: start over
+                if attempt == 0:
+                    continue
+                raise ValueError(f"The download of {record['name']} could not be resumed. Try again.")
             if have and status != 206:            # server ignored Range: start again from zero
                 have, hasher = 0, hashlib.sha256()
-            with part.open("ab" if have else "wb") as output:
-                written = have
-                while True:
-                    check_cancel(cancel)
-                    chunk = response.read(CHUNK)
-                    if not chunk:
-                        break
-                    written += len(chunk)
-                    if written > size:
-                        output.close()
-                        part.unlink(missing_ok=True)
-                        raise ValueError(f"{record['name']} is bigger than GitHub said it would be; stopped and deleted it.")
-                    output.write(chunk)
-                    hasher.update(chunk)
-                    if progress:
-                        progress({"stage": "download", "done": done_before + written, "total": grand_total or size,
-                                  "message": f"Downloading {record['name']}"})
+            try:
+                _stream(response, part, have, size, hasher, record, progress, cancel, done_before, grand_total)
+            except (OSError, HTTPException) as error:
+                raise ValueError(f"The download of {record['name']} was interrupted ({error}). Try again; it will "
+                                 "continue where it stopped.") from None
         break
     if part.stat().st_size != size:
         raise ValueError(f"The download of {record['name']} stopped early. Try again; it will continue where it stopped.")
@@ -331,6 +326,26 @@ def _download(record, folder, progress=None, cancel=None, done_before=0, grand_t
                          "deleted. Try again.")
     os.replace(part, final)
     return final
+
+
+def _stream(response, part, have, size, hasher, record, progress, cancel, done_before, grand_total):
+    with part.open("ab" if have else "wb") as output:
+        written = have
+        while True:
+            check_cancel(cancel)
+            chunk = response.read(CHUNK)
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > size:
+                output.close()
+                part.unlink(missing_ok=True)
+                raise ValueError(f"{record['name']} is bigger than GitHub said it would be; stopped and deleted it.")
+            output.write(chunk)
+            hasher.update(chunk)
+            if progress:
+                progress({"stage": "download", "done": done_before + written, "total": grand_total or size,
+                          "message": f"Downloading {record['name']}"})
 
 
 def _sha256(path):
@@ -349,6 +364,8 @@ def _safe_parts(name):
     if name.startswith("/") or re.match(r"^[a-zA-Z]:", name):
         raise ValueError(f"The archive contains an unsafe absolute path ({name}); refusing to unpack it.")
     parts = [p for p in PurePosixPath(name).parts if p not in ("", ".")]
+    if any(":" in p for p in parts):
+        raise ValueError(f"The archive contains an unsafe drive-letter path ({name}); refusing to unpack it.")
     if ".." in parts:
         raise ValueError(f"The archive contains an unsafe path that climbs out of its folder ({name}); refusing to unpack it.")
     return parts
@@ -383,9 +400,12 @@ def safe_extract(archive, target, cancel=None):
                 if not parts:
                     continue
                 path = target.joinpath(*parts)
+                if not _within(target, path.parent.resolve()):
+                    raise ValueError(f"The archive contains an unsafe path ({member.filename}); refusing to unpack it.")
                 if member.is_dir():
                     path.mkdir(parents=True, exist_ok=True)
                     continue
+                _clear(path, member.filename)
                 total += member.file_size
                 if total > MAX_EXTRACTED_BYTES:
                     raise ValueError("The archive unpacks to an unreasonable size; refusing to unpack it.")
@@ -415,31 +435,48 @@ def safe_extract(archive, target, cancel=None):
             elif member.issym():
                 link = member.linkname.replace("\\", "/")
                 if (link.startswith("/") or re.match(r"^[a-zA-Z]:", link) or not _within(target, path.parent / link)
-                        or not _within(target, path.parent.resolve() / link)):
+                        or not _within(target, (path.parent.resolve() / link).resolve())):
                     raise ValueError(f"The archive contains a link pointing outside its folder ({member.name}); refusing to unpack it.")
                 path.parent.mkdir(parents=True, exist_ok=True)
-                if path.is_symlink() or path.exists():
-                    path.unlink()
-                os.symlink(link, path)
+                _clear(path, member.name)
+                try:
+                    os.symlink(link, path)
+                except OSError:
+                    raise ValueError("This computer does not allow creating the links inside this archive. "
+                                     "Use the .zip build instead.") from None
             elif member.islnk():
                 source = target.joinpath(*_safe_parts(member.linkname))
                 if not source.is_file() or source.is_symlink() or not _within(target, source.resolve()):
                     raise ValueError(f"The archive contains a bad hard link ({member.name}); refusing to unpack it.")
                 path.parent.mkdir(parents=True, exist_ok=True)
+                _clear(path, member.name)
                 shutil.copyfile(source, path)
             elif member.isfile():
                 total += member.size
                 if total > MAX_EXTRACTED_BYTES:
                     raise ValueError("The archive unpacks to an unreasonable size; refusing to unpack it.")
-                if path.is_symlink():
-                    path.unlink()
+                _clear(path, member.name)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 with bundle.extractfile(member) as source, path.open("wb") as output:
                     shutil.copyfileobj(source, output, CHUNK)
                 path.chmod(0o755 if member.mode & 0o111 else 0o644)
             else:
                 raise ValueError(f"The archive contains a special device file ({member.name}); refusing to unpack it.")
+    # Final guard: every link must still point inside, whatever order the archive used.
+    for folder, dirs, files in os.walk(target):
+        for entry in dirs + files:
+            path = Path(folder) / entry
+            if path.is_symlink() and not _within(target, path.resolve()):
+                raise ValueError(f"The archive contains a link pointing outside its folder ({entry}); refusing to unpack it.")
     return target
+
+
+def _clear(path, name):
+    """Never write through an existing link or over a folder."""
+    if path.is_symlink():
+        path.unlink()
+    elif path.is_dir():
+        raise ValueError(f"The archive lists {name} twice (as a folder and a file); refusing to unpack it.")
 
 
 # ---------- finding and checking binaries ----------
@@ -570,6 +607,8 @@ def _manifests(store):
     root = runtime_dir(store)
     found = []
     for path in root.glob("*/manifest.json"):
+        if path.parent.name.startswith("."):
+            continue
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -723,7 +762,13 @@ def _finish(store, archives, info, progress, cancel):
             except OSError:
                 raise ValueError(f"Could not replace the existing install in {final}. Close any running llama.cpp "
                                  "and try again.") from None
-        os.replace(staging, final)
+        try:
+            os.replace(staging, final)
+        except OSError:
+            if old:
+                os.replace(old, final)
+            raise ValueError(f"Could not move the new llama.cpp into {final}. Close any running llama.cpp (or wait "
+                             "for antivirus to finish scanning) and try again.") from None
         if old:
             shutil.rmtree(old, ignore_errors=True)
         (root / "current.json").write_text(json.dumps({"directory": folder_name}), encoding="utf-8")

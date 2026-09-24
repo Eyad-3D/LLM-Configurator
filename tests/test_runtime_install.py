@@ -173,6 +173,7 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(ri.classify("llama-b4000-bin-macos-arm64.zip")["format"], ".zip")
         self.assertEqual(ri.classify("llama-b9000-bin-linux-aarch64.tgz")["arch"], "arm64")
         self.assertIsNone(ri.classify("README.md"))
+        self.assertIsNone(ri.classify("llama-b1-bin-win-cuda-x64.zip")["backend"])  # CUDA without a version
 
     def test_driver_table(self):
         self.assertEqual(ri.max_cuda_for_driver("581.57", "windows"), (13, 0))
@@ -354,6 +355,47 @@ class ExtractTests(Base):
             self.extract(data, ".tar.gz")
         self.assertEqual(list(outside.iterdir()), [])
 
+    @unittest.skipIf(os.name == "nt", "symlinks are a POSIX feature")
+    def test_link_chain_then_hard_link_cannot_write_outside(self):
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as bundle:
+            for name, kind, link in [("d", tarfile.DIRTYPE, ""), ("d/l", tarfile.SYMTYPE, ".."),
+                                     ("e", tarfile.SYMTYPE, "d/l/../evil.txt")]:
+                info = tarfile.TarInfo(name)
+                info.type, info.linkname = kind, link
+                bundle.addfile(info)
+            info = tarfile.TarInfo("real")
+            info.size = 5
+            bundle.addfile(info, io.BytesIO(b"PWNED"))
+            info = tarfile.TarInfo("e")
+            info.type, info.linkname = tarfile.LNKTYPE, "real"
+            bundle.addfile(info)
+        with self.assertRaisesRegex(ValueError, "outside"):
+            self.extract(buffer.getvalue(), ".tar.gz")
+        self.assertFalse((self.root / "evil.txt").exists())
+
+    @unittest.skipIf(os.name == "nt", "symlinks are a POSIX feature")
+    def test_file_entry_never_writes_through_an_earlier_link(self):
+        data = tar_bytes({"lib.so": ("new", 0o644)}, [])
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as bundle:
+            info = tarfile.TarInfo("lib.so")
+            info.type, info.linkname = tarfile.SYMTYPE, "real.so"
+            bundle.addfile(info)
+            info = tarfile.TarInfo("real.so")
+            info.size = 3
+            bundle.addfile(info, io.BytesIO(b"old"))
+            with tarfile.open(fileobj=io.BytesIO(data)) as other:
+                member = other.getmember("lib.so")
+                bundle.addfile(member, other.extractfile(member))
+        out = self.extract(buffer.getvalue(), ".tar.gz")
+        self.assertFalse((out / "lib.so").is_symlink())
+        self.assertEqual((out / "real.so").read_text(), "old")
+
+    def test_drive_relative_names_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "drive-letter"):
+            self.extract(zip_bytes({"bin/D:evil.dll": ("x", 0o644)}), ".zip")
+
     def test_zip_bomb_limit(self):
         with mock.patch.object(ri, "MAX_EXTRACTED_BYTES", 10):
             with self.assertRaisesRegex(ValueError, "unreasonable size"):
@@ -432,6 +474,33 @@ class DownloadTests(Base):
         partial.write_bytes(self.data)
         with mock.patch.object(ri, "_open", FakeNet({self.record["name"]: self.data})):
             self.assertEqual(ri._download(self.record, self.folder).read_bytes(), self.data)
+
+    def test_dropped_connection_is_plain_and_keeps_partial(self):
+        class Dropping(FakeResponse):
+            def read(self, n=-1):
+                if self.tell() >= 64:
+                    raise ConnectionResetError("reset by peer")
+                return super().read(n)
+        with mock.patch.object(ri, "_open", return_value=Dropping(self.data)):
+            with self.assertRaisesRegex(ValueError, "interrupted"):
+                ri._download(self.record, self.folder)
+        self.assertEqual(next(self.folder.glob("*.part")).stat().st_size, 64)
+
+    def test_wrong_content_range_restarts(self):
+        self.folder.mkdir()
+        partial = self.folder / (self.record["sha256"][:16] + "-" + self.record["name"] + ".part")
+        partial.write_bytes(self.data[:100])
+        calls = []
+        def opener(request, timeout=60):
+            calls.append(request.get_header("Range"))
+            if request.get_header("Range"):
+                response = FakeResponse(self.data[50:], 206)
+                response.headers = {"Content-Range": f"bytes 50-{len(self.data) - 1}/{len(self.data)}"}
+                return response
+            return FakeResponse(self.data)
+        with mock.patch.object(ri, "_open", opener):
+            self.assertEqual(ri._download(self.record, self.folder).read_bytes(), self.data)
+        self.assertEqual(calls, ["bytes=100-", None])
 
     def test_http_error_is_plain(self):
         with mock.patch.object(ri, "_open", FakeNet({})):
@@ -513,6 +582,20 @@ class InstallTests(Base):
         result = self.run_install(blobs, NONE)
         self.assertTrue(result["installed"])
         self.assertEqual(sorted(p.name for p in runtime_dir(self.store).iterdir()), ["b11158-cpu", "current.json", "downloads"])
+
+    def test_failed_final_move_keeps_previous_install(self):
+        blobs = {"llama-b11158-bin-ubuntu-x64.tar.gz": tar_bytes(server_tree())}
+        self.run_install(blobs, NONE)
+        real_replace = os.replace
+        def flaky(src, dst):
+            if Path(src).name.startswith(".staging-"):
+                raise PermissionError("in use")
+            return real_replace(src, dst)
+        with mock.patch.object(ri.os, "replace", side_effect=flaky):
+            with self.assertRaisesRegex(ValueError, "Could not move"):
+                self.run_install(blobs, NONE)
+        self.assertTrue(ri.detect(self.store)["installed"])
+        self.assertFalse(list(runtime_dir(self.store).glob(".*")))
 
     def test_cancel_during_download(self):
         cancel = threading.Event()
@@ -604,6 +687,12 @@ class DetectTests(Base):
         self.assertIn("b7000", ri.detect(self.store)["directory"])
         (runtime_dir(self.store) / "current.json").write_text(json.dumps({"directory": "b6000-cpu"}))
         self.assertIn("b6000", ri.detect(self.store)["directory"])
+
+    def test_leftover_hidden_folders_are_ignored(self):
+        leftover = runtime_dir(self.store) / ".staging-abc"
+        self.make(leftover / "bin")
+        (leftover / "manifest.json").write_text(json.dumps({"tag": "b1", "backend": "cpu", "bin_dir": "bin"}))
+        self.assertFalse(ri.detect(self.store)["installed"])
 
     def test_path_uses_which_for_missing_siblings(self):
         path_dir = self.make(self.root / "brew", names=("llama-server",))
