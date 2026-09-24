@@ -10,7 +10,7 @@ No. Models run on the processor too, just slower. Small models (1–4B) are ofte
 No. Models run on your computer. The app only fetches public model information and the files you ask for. See [Privacy and safety](privacy-and-safety.md).
 
 **Do I need an API key?**
-No. The key is only for optional quality rankings from Artificial Analysis. Everything else works without it.
+No. The key is only for optional quality rankings from Artificial Analysis. Everything else works without it. (A Hugging Face token, `HF_TOKEN`, is only needed for models that require you to log in and accept a licence.)
 
 **Why does it say "unknown" or "not tested yet" so often?**
 Because it refuses to make up numbers. An unknown is honest; a guess dressed up as a fact is not. Run **Test** to replace unknowns with real measurements.
@@ -37,7 +37,7 @@ Q4_K_M is a common sweet spot. Q5_K_M/Q6_K are a little better and bigger; Q8_0 
 How many conversations or agents run **at the same time**. One person running three agents in parallel counts as three. Using one chat after another counts as one. Each needs its own notepad (memory).
 
 **Can other computers on my network use the model server?**
-Not directly: servers listen on your own computer only, for safety. Use an export (for example Docker) and set up access yourself if you need that.
+Not directly: servers listen on your own computer only (`127.0.0.1`), for safety. Exports keep that too, including the Docker one. If you really need network access, export the `llama-server` script and change its `--host` yourself; anyone who can reach that address can then use your model.
 
 **Does it work offline?**
 Demo mode works fully offline. With models and llama.cpp already downloaded, testing, tuning and running work offline too. Fetching model information and downloads need internet.
@@ -49,7 +49,7 @@ Only while it tests, tunes or runs a model. Those jobs use your processor and gr
 See [Getting started → Where your data lives](getting-started.md#where-your-data-lives).
 
 **Does it support Mac / AMD / Intel graphics?**
-v0.4 adds Apple Silicon (unified memory, Metal), AMD graphics memory on Linux, and lists Intel and other graphics cards. Where free graphics memory can't be read, it shows unknown instead of guessing. Speed calibration of the graphics card itself is still NVIDIA-only.
+v0.4 adds Apple Silicon (unified memory, Metal), AMD graphics memory on Linux, and lists Intel and other graphics cards. Where free graphics memory can't be read, it shows unknown instead of guessing. The quick hardware speed check (calibration) measures NVIDIA graphics cards only; on other cards, run **Test** for real speeds.
 
 **Can one model use two graphics cards?**
 Not yet.
