@@ -243,7 +243,7 @@ PARAMETER num_batch 512
     def test_partial_offload_and_paths_with_spaces(self):
         result = ex.export(base(gpu_layers=20, model_path="C:\\My Models\\x #1.gguf"), variant(), "ollama", "windows")
         self.assertIn('FROM "C:\\My Models\\x #1.gguf"\n', result["content"])
-        self.assertIn("PARAMETER num_gpu 20\n", result["content"])
+        self.assertIn("PARAMETER num_gpu 21\n", result["content"])
         with self.assertRaisesRegex(ValueError, "double quote"):
             ex.export(base(model_path='/a/"b".gguf'), variant(), "ollama")
 

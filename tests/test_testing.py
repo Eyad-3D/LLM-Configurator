@@ -62,9 +62,9 @@ class FakeServer:
 
     # Same signature as llama_server.LlamaServer.chat (checked by test_fakes_match_the_real_server).
     def chat(self, messages, max_tokens=256, temperature=0.0, seed=1, stop=None, timeout=300,
-             cache_prompt=False, enable_thinking=None, extra=None):
-        body = {"cache_prompt": cache_prompt, **({"chat_template_kwargs": {"enable_thinking": enable_thinking}}
-                                                  if enable_thinking is not None else {}), **(extra or {})}
+             cache_prompt=False, enable_thinking=None, extra=None, chat_template_kwargs=None):
+        kwargs = {**(chat_template_kwargs or {}), **({"enable_thinking": enable_thinking} if enable_thinking is not None else {})}
+        body = {"cache_prompt": cache_prompt, **({"chat_template_kwargs": kwargs} if kwargs else {}), **(extra or {})}
         self.calls.append({"messages": messages, "max_tokens": max_tokens, "body": body,
                            "chat_template_kwargs": body.get("chat_template_kwargs")})
         return {"text": self.reply, "reasoning": self.reasoning, "finish_reason": "stop",

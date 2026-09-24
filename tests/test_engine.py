@@ -216,7 +216,8 @@ class ExpertOffloadTests(unittest.TestCase):
         self.assertEqual(blocks + output, runtime_gpu_layers(4, 32))
         split = allocations(model, 8192, 1, 4)
         self.assertGreaterEqual(split["weights_vram"], output_bytes(model) * 1.10 + (blocks) * 8 * GIB * 1.10 * 0.8 / 32)
-        self.assertEqual(split["weights_ram"] + split["weights_vram"], allocations(model, 8192, 1, 0)["weights_ram"])
+        # Each pool is rounded up separately, so the two halves may add up to one byte more.
+        self.assertAlmostEqual(split["weights_ram"] + split["weights_vram"], allocations(model, 8192, 1, 0)["weights_ram"], delta=1)
         full = allocations(model, 8192, 1, 32)
         self.assertEqual(full["weights_ram"], 0)
         self.assertEqual(full["weights_vram"], math.ceil(8 * GIB * 1.10))

@@ -166,12 +166,14 @@ def download_plan(store, variant):
 
 
 def download_job(store, variant):
-    if variant.source == "local":
-        raise ValueError("This model is a file on your computer, so there is nothing to download.")
+    """A model the user brought from their own disk is only ever reused, never fetched from the internet."""
     def run(progress, cancel):
         existing = local_model(store, variant, progress=_stage(progress, "verify"), cancel=cancel)
         if existing:
             return {"reused": True, "bytes": 0, "filename": existing.name, "variant_id": variant.id}
+        if variant.source == "local":
+            raise ValueError("This model came from a file on your computer, and the file is no longer there. "
+                             "Put it back, or scan for models again.")
         from . import downloads
         path = downloads.download_variant(variant, models_dir(store), progress=progress, cancel=cancel)
         return {"reused": False, "bytes": variant.size_bytes, "filename": Path(path).name, "variant_id": variant.id}

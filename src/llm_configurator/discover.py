@@ -255,7 +255,7 @@ def _group(entries):
 
 def _files(record):
     return record.get("files") or [{"path": record["path"], "filename": record.get("filename") or Path(record["path"]).name,
-                                    "size_bytes": record["size_bytes"], "sha256": record.get("sha256")}]
+                                    "size_bytes": record.get("size_bytes"), "sha256": record.get("sha256")}]
 
 
 def _compare(files, wanted):

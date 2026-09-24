@@ -64,7 +64,8 @@ def normalize(config):
     if result["host"] not in {"127.0.0.1", "localhost"}:
         raise ValueError("Servers started by this app listen on this computer only")
     for name in ["alias", "device", "gpu_uuid", "draft_model_path"]:
-        if result[name] is not None and (not isinstance(result[name], str) or not result[name] or "\n" in result[name]):
+        value = result[name]
+        if value is not None and (not isinstance(value, str) or not value or any(ord(ch) < 32 or ord(ch) == 127 for ch in value)):
             raise ValueError(f"{name} must be a non-empty single-line string")
     if result["draft_max"] and not result["draft_model_path"]:
         raise ValueError("draft_max requires a draft model")
@@ -72,8 +73,12 @@ def normalize(config):
 
 
 def runtime_gpu_layers(gpu_layers, total_layers):
-    """llama.cpp counts the output layer too: a full offload needs one more than the transformer layers."""
-    return gpu_layers + 1 if total_layers and gpu_layers == total_layers else gpu_layers
+    """The -ngl value that puts `gpu_layers` transformer blocks on the GPU.
+
+    llama.cpp offloads from the top: -ngl N places blocks n_layer+1-N .. n_layer-1 plus the output
+    layer, i.e. N-1 blocks (llama-model.cpp, i_gpu_start). So g blocks need g+1, at any split.
+    """
+    return gpu_layers + 1 if gpu_layers > 0 else 0
 
 
 def server_args(config):
@@ -117,14 +122,19 @@ def server_args(config):
 def server_env(config, base=None):
     """Process environment: pin NVIDIA work to one GPU by UUID, matching the benchmark runner."""
     c = normalize(config)
-    env = dict(os.environ if base is None else base)
+    # LLAMA_ARG_* variables silently fill llama-server settings; drop them so a run matches what was tested.
+    env = {k: v for k, v in (os.environ if base is None else base).items() if not k.upper().startswith("LLAMA_ARG_")}
     if c["gpu_backend"] == "cuda" and c["gpu_uuid"] and c["gpu_layers"]:
         env["CUDA_VISIBLE_DEVICES"] = c["gpu_uuid"]
     return env
 
 
-def from_candidate(candidate, model_path=None, hardware=None, **overrides):
-    """Launch settings for one engine candidate; overrides come from the tuner or CLI flags."""
+def from_candidate(candidate, model_path=None, hardware=None, runtime_backend=None, **overrides):
+    """Launch settings for one engine candidate; overrides come from the tuner or CLI flags.
+
+    `runtime_backend` is the installed llama.cpp build's backend (runtime_install.detect). It wins over the
+    GPU's own backend: a Vulkan build on an NVIDIA card ignores CUDA_VISIBLE_DEVICES.
+    """
     gpu = None
     if hardware and candidate.get("gpu_index") is not None:
         gpu = next((g for g in hardware.get("gpus", []) if g.get("index") == candidate["gpu_index"]), None)
@@ -133,7 +143,8 @@ def from_candidate(candidate, model_path=None, hardware=None, **overrides):
               "parallel": candidate.get("users", 1), "gpu_layers": candidate["gpu_layers"],
               "total_layers": candidate.get("total_layers"), "threads": candidate.get("threads"),
               "gpu_uuid": gpu.get("uuid") if gpu and candidate["gpu_layers"] else None,
-              "gpu_backend": (gpu.get("backend") or "cuda") if gpu else None,
+              "gpu_backend": ((runtime_backend if runtime_backend in BACKENDS - {None, "cpu"} else None)
+                              or gpu.get("backend") or "cuda") if gpu else None,
               "cache_type_k": candidate.get("kv_cache_type", "f16"), "cache_type_v": candidate.get("kv_cache_type", "f16"),
               "n_cpu_moe": candidate.get("n_cpu_moe", 0) or 0}
     config.update({k: v for k, v in launch.items() if k in DEFAULTS and k != "model_path"})

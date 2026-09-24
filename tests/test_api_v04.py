@@ -132,7 +132,7 @@ class Fakes:
                 "speed": None, "verdict": "works", "verdict_text": "It works."}
 
     def tune(self, bench_command, variant, base_config, hardware, budget_seconds=300, goal="generation",
-             memory_check=None, progress=None, cancel=None):
+             memory_check=None, progress=None, cancel=None, allow_kv_compression=False):
         self.calls.append(("tune", bench_command, base_config, budget_seconds, goal))
         return {"best": {**base_config, "threads": 8, "flash_attn": "on"}, "baseline": {"tps": 10.0, "pp_tps": 100.0},
                 "best_result": {"tps": 12.0, "pp_tps": 110.0}, "improvement": 1.2,

@@ -57,8 +57,8 @@ class SpeedModelTests(unittest.TestCase):
 
     def test_moved_expert_layers_follow_llama_cpp_layer_order(self):
         self.assertEqual(moved_expert_layers(self.moe, 48, 10), 10)
-        # -ngl 40 offloads the output layer plus blocks 9-47, so blocks 0-8 are already on the CPU.
-        self.assertEqual(moved_expert_layers(self.moe, 40, 10), 1)
+        # 40 blocks on the GPU run as -ngl 41: the output layer plus blocks 8-47, so blocks 0-7 are already on the CPU.
+        self.assertEqual(moved_expert_layers(self.moe, 40, 10), 2)
         self.assertEqual(moved_expert_layers(self.moe, 0, 10), 0)
         self.assertEqual(moved_expert_layers(self.dense, 48, 10), 0)
 

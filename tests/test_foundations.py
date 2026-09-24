@@ -132,7 +132,15 @@ class LaunchTests(unittest.TestCase):
 
     def test_runtime_layers_and_env(self):
         self.assertEqual(runtime_gpu_layers(32, 32), 33)
-        self.assertEqual(runtime_gpu_layers(10, 32), 10)
+        self.assertEqual(runtime_gpu_layers(10, 32), 11)  # 10 blocks + the output layer
+        self.assertEqual(runtime_gpu_layers(0, 32), 0)
+        self.assertEqual(server_env({}, base={"LLAMA_ARG_N_PARALLEL": "4", "PATH": "/bin"}), {"PATH": "/bin"})
+        with self.assertRaises(ValueError):
+            normalize({"alias": "a\tb"})
+        vulkan = from_candidate({"context": 4096, "gpu_layers": 2, "total_layers": 8, "gpu_index": 0}, "m.gguf",
+                                {"gpus": [{"index": 0, "uuid": "GPU-x", "backend": "cuda"}]}, runtime_backend="vulkan")
+        self.assertEqual(vulkan["gpu_backend"], "vulkan")
+        self.assertNotIn("CUDA_VISIBLE_DEVICES", server_env(vulkan, base={}))
         env = server_env({"gpu_backend": "cuda", "gpu_uuid": "GPU-1", "gpu_layers": 3}, base={})
         self.assertEqual(env, {"CUDA_VISIBLE_DEVICES": "GPU-1"})
         self.assertEqual(server_env({"gpu_layers": 0}, base={}), {})

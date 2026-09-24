@@ -107,7 +107,7 @@ class BenchArgsTests(unittest.TestCase):
     def test_sweep_uses_comma_lists(self):
         args = tuner.bench_args(config(gpu_layers=20, total_layers=32), sweep={
             "threads": [8, 7, 4], "flash_attn": ["on", "off"], "gpu_layers": [20, 32], "cache_type_k": ["f16", "q8_0"]})
-        self.assertEqual(args, ["-m", "/models/m.gguf", "-p", "512", "-n", "128", "-ngl", "20,33", "-t", "8,7,4",
+        self.assertEqual(args, ["-m", "/models/m.gguf", "-p", "512", "-n", "128", "-ngl", "21,33", "-t", "8,7,4",
                                 "-fa", "on,off", "-ctk", "f16,q8_0", "-r", "2", "-o", "json", "-v"])
 
     def test_flash_attn_auto_is_not_passed_and_cpu_only_hides_gpu(self):
@@ -242,7 +242,8 @@ class TuneTests(unittest.TestCase):
         self.assertTrue(skipped)
         self.assertEqual(skipped[0]["seconds"], 0.0)
         for call in bench.calls:
-            self.assertTrue(all(int(x) <= 22 for x in call[call.index("-ngl") + 1].split(",")))
+            # 22 transformer blocks run as -ngl 23 (the output layer comes too).
+            self.assertTrue(all(int(x) <= 23 for x in call[call.index("-ngl") + 1].split(",")))
         self.assertTrue(any("might not fit" in n for n in result["notes"]))
 
     def test_memory_check_errors_count_as_unsafe(self):

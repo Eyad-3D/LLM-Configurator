@@ -521,8 +521,9 @@ class AppTests(unittest.TestCase):
         local = Variant(**{**real_variant().to_dict(), "id": "local:abc", "source": "local"})
         self.store.put("local_files", [{"path": "x.gguf", "local_variant": local.to_dict()}, {"path": "y.gguf", "local_variant": None}])
         self.assertIn("local:abc", [v.id for v in app.variants(self.store)])
+        # A user's own file is only ever reused; once it is gone the job refuses to fetch anything.
         with self.assertRaises(ValueError):
-            app.download_job(self.store, local)
+            app.download_job(self.store, local)(None, None)
 
     def test_adding_a_later_part_registers_the_whole_split_model(self):
         from llm_configurator import discover
