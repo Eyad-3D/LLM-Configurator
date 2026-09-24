@@ -314,7 +314,9 @@
     why.textContent = reason || "";
     const body = item.querySelector(".step-body");
     if (body.hidden) return;
-    const hadFocus = body.contains(document.activeElement);
+    const focused = body.contains(document.activeElement)
+      ? focusSelector(document.activeElement)
+      : null;
     const help = STEPS.find((s) => s.id === id).help;
     if (id === "quality") {
       // The quality panel owns its own DOM; only mount it once per open.
@@ -322,10 +324,36 @@
         mountQuality(body, reason);
       return;
     }
-    body.replaceChildren(hint(help), ...views[id](reason));
-    if (hadFocus)
-      (body.querySelector("button:not([disabled]), [tabindex='0']") ||
+    body.replaceChildren(
+      hint(help),
+      ...views[id](reason)
+        .flat(Infinity)
+        .filter((kid) => kid != null && kid !== false),
+    );
+    // Re-rendering replaces nodes; put keyboard focus back on the same control.
+    if (focused != null)
+      (focusFind(body, focused) ||
+        body.querySelector("button:not([disabled])") ||
         document.getElementById(`run-step-${id}-toggle`))?.focus();
+  }
+  function focusSelector(node) {
+    if (node.id) return { id: node.id };
+    for (const key of ["format", "copy"])
+      if (node.dataset?.[key]) return { data: key, value: node.dataset[key] };
+    return { text: node.textContent };
+  }
+  function focusFind(body, key) {
+    if (key.id) {
+      const node = document.getElementById(key.id);
+      return body.contains(node) ? node : null;
+    }
+    if (key.data)
+      return [...body.querySelectorAll(`[data-${key.data}]`)].find(
+        (n) => n.dataset[key.data] === key.value,
+      );
+    return [...body.querySelectorAll("button")].find(
+      (n) => n.textContent === key.text && !n.disabled,
+    );
   }
   function renderAll() {
     STEPS.forEach((step) => render(step.id));
@@ -1037,12 +1065,15 @@
     if (!ok) {
       const area = el("textarea", { class: "copy-buffer", readonly: true, "aria-hidden": "true" });
       area.value = text;
+      const back = document.activeElement;
       document.getElementById("run-content").append(area);
+      area.focus();
       area.select();
       try {
         ok = document.execCommand?.("copy") === true;
       } catch {}
       area.remove();
+      back?.focus?.();
     }
     const message = ok ? "Copied." : "Couldn’t copy automatically. Select the text and press Ctrl+C (⌘C on Mac).";
     if (statusNode) statusNode.textContent = message;
@@ -1127,6 +1158,7 @@
     else {
       const copyStatus = el("span", { class: "copy-status", role: "status" });
       panel.append(
+        ...[
         result.instructions?.length
           ? el("ol", { class: "instructions" }, result.instructions.map((text) => el("li", { text })))
           : null,
@@ -1138,6 +1170,7 @@
         ),
         el("pre", { class: "export-content", tabindex: "0" }, el("code", { text: result.content || "" })),
         (result.notes || []).map((note) => hint(note)),
+        ].flat().filter(Boolean),
       );
     }
     return [
