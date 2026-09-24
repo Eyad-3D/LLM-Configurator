@@ -615,7 +615,8 @@ class KlCheckTests(unittest.TestCase):
         calls = self.argv_log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(calls), 4)                              # reference once, candidate three times
         self.assertEqual(sum("--kl-divergence " in call + " " for call in calls), 3)
-        self.assertTrue(any("running it again (try 2 of 3)" in event["message"] for event in events))
+        self.assertTrue(any("running it again with fewer CPU threads (try 2 of 3)" in event["message"]
+                            for event in events))
         self.assertEqual(events[-1]["done"], events[-1]["total"])
         self.assertEqual(os.listdir(self.work), [])
 
@@ -636,6 +637,26 @@ class KlCheckTests(unittest.TestCase):
         self.assertTrue(any(note.startswith("Q4_K_M: llama-perplexity's final report was cut short")
                             for note in result["notes"]))
         self.assertEqual(len(self.argv_log.read_text(encoding="utf-8").splitlines()), 1 + quantcheck.MAX_ATTEMPTS)
+
+    def test_re_runs_use_fewer_threads(self):
+        self.assertEqual(quantcheck._fewer_threads(["x", "-t", "8", "-c", "512"]), ["x", "-t", "4", "-c", "512"])
+        self.assertEqual(quantcheck._fewer_threads(["x", "-t", "1"]), ["x", "-t", "1"])
+        with mock.patch.object(quantcheck.os, "cpu_count", return_value=6):
+            self.assertEqual(quantcheck._fewer_threads(["x"]), ["x", "-t", "3"])
+        with mock.patch.object(quantcheck.os, "cpu_count", return_value=None):
+            self.assertEqual(quantcheck._fewer_threads(["x"]), ["x", "-t", "1"])
+        seen = []
+        cut = KLD_CURRENT[:KLD_CURRENT.index("Same top p:")]
+
+        def run(argv, **_):
+            if "--kl-divergence" not in argv:
+                Path(argv[argv.index("--kl-divergence-base") + 1]).write_bytes(b"_logits_" + b"\0" * 64)
+                return 0, REFERENCE_RUN
+            seen.append(argv)
+            return 0, cut
+        self.check(run=run, candidates={"Q4_K_M": self.q4}, config={"gpu_layers": 0, "threads": 8})
+        self.assertEqual([argv[argv.index("-t") + 1] for argv in seen], ["8", "4", "2"])
+        self.assertEqual([argv.count("-t") for argv in seen], [1, 1, 1])
 
     def test_partial_note_wording(self):
         rows = {"from_rows": ["mean_kld"], "chunks_done": 2, "median_kld": 0.1, "kld_99": 0.2, "same_top_p": 90.0,

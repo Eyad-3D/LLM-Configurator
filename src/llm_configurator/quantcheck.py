@@ -229,6 +229,19 @@ class _TimedOut(ValueError):
     pass
 
 
+def _fewer_threads(argv):
+    """argv for a re-run with half the CPU threads. The report is lost when llama.cpp's busy compute
+    threads starve its log thread at exit; measured with 3 busy cores of 4 on a tiny model: 22 of 40
+    runs cut short with all threads, 2 of 40 with one. The numbers do not depend on the thread count."""
+    argv = list(argv)
+    if "-t" in argv:
+        index = argv.index("-t") + 1
+        argv[index] = str(max(1, int(argv[index]) // 2))
+    else:
+        argv += ["-t", str(max(1, (os.cpu_count() or 2) // 2))]
+    return argv
+
+
 def _run_process(argv, env=None, timeout=3600, cancel=None, on_line=None):
     """Run argv, stream merged output to on_line, kill on cancel or timeout. Returns (code, text).
 
@@ -466,6 +479,8 @@ def kl_check(perplexity_command, reference_path, candidates, corpus_path=None, c
             best, attempts = None, 0
             while attempts < MAX_ATTEMPTS:
                 attempts += 1
+                if attempts > 1:
+                    argv = _fewer_threads(argv)
                 try:
                     code, output = run(argv, env=env, timeout=timeout, cancel=cancel,
                                        on_line=on_line_for("candidate", label))
@@ -484,7 +499,8 @@ def kl_check(perplexity_command, reference_path, candidates, corpus_path=None, c
                 if parsed["complete"] or code != 0 or _failure(output):
                     break
                 report("candidate", label, f"{label}: llama-perplexity's report came back cut short; "
-                                           f"running it again (try {attempts + 1} of {MAX_ATTEMPTS})", state["peak"])
+                                           f"running it again with fewer CPU threads (try {attempts + 1} of "
+                                           f"{MAX_ATTEMPTS})", state["peak"])
             code, parsed, output = best
             parsed = {key: value for key, value in parsed.items() if key != "final_ppl"}
             if parsed["ppl_base"] is None:
