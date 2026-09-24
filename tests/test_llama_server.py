@@ -464,6 +464,188 @@ class RegistryTests(Base):
         self.assertFalse(registry.status()["starting"])
 
 
+SAMPLES = Path(__file__).resolve().parent / "integration" / "samples"
+
+
+def sample_stderr(name):
+    text = (SAMPLES / name).read_text()
+    return text.split("# ---- stderr ----\n", 1)[1] if "# ---- stderr ----" in text else text
+
+
+class RealLogTests(unittest.TestCase):
+    """failure_from_log against logs captured from a REAL CPU-only llama.cpp (every one starts with the
+    'no usable GPU found' warning, even with -ngl 0)."""
+
+    def test_real_error_samples(self):
+        expected = {"error-server-bad-flag.txt": "does not understand one of the settings",
+                    "error-server-bad-cache-type.txt": "does not understand one of the settings",
+                    "error-server-bad-fa-value.txt": "does not understand one of the settings",
+                    "error-server-missing-file.txt": "model file is missing",
+                    "error-server-corrupt.txt": "damaged or incomplete",
+                    "error-server-unknown-arch.txt": "(notarealarch)",
+                    "error-server-port-in-use.txt": "port is already used"}
+        for name, reason in expected.items():
+            with self.subTest(name=name):
+                self.assertIn(reason, failure_from_log(sample_stderr(name), 1))
+
+    def test_cpu_only_warning_is_not_a_failure(self):
+        log = sample_stderr("server-log.txt")
+        self.assertIsNone(failure_from_log(log))
+        self.assertIsNone(failure_from_log(log, -15))
+        self.assertIn("memory ran out", failure_from_log(log, -9))
+        self.assertIn("Not enough memory", failure_from_log(log + "\nllama_model_load: error: failed to allocate buffer", 1))
+        self.assertIn("graphics card", failure_from_log(log + "\nggml_metal_init: error: no device", 1))
+
+
+class SeamTests(Base):
+    """What other modules call, run against the fake end to end."""
+
+    def test_pid_after_start_and_stop_is_idempotent_even_after_a_failed_start(self):
+        server = self.server().start()
+        self.assertTrue(psutil.pid_exists(server.pid))
+        server.stop()
+        server.stop()
+        with env(FAIL="oom", LOAD_SECONDS="0.05"):
+            failed = self.server()
+            with self.assertRaises(ValueError):
+                failed.start()
+        failed.stop()
+        failed.stop()
+        self.assertIsNone(LlamaServer(fake_command("server"), {"model_path": self.model}).stop())
+
+    def test_chat_template_kwargs_reach_the_server(self):
+        with env(REASONING="1", LOAD_SECONDS="0.05"):
+            server = self.server().start()
+            thinking = server.chat([{"role": "user", "content": "What is 6*7?"}])
+            plain = server.chat([{"role": "user", "content": "What is 6*7?"}],
+                                chat_template_kwargs={"enable_thinking": False})
+        self.assertTrue(thinking["reasoning"])
+        self.assertIsNone(plain["reasoning"])
+        self.assertEqual(plain["text"], "42")
+        body = {}
+        with mock.patch.object(server, "request", side_effect=lambda path, b, timeout: body.update(b) or
+                               {"choices": [{"message": {"content": "x"}}]}):
+            server.chat([{"role": "user", "content": "hi"}], chat_template_kwargs={"a": 1, "enable_thinking": True},
+                        enable_thinking=False)
+        self.assertEqual(body["chat_template_kwargs"], {"a": 1, "enable_thinking": False})
+
+    def test_testing_smoke_test_sends_no_thinking(self):
+        from llm_configurator import testing
+        with env(REASONING="1", LOAD_SECONDS="0.05"):
+            result = testing.smoke_test(fake_command("server"), {"model_path": self.model, "context": 2048})
+        self.assertTrue(result["ok"], result)
+
+    def test_evals_needle_test_passes_against_the_fake(self):
+        from llm_configurator import evals
+        server = self.server(context=8192).start()
+        result = evals.needle_test(server.chat, server.tokenize, 2000)
+        self.assertEqual(result["found"], len(result["results"]), result)
+
+    def test_user_llama_env_does_not_change_the_server(self):
+        with mock.patch.dict(os.environ, {"LLAMA_API_KEY": "secret", "LLAMA_ARG_CTX_SIZE": "8"}):
+            server = self.server().start()
+            self.assertEqual(server.chat([{"role": "user", "content": "What is 5+5?"}])["text"], "10")
+        env_used = llama_server.server_env(server.config)
+        self.assertNotIn("LLAMA_API_KEY", env_used)
+        self.assertEqual(env_used["LLAMA_ARG_CORS_ORIGINS"], "localhost")
+
+    def test_other_web_pages_cannot_read_the_server(self):
+        import urllib.request
+        server = self.server().start()
+        for origin, allowed in [("https://evil.example", False), ("http://localhost:3000", True),
+                                ("http://127.0.0.1:8000", True)]:
+            request = urllib.request.Request(server.base_url + "/props", headers={"Origin": origin})
+            with llama_server._OPENER.open(request, timeout=10) as response:
+                self.assertEqual(response.headers.get("Access-Control-Allow-Origin") == origin, allowed, origin)
+
+    def test_fixed_port_held_by_another_server_is_not_mistaken_for_ours(self):
+        port = free_port()
+        other = self.server(port=port, alias="OLD-MODEL").start()
+        with mock.patch.object(llama_server.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(ValueError, "port is already used"):
+                self.server(port=port).start()
+            popen.assert_not_called()
+        self.assertTrue(other.ready())
+
+    def test_load_progress_has_no_invented_total(self):
+        events = []
+        with env(LOAD_SECONDS="0.5"):
+            self.server().start(progress=events.append)
+        loading = [e for e in events if e["stage"] == "loading"]
+        self.assertTrue(loading)
+        self.assertTrue(all(e["total"] is None and isinstance(e["done"], float) for e in loading))
+
+    def test_registry_never_stays_starting_after_an_os_error(self):
+        blocker = self.dir / "notadir"
+        blocker.write_text("")
+        registry = ServerRegistry(log_dir=blocker / "logs")
+        with self.assertRaisesRegex(ValueError, "log file"):
+            registry.start(fake_command("server"), {"model_path": self.model})
+        status = registry.status()
+        self.assertFalse(status["starting"])
+        self.assertIn("log file", status["error"])
+        with mock.patch.object(LlamaServer, "start", side_effect=RuntimeError("boom /secret/path")):
+            with self.assertRaises(RuntimeError):
+                ServerRegistry().start(fake_command("server"), {"model_path": self.model})
+        registry = ServerRegistry()
+        with mock.patch.object(LlamaServer, "start", side_effect=RuntimeError("boom /secret/path")):
+            with self.assertRaises(RuntimeError):
+                registry.start(fake_command("server"), {"model_path": self.model})
+        self.assertFalse(registry.status()["starting"])
+        self.assertNotIn("/secret", registry.status()["error"])
+
+    def test_cpu_only_build_bad_setting_gets_the_settings_reason(self):
+        with env(GPU="none", LOAD_SECONDS="0.05"):
+            server = self.server(gpu_layers=0, cache_type_k="q8_0")
+            with mock.patch.object(llama_server.launch, "server_args",
+                                   side_effect=lambda c: ["-m", c["model_path"], "-ngl", "0", "--port", str(c["port"]),
+                                                          "--no-such-flag"]):
+                with self.assertRaisesRegex(ValueError, "does not understand one of the settings"):
+                    server.start()
+            self.assertIn("no usable GPU found", server.log_tail())
+            ok = self.server(gpu_layers=0).start()
+        self.assertIn("processor only", ok.warnings()[0])
+        self.assertIsNone(ok.failure_reason())
+
+    def test_draft_model_turns_on_speculative_decoding(self):
+        draft = str(write_fake_gguf(self.dir / "Qwen3-0.6B-Q8_0.gguf", "qwen3", 28))
+        server = self.server(draft_model_path=draft, draft_max=4).start()
+        timings = server.complete("The quick brown fox", max_tokens=16)["timings"]
+        self.assertGreater(timings["draft_n"], 0)
+        self.assertLessEqual(timings["draft_n_accepted"], timings["draft_n"])
+        plain = self.server().start().complete("The quick brown fox", max_tokens=16)["timings"]
+        self.assertNotIn("draft_n", plain)
+
+    @unittest.skipIf(os.name == "nt", "POSIX signals")
+    def test_exit_handlers_stop_servers_when_the_app_is_terminated(self):
+        import signal
+        script = ("import sys, time\n"
+                  "sys.path[:0] = [%r, %r]\n"
+                  "from fixtures import fake_command\n"
+                  "from llm_configurator import llama_server\n"
+                  "llama_server.install_exit_handlers()\n"
+                  "s = llama_server.LlamaServer(fake_command('server'), {'model_path': %r}).start()\n"
+                  "print(s.pid, flush=True)\n"
+                  "time.sleep(60)\n") % (str(Path(__file__).parent), str(Path(llama_server.__file__).parents[1]), self.model)
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(signal=signum):
+                parent = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE, text=True)
+                child = int(parent.stdout.readline())
+                parent.send_signal(signum)
+                parent.wait(20)
+                parent.stdout.close()
+                deadline = time.monotonic() + 10
+                while psutil.pid_exists(child) and time.monotonic() < deadline:
+                    try:
+                        if psutil.Process(child).status() == psutil.STATUS_ZOMBIE:
+                            break
+                    except psutil.NoSuchProcess:
+                        break
+                    time.sleep(0.05)
+                alive = psutil.pid_exists(child) and psutil.Process(child).status() != psutil.STATUS_ZOMBIE
+                self.assertFalse(alive, "llama-server outlived the app")
+
+
 class FakeBenchTests(Base):
     def bench(self, *args, extra_env=None):
         result = self.run_fake("bench", "-m", self.model, "-o", "json", *args, extra_env=extra_env)
