@@ -534,3 +534,22 @@ class SeamTests(unittest.TestCase):
         compose = ex.export(config, None, "docker-compose")["content"]
         self.assertIn('"/draft/d.gguf"', compose)
         self.assertIn('"--spec-type"', compose)
+
+
+class RuntimeBackendTests(unittest.TestCase):
+    def test_docker_image_and_env_follow_the_installed_build(self):
+        # A Vulkan llama.cpp build on an NVIDIA card: the tested run used Vulkan, not CUDA.
+        config = base(gpu_backend="cuda", gpu_uuid="GPU-1")
+        compose = ex.export(config, variant(), "docker-compose", runtime_backend="vulkan")["content"]
+        self.assertIn("image: ghcr.io/ggml-org/llama.cpp:server-vulkan", compose)
+        self.assertNotIn("driver: nvidia", compose)
+        script = ex.export(config, variant(), "llama-server", runtime_backend="vulkan")["content"]
+        self.assertNotIn("CUDA_VISIBLE_DEVICES", script)
+        # Unknown or CPU runtime: the config's own backend, as before.
+        for runtime in [None, "cpu", "unknown"]:
+            with self.subTest(runtime=runtime):
+                compose = ex.export(config, variant(), "docker-compose", runtime_backend=runtime)["content"]
+                self.assertIn("server-cuda", compose)
+        # CPU-only configs stay on the plain image whatever the build.
+        compose = ex.export(base(gpu_layers=0, gpu_backend="cuda"), variant(), "docker-compose", runtime_backend="vulkan")["content"]
+        self.assertIn("image: ghcr.io/ggml-org/llama.cpp:server\n", compose)

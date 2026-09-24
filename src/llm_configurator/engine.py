@@ -161,10 +161,19 @@ def _settings(record):
             "batch": settings.get("batch"), "ubatch": settings.get("ubatch"), "flash_attn": settings.get("flash_attn")}
 
 
+def _same_file(record, variant):
+    """Same model file. Catalogue files need the same sha256. A file found on disk (source "local") may not
+    be hashed yet; its id already names that file (gguf.local_id), so it matches by id unless both hashes differ."""
+    theirs = record.get("sha256")
+    if variant.sha256 and theirs:
+        return theirs == variant.sha256
+    return getattr(variant, "source", None) == "local"
+
+
 def _same_placement(record, variant, hardware, layers, gpu_uuid, threads, kv_cache_type, n_cpu_moe, launch=None):
     """Same file, machine, placement and settings. With `launch`, the tuning knobs must match it too."""
     fingerprint = hardware.get("fingerprint")
-    if not (fingerprint and record.get("variant_id") == variant.id and variant.sha256 and record.get("sha256") == variant.sha256
+    if not (fingerprint and record.get("variant_id") == variant.id and _same_file(record, variant)
             and record.get("fingerprint") == fingerprint and record.get("gpu_layers") == layers
             and record.get("gpu_uuid") == gpu_uuid and record.get("threads") == threads and record.get("users") == 1):
         return False
@@ -213,9 +222,7 @@ def interpolated_speed(records, variant, hardware, context, layers, gpu_uuid, th
         tps = low + (high - low) * (context - below) / (above - below)
         used, method = [below, above], f"between tests at {below:,} and {above:,} tokens"
     elif below and context <= below * EXTRAPOLATE_LIMIT:
-        weights = variant.size_bytes * active_fraction(variant)
-        ratio = (weights + kv_bytes(variant, below, 1, kv_cache_type)) / (weights + kv_bytes(variant, context, 1, kv_cache_type))
-        tps = points[below]["tps"] * ratio * EXTRAPOLATE_MARGIN
+        tps = _scaled(variant, points[below]["tps"], below, context, kv_cache_type)
         used, method = [below], f"scaled down from a test at {below:,} tokens"
     elif above:
         tps = points[above]["tps"]
@@ -224,6 +231,13 @@ def interpolated_speed(records, variant, hardware, context, layers, gpu_uuid, th
         return None
     return {"tps": round(tps, 2), "contexts": used, "method": method,
             "measurement_ids": [points[c].get("id") for c in used if points[c].get("id")]}
+
+
+def _scaled(variant, tps, measured_at, context, kv_cache_type):
+    """Speed at `context` from one measured with `measured_at` tokens in memory, by bytes read per token, shaded 10%."""
+    weights = variant.size_bytes * active_fraction(variant)
+    ratio = (weights + kv_bytes(variant, measured_at, 1, kv_cache_type)) / (weights + kv_bytes(variant, context, 1, kv_cache_type))
+    return round(tps * min(1.0, ratio) * EXTRAPOLATE_MARGIN, 2)
 
 
 def matching_tuned(tuned, variant, hardware, context, layers, kv_cache_type="f16", n_cpu_moe=0, gpu_uuid=None):
@@ -244,7 +258,7 @@ def matching_tuned(tuned, variant, hardware, context, layers, kv_cache_type="f16
         best_placement = {"gpu_layers": best.get("gpu_layers"), "n_cpu_moe": best.get("n_cpu_moe") or 0,
                           "cache_type_k": best.get("cache_type_k") or "f16"}
         if (not fingerprint or record.get("variant_id") != variant.id or record.get("fingerprint") != fingerprint
-                or (variant.sha256 and record.get("sha256") not in (None, variant.sha256))
+                or (variant.sha256 and record.get("sha256") not in (None, variant.sha256))  # ids match, so local files do too
                 or start("context") != context or start("gpu_layers") != layers
                 or (start("n_cpu_moe") or 0) != n_cpu_moe or (start("kv_cache_type", "cache_type_k") or "f16") != kv_cache_type
                 or (best.get("parallel") or 1) != 1 or (record.get("users") or 1) != 1
@@ -253,10 +267,17 @@ def matching_tuned(tuned, variant, hardware, context, layers, kv_cache_type="f16
                 or not _recent(record) or not _speed(result.get("tps"))):
             continue
         depth = (record.get("settings") or {}).get("depth") if isinstance(record.get("settings"), dict) else None
+        depth = depth if type(depth) is int else record.get("depth") if type(record.get("depth")) is int else None
+        verified = depth is not None and depth + FULL_DEPTH_SLACK >= context
+        same = best_placement == {"gpu_layers": layers, "n_cpu_moe": n_cpu_moe, "cache_type_k": kv_cache_type}
         return {"tps": result["tps"], "pp_tps": result.get("pp_tps"), "improvement": record.get("improvement"),
                 "timestamp": record["timestamp"], "stopped": record.get("stopped"), "depth": depth,
-                "verified": type(depth) is int and depth + FULL_DEPTH_SLACK >= context,
-                "same_placement": best_placement == {"gpu_layers": layers, "n_cpu_moe": n_cpu_moe, "cache_type_k": kv_cache_type},
+                "verified": verified,
+                # A short tune measured `tps` with only `depth` tokens in memory: scale it to this length like
+                # interpolated_speed does (an estimate, never "verified"); None when the depth is unknown.
+                "scaled_tps": (_scaled(variant, result["tps"], depth, context, kv_cache_type)
+                               if same and not verified and depth is not None else None),
+                "same_placement": same,
                 "best_placement": best_placement,
                 "settings": {k: best[k] for k in ["threads", "batch", "ubatch", "flash_attn"] if best.get(k) is not None}}
     return None
@@ -307,7 +328,7 @@ def community_speed(records, variant, hardware, config, evidence=None):
             return None
     try:
         found = evidence(records, variant, hardware, config)
-    except (KeyError, TypeError, ValueError):
+    except (AttributeError, KeyError, TypeError, ValueError):
         return None
     if not isinstance(found, dict) or not _speed(found.get("median_tps")) or type(found.get("n")) is not int or found["n"] < 1:
         return None
@@ -340,8 +361,10 @@ def verdict(evidence, target, tps=None, interpolated=None, community=None, speed
         return "too_slow", f"{head}, well below your target of {goal}."
     likely = lambda value: "likely fast enough" if value >= target else f"possibly slower than your target of {goal}"
     if evidence == "tuned" and tuned:
+        scaled = tuned.get("scaled_tps")
+        guess = (f" Scaled to this length that is roughly {_tps(scaled, target)}, {likely(scaled)}." if scaled else "")
         return "unknown", (f"Tuned with a short test: about {_tps(tuned['tps'], target)} tokens per second near the start "
-                           f"of a conversation. Run a speed test to check it at this length.")
+                           f"of a conversation.{guess} Run a speed test to check it at this length.")
     if evidence == "interpolated":
         return "unknown", (f"Not tested at this length yet; tests at other lengths suggest about {_tps(interpolated['tps'], target)} "
                            f"tokens per second, {likely(interpolated['tps'])}.")
@@ -361,16 +384,18 @@ def verdict(evidence, target, tps=None, interpolated=None, community=None, speed
     return "unknown", "Not tested yet. Run a speed test to find out how fast it is."
 
 
-def _launch(context, users, layers, total, threads, kv, moe, gpu, tuned, hide=None):
+def _launch(context, users, layers, total, threads, kv, moe, gpu, tuned, hide=None, runtime_gpu=None):
     """Launch-config fragment for launch.from_candidate (no model_path).
 
     `hide` is a GPU backend seen on this computer: CPU-only candidates name it so that
-    launch adds `-dev none`, even when that GPU's free memory is unknown.
+    launch adds `-dev none`, even when that GPU's free memory is unknown. `runtime_gpu` is the
+    installed build's GPU backend; it wins over the card's own (a Vulkan build on an NVIDIA card
+    must not get CUDA_VISIBLE_DEVICES, which it ignores).
     """
     config = {"context": context, "parallel": users, "gpu_layers": layers, "total_layers": total, "threads": threads,
               "cache_type_k": kv, "cache_type_v": kv, "n_cpu_moe": moe,
               "flash_attn": "on" if kv != "f16" else "auto"}  # llama.cpp needs flash attention for a compressed V cache
-    backend = gpu.get("backend") if gpu else hide if not layers else None
+    backend = (runtime_gpu or gpu.get("backend")) if gpu else hide if not layers else None
     if backend in GPU_BACKENDS:
         config["gpu_backend"] = backend  # also lets CPU-only runs hide the GPU (-dev none)
     if gpu and layers and isinstance(gpu.get("uuid"), str) and gpu["uuid"]:
@@ -384,7 +409,7 @@ def _launch(context, users, layers, total, threads, kv, moe, gpu, tuned, hide=No
 
 
 def _evidence(variant, hardware, records, tunes, crowd_rows, calibration, efficiency, req, context, layers, moe, gpu,
-              gpu_uuid, threads, unified, hide, community_evidence, use_default_community):
+              gpu_uuid, threads, unified, hide, community_evidence, use_default_community, runtime_gpu=None):
     """Launch fragment and speed evidence for one placement (identical in every memory scenario).
 
     Order: a speed test of exactly this launch > a tune verified at this length > interpolation
@@ -394,7 +419,7 @@ def _evidence(variant, hardware, records, tunes, crowd_rows, calibration, effici
     kv, single = req.kv_cache_type, req.users == 1
     tune = matching_tuned(tunes, variant, hardware, context, layers, kv, moe, gpu_uuid) if single else None
     applied = tune if tune and tune["same_placement"] else None
-    launch = _launch(context, req.users, layers, variant.layers, threads, kv, moe, gpu, applied, hide)
+    launch = _launch(context, req.users, layers, variant.layers, threads, kv, moe, gpu, applied, hide, runtime_gpu)
     args = (variant, hardware, context, layers, gpu_uuid, launch["threads"], kv, moe, launch)
     measurement = matching_speed(records, *args) if single else None
     verified_tune = applied if applied and applied["verified"] else None
@@ -414,7 +439,9 @@ def _evidence(variant, hardware, records, tunes, crowd_rows, calibration, effici
 
 
 def recommend(variants, hardware, requirements, measurements=(), calibration=None, community=(), tuned=(),
-              community_evidence=None):
+              community_evidence=None, runtime_backend=None):
+    """Ranked candidates. `runtime_backend` is the installed llama.cpp build's backend
+    (runtime_install.detect(store)["backend"]); when it is a GPU backend it names the launch backend."""
     req = requirements
     kv = req.kv_cache_type
     measurements = list(measurements or ())
@@ -428,8 +455,12 @@ def recommend(variants, hardware, requirements, measurements=(), calibration=Non
         scenarios.append(("after_closing", min(hardware["ram_total"] - req.reserve_gib * GIB, ram_budget + reclaim)))
     gpu = next((g for g in hardware["gpus"] if g.get("index") == req.gpu_index), None)
     # Any GPU llama.cpp could use, even one whose free memory is unknown: CPU-only runs must hide it.
-    hide = next((g.get("backend") for g in [gpu, *hardware["gpus"], *(hardware.get("other_gpus") or [])]
-                 if isinstance(g, dict) and g.get("backend") in GPU_BACKENDS), None)
+    runtime_gpu = runtime_backend if runtime_backend in GPU_BACKENDS else None
+    hide = runtime_gpu or next((g.get("backend") for g in [gpu, *hardware["gpus"], *(hardware.get("other_gpus") or [])]
+                                if isinstance(g, dict) and g.get("backend") in GPU_BACKENDS), None)
+    if runtime_backend == "cpu" and gpu is not None:
+        notes_extra.append("The installed llama.cpp build looks like a processor-only build, so options that use the "
+                           "graphics chip need a GPU build of llama.cpp to run as described.")
     if gpu is not None and not _speed(gpu.get("available")):
         # Free memory unknown (not zero): never guess, fall back to CPU-only placements.
         notes_extra.append(f"{gpu.get('name') or 'The selected graphics chip'} does not report its free memory, so only CPU options are shown.")
@@ -483,7 +514,7 @@ def recommend(variants, hardware, requirements, measurements=(), calibration=Non
                     if key not in evidence_cache:
                         evidence_cache[key] = _evidence(variant, hardware, records, tunes, crowd_rows, calibration, efficiency,
                                                         req, context, layers, moe, gpu, gpu_uuid, threads, unified, hide,
-                                                        community_evidence, use_default_community)
+                                                        community_evidence, use_default_community, runtime_gpu)
                     launch, measurement, tune, tps, interpolated, crowd, speed_estimate, evidence = evidence_cache[key]
                     launch = dict(launch)
                     meets_speed = tps >= req.min_tps if tps is not None else None
@@ -541,6 +572,7 @@ def recommend(variants, hardware, requirements, measurements=(), calibration=Non
     def order(result):
         quality = result["quality_score"] if comparable and result["quality_score"] is not None else -1
         speed = next((v for v in [result["tps"], (result["speed_interpolated"] or {}).get("tps"),
+                                  (result["tuned"] or {}).get("scaled_tps"),
                                   (result["community"] or {}).get("median_tps"), result["speed_estimate"].get("low_tps")] if v is not None), -1)
         verified = (result["speed_meets_target"] is True, result["speed_meets_target"] is not False)
         # A verified speed always outranks a guess: an estimate can never jump ahead of a real test.
