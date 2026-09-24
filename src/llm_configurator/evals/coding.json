@@ -1,0 +1,486 @@
+{
+  "version": 1,
+  "workload": "coding",
+  "description": "Short code-reading questions: predict program output, find the buggy line, and basic concepts.",
+  "items": [
+    {
+      "id": "cod-001",
+      "kind": "python_output",
+      "difficulty": "easy",
+      "prompt": "What does this Python code print? Give the exact printed output.\n\n```python\na = [3, 8, 1, 6]\nprint(sum(a) - max(a))\n```",
+      "answer": "10",
+      "code": "a = [3, 8, 1, 6]\nprint(sum(a) - max(a))",
+      "language": "python"
+    },
+    {
+      "id": "cod-002",
+      "kind": "python_output",
+      "difficulty": "easy",
+      "prompt": "What does this Python code print? Give the exact printed output.\n\n```python\ns = \"lantern\"\nprint(s[2:5])\n```",
+      "answer": "nte",
+      "code": "s = \"lantern\"\nprint(s[2:5])",
+      "language": "python"
+    },
+    {
+      "id": "cod-003",
+      "kind": "python_output",
+      "difficulty": "easy",
+      "prompt": "What does this Python code print? Give the exact printed output.\n\n```python\nx = 7\ny = x // 2 + x % 3\nprint(y)\n```",
+      "answer": "4",
+      "code": "x = 7\ny = x // 2 + x % 3\nprint(y)",
+      "language": "python"
+    },
+    {
+      "id": "cod-004",
+      "kind": "python_output",
+      "difficulty": "easy",
+      "prompt": "What does this Python code print? Give the exact printed output.\n\n```python\nnums = [4, 9, 2]\nnums.append(5)\nnums.sort()\nprint(nums)\n```",
+      "answer": "[2, 4, 5, 9]",
+      "code": "nums = [4, 9, 2]\nnums.append(5)\nnums.sort()\nprint(nums)",
+      "language": "python"
+    },
+    {
+      "id": "cod-005",
+      "kind": "python_output",
+      "difficulty": "easy",
+      "prompt": "What does this Python code print? Give the exact printed output.\n\n```python\nwords = \"blue fox jumps over red moss\".split()\nprint(len(words[2]))\n```",
+      "answer": "5",
+      "code": "words = \"blue fox jumps over red moss\".split()\nprint(len(words[2]))",
+      "language": "python"
+    },
+    {
+      "id": "cod-006",
+      "kind": "python_output",
+      "difficulty": "easy",
+      "prompt": "What does this Python code print? Give the exact printed output.\n\n```python\nprint(\"ab\" * 3 + \"c\")\n```",
+      "answer": "abababc",
+      "code": "print(\"ab\" * 3 + \"c\")",
+      "language": "python"
+    },
+    {
+      "id": "cod-007",
+      "kind": "python_output",
+      "difficulty": "medium",
+      "prompt": "What does this Python code print? Give the exact printed output.\n\n```python\nd = {\"kiwi\": 3, \"fig\": 5}\nd[\"kiwi\"] += d.get(\"plum\", 10)\nprint(d[\"kiwi\"])\n```",
+      "answer": "13",
+      "code": "d = {\"kiwi\": 3, \"fig\": 5}\nd[\"kiwi\"] += d.get(\"plum\", 10)\nprint(d[\"kiwi\"])",
+      "language": "python"
+    },
+    {
+      "id": "cod-008",
+      "kind": "python_output",
+      "difficulty": "medium",
+      "prompt": "What does this Python code print? Give the exact printed output.\n\n```python\nprint([n * n for n in range(7) if n % 3 == 1])\n```",
+      "answer": "[1, 16]",
+      "code": "print([n * n for n in range(7) if n % 3 == 1])",
+      "language": "python"
+    },
+    {
+      "id": "cod-009",
+      "kind": "python_output",
+      "difficulty": "medium",
+      "prompt": "What does this Python code print? Give the exact printed output.\n\n```python\nfruits = [\"pear\", \"Apple\", \"fig\", \"banana\"]\nprint(\" \".join(sorted(fruits, key=len)))\n```",
+      "answer": "fig pear Apple banana",
+      "code": "fruits = [\"pear\", \"Apple\", \"fig\", \"banana\"]\nprint(\" \".join(sorted(fruits, key=len)))",
+      "language": "python"
+    },
+    {
+      "id": "cod-010",
+      "kind": "python_output",
+      "difficulty": "medium",
+      "prompt": "What does this Python code print? Give the exact printed output.\n\n```python\nt = \"Mississippi\"\nprint(t.count(\"ss\") + t.find(\"p\"))\n```",
+      "answer": "10",
+      "code": "t = \"Mississippi\"\nprint(t.count(\"ss\") + t.find(\"p\"))",
+      "language": "python"
+    },
+    {
+      "id": "cod-011",
+      "kind": "python_output",
+      "difficulty": "medium",
+      "prompt": "What does this Python code print? Give the exact printed output.\n\n```python\nprint(\"orchestra\"[::-2])\n```",
+      "answer": "ateco",
+      "code": "print(\"orchestra\"[::-2])",
+      "language": "python"
+    },
+    {
+      "id": "cod-012",
+      "kind": "python_output",
+      "difficulty": "medium",
+      "prompt": "What does this Python code print? Give the exact printed output.\n\n```python\nx = [1, 2, 3]\ny = x\ny += [4]\nprint(len(x))\n```",
+      "answer": "4",
+      "code": "x = [1, 2, 3]\ny = x\ny += [4]\nprint(len(x))",
+      "language": "python"
+    },
+    {
+      "id": "cod-013",
+      "kind": "python_output",
+      "difficulty": "medium",
+      "prompt": "What does this Python code print? Give the exact printed output.\n\n```python\ntotal = 0\nfor i in range(1, 5):\n    for j in range(i):\n        if (i + j) % 2:\n            continue\n        total += j\nprint(total)\n```",
+      "answer": "3",
+      "code": "total = 0\nfor i in range(1, 5):\n    for j in range(i):\n        if (i + j) % 2:\n            continue\n        total += j\nprint(total)",
+      "language": "python"
+    },
+    {
+      "id": "cod-014",
+      "kind": "python_output",
+      "difficulty": "medium",
+      "prompt": "What does this Python code print? Give the exact printed output.\n\n```python\nprint(int(\"101\", 2) + int(\"17\", 8))\n```",
+      "answer": "20",
+      "code": "print(int(\"101\", 2) + int(\"17\", 8))",
+      "language": "python"
+    },
+    {
+      "id": "cod-015",
+      "kind": "python_output",
+      "difficulty": "medium",
+      "prompt": "What does this Python code print? Give the exact printed output.\n\n```python\ns = {1, 2, 3}\nt = {2, 3, 4}\nprint(len(s ^ t), len(s | t))\n```",
+      "answer": "2 4",
+      "code": "s = {1, 2, 3}\nt = {2, 3, 4}\nprint(len(s ^ t), len(s | t))",
+      "language": "python"
+    },
+    {
+      "id": "cod-016",
+      "kind": "python_output",
+      "difficulty": "hard",
+      "prompt": "What does this Python code print? Give the exact printed output.\n\n```python\ndef f(n, acc=[]):\n    acc.append(n)\n    return len(acc)\n\nf(1)\nf(2)\nprint(f(3))\n```",
+      "answer": "3",
+      "code": "def f(n, acc=[]):\n    acc.append(n)\n    return len(acc)\n\nf(1)\nf(2)\nprint(f(3))",
+      "language": "python"
+    },
+    {
+      "id": "cod-017",
+      "kind": "python_output",
+      "difficulty": "hard",
+      "prompt": "What does this Python code print? Give the exact printed output.\n\n```python\nfs = [lambda: i * 10 for i in range(4)]\nprint(fs[1]())\n```",
+      "answer": "30",
+      "code": "fs = [lambda: i * 10 for i in range(4)]\nprint(fs[1]())",
+      "language": "python"
+    },
+    {
+      "id": "cod-018",
+      "kind": "python_output",
+      "difficulty": "hard",
+      "prompt": "What does this Python code print? Give the exact printed output.\n\n```python\nprint(round(2.5) + round(3.5))\n```",
+      "answer": "6",
+      "code": "print(round(2.5) + round(3.5))",
+      "language": "python"
+    },
+    {
+      "id": "cod-019",
+      "kind": "python_output",
+      "difficulty": "hard",
+      "prompt": "What does this Python code print? Give the exact printed output.\n\n```python\ndef g():\n    try:\n        return \"a\"\n    finally:\n        print(\"b\", end=\"\")\n\nprint(g())\n```",
+      "answer": "ba",
+      "code": "def g():\n    try:\n        return \"a\"\n    finally:\n        print(\"b\", end=\"\")\n\nprint(g())",
+      "language": "python"
+    },
+    {
+      "id": "cod-020",
+      "kind": "python_output",
+      "difficulty": "hard",
+      "prompt": "What does this Python code print? Give the exact printed output.\n\n```python\nprint(-7 // 2, -7 % 2)\n```",
+      "answer": "-4 1",
+      "code": "print(-7 // 2, -7 % 2)",
+      "language": "python"
+    },
+    {
+      "id": "cod-021",
+      "kind": "python_output",
+      "difficulty": "hard",
+      "prompt": "What does this Python code print? Give the exact printed output.\n\n```python\ng = (n * 2 for n in range(5))\nfirst = sum(g)\nprint(first, sum(g))\n```",
+      "answer": "20 0",
+      "code": "g = (n * 2 for n in range(5))\nfirst = sum(g)\nprint(first, sum(g))",
+      "language": "python"
+    },
+    {
+      "id": "cod-022",
+      "kind": "python_output",
+      "difficulty": "medium",
+      "prompt": "What does this Python code print? Give the exact printed output.\n\n```python\nprint(bool([]), bool(\"0\"))\n```",
+      "answer": "False True",
+      "code": "print(bool([]), bool(\"0\"))",
+      "language": "python"
+    },
+    {
+      "id": "cod-023",
+      "kind": "js_output",
+      "difficulty": "easy",
+      "prompt": "What does this JavaScript code print to the console? Give the exact printed output.\n\n```javascript\nconst a = [5, 1, 4];\nconsole.log(a.length + a[2]);\n```",
+      "answer": "7",
+      "code": "const a = [5, 1, 4];\nconsole.log(a.length + a[2]);",
+      "language": "javascript"
+    },
+    {
+      "id": "cod-024",
+      "kind": "js_output",
+      "difficulty": "easy",
+      "prompt": "What does this JavaScript code print to the console? Give the exact printed output.\n\n```javascript\nconsole.log(\"hop\".toUpperCase() + \"-\" + 3);\n```",
+      "answer": "HOP-3",
+      "code": "console.log(\"hop\".toUpperCase() + \"-\" + 3);",
+      "language": "javascript"
+    },
+    {
+      "id": "cod-025",
+      "kind": "js_output",
+      "difficulty": "easy",
+      "prompt": "What does this JavaScript code print to the console? Give the exact printed output.\n\n```javascript\nlet n = 0;\nfor (let i = 0; i < 5; i++) {\n  if (i === 3) break;\n  n += i;\n}\nconsole.log(n);\n```",
+      "answer": "3",
+      "code": "let n = 0;\nfor (let i = 0; i < 5; i++) {\n  if (i === 3) break;\n  n += i;\n}\nconsole.log(n);",
+      "language": "javascript"
+    },
+    {
+      "id": "cod-026",
+      "kind": "js_output",
+      "difficulty": "easy",
+      "prompt": "What does this JavaScript code print to the console? Give the exact printed output.\n\n```javascript\nconst total = [3, 6, 9].filter(x => x > 4).reduce((s, x) => s + x, 0);\nconsole.log(total);\n```",
+      "answer": "15",
+      "code": "const total = [3, 6, 9].filter(x => x > 4).reduce((s, x) => s + x, 0);\nconsole.log(total);",
+      "language": "javascript"
+    },
+    {
+      "id": "cod-027",
+      "kind": "js_output",
+      "difficulty": "medium",
+      "prompt": "What does this JavaScript code print to the console? Give the exact printed output.\n\n```javascript\nconsole.log(\"7\" + 3 - 1);\n```",
+      "answer": "72",
+      "code": "console.log(\"7\" + 3 - 1);",
+      "language": "javascript"
+    },
+    {
+      "id": "cod-028",
+      "kind": "js_output",
+      "difficulty": "medium",
+      "prompt": "What does this JavaScript code print to the console? Give the exact printed output.\n\n```javascript\nconsole.log(typeof null, typeof NaN);\n```",
+      "answer": "object number",
+      "code": "console.log(typeof null, typeof NaN);",
+      "language": "javascript"
+    },
+    {
+      "id": "cod-029",
+      "kind": "js_output",
+      "difficulty": "medium",
+      "prompt": "What does this JavaScript code print to the console? Give the exact printed output.\n\n```javascript\nconst o = { a: 1, b: 2, c: 3 };\nconst { a, ...rest } = o;\nconsole.log(Object.keys(rest).length + a);\n```",
+      "answer": "3",
+      "code": "const o = { a: 1, b: 2, c: 3 };\nconst { a, ...rest } = o;\nconsole.log(Object.keys(rest).length + a);",
+      "language": "javascript"
+    },
+    {
+      "id": "cod-030",
+      "kind": "js_output",
+      "difficulty": "medium",
+      "prompt": "What does this JavaScript code print to the console? Give the exact printed output.\n\n```javascript\nconsole.log(\"banana\".split(\"a\").length);\n```",
+      "answer": "4",
+      "code": "console.log(\"banana\".split(\"a\").length);",
+      "language": "javascript"
+    },
+    {
+      "id": "cod-031",
+      "kind": "js_output",
+      "difficulty": "hard",
+      "prompt": "What does this JavaScript code print to the console? Give the exact printed output.\n\n```javascript\nconsole.log([10, 9, 1].sort());\n```",
+      "answer": "[ 1, 10, 9 ]",
+      "code": "console.log([10, 9, 1].sort());",
+      "language": "javascript",
+      "accept": [
+        "(\\(3\\) ?)?\\[ ?1, ?10, ?9 ?\\]"
+      ]
+    },
+    {
+      "id": "cod-032",
+      "kind": "js_output",
+      "difficulty": "hard",
+      "prompt": "What does this JavaScript code print to the console? Give the exact printed output.\n\n```javascript\nconsole.log([1, 2, 3].map(parseInt).join(\",\"));\n```",
+      "answer": "1,NaN,NaN",
+      "code": "console.log([1, 2, 3].map(parseInt).join(\",\"));",
+      "language": "javascript"
+    },
+    {
+      "id": "cod-033",
+      "kind": "js_output",
+      "difficulty": "hard",
+      "prompt": "What does this JavaScript code print to the console? Give the exact printed output.\n\n```javascript\nvar fns = [];\nfor (var i = 0; i < 3; i++) {\n  fns.push(() => i);\n}\nconsole.log(fns[0]() + fns[2]());\n```",
+      "answer": "6",
+      "code": "var fns = [];\nfor (var i = 0; i < 3; i++) {\n  fns.push(() => i);\n}\nconsole.log(fns[0]() + fns[2]());",
+      "language": "javascript"
+    },
+    {
+      "id": "cod-034",
+      "kind": "value_of",
+      "difficulty": "easy",
+      "prompt": "What is the value of x after this Python code runs? Give just the value.\n\n```python\nx = 4\nx = x * 3 - 5\nx += 2\nprint(x)\n```",
+      "answer": "9",
+      "code": "x = 4\nx = x * 3 - 5\nx += 2\nprint(x)",
+      "language": "python"
+    },
+    {
+      "id": "cod-035",
+      "kind": "value_of",
+      "difficulty": "easy",
+      "prompt": "What is the value of x after this Python code runs? Give just the value.\n\n```python\nx = \"cab\"\nx = \"\".join(sorted(x)) * 2\nprint(x)\n```",
+      "answer": "abcabc",
+      "code": "x = \"cab\"\nx = \"\".join(sorted(x)) * 2\nprint(x)",
+      "language": "python"
+    },
+    {
+      "id": "cod-036",
+      "kind": "value_of",
+      "difficulty": "medium",
+      "prompt": "What is the value of x after this Python code runs? Give just the value.\n\n```python\nx = 0\nfor k in [2, 5, 8, 11]:\n    if k > 6:\n        x += k\n    else:\n        x -= 1\nprint(x)\n```",
+      "answer": "17",
+      "code": "x = 0\nfor k in [2, 5, 8, 11]:\n    if k > 6:\n        x += k\n    else:\n        x -= 1\nprint(x)",
+      "language": "python"
+    },
+    {
+      "id": "cod-037",
+      "kind": "value_of",
+      "difficulty": "medium",
+      "prompt": "What is the value of x after this Python code runs? Give just the value.\n\n```python\nx = 1\nwhile x < 100:\n    x = x * 3 + 1\nprint(x)\n```",
+      "answer": "121",
+      "code": "x = 1\nwhile x < 100:\n    x = x * 3 + 1\nprint(x)",
+      "language": "python"
+    },
+    {
+      "id": "cod-038",
+      "kind": "value_of",
+      "difficulty": "medium",
+      "prompt": "What is the value of x after this Python code runs? Give just the value.\n\n```python\nx = 10\n\ndef bump():\n    global x\n    x = x + 5\n    return x\n\ny = bump() + bump()\nprint(x)\n```",
+      "answer": "20",
+      "code": "x = 10\n\ndef bump():\n    global x\n    x = x + 5\n    return x\n\ny = bump() + bump()\nprint(x)",
+      "language": "python"
+    },
+    {
+      "id": "cod-039",
+      "kind": "value_of",
+      "difficulty": "hard",
+      "prompt": "What is the value of x after this Python code runs? Give just the value.\n\n```python\nrow = [0] * 3\nm = [row] * 2\nm[0][1] = 7\nx = sum(m[1])\nprint(x)\n```",
+      "answer": "7",
+      "code": "row = [0] * 3\nm = [row] * 2\nm[0][1] = 7\nx = sum(m[1])\nprint(x)",
+      "language": "python"
+    },
+    {
+      "id": "cod-040",
+      "kind": "value_of",
+      "difficulty": "hard",
+      "prompt": "What is the value of x after this JavaScript code runs? Give just the value.\n\n```javascript\nlet x = 2;\nx = x++ + ++x;\nconsole.log(x);\n```",
+      "answer": "6",
+      "code": "let x = 2;\nx = x++ + ++x;\nconsole.log(x);",
+      "language": "javascript"
+    },
+    {
+      "id": "cod-041",
+      "kind": "find_bug_line",
+      "difficulty": "easy",
+      "prompt": "This Python function is supposed to return the largest number in a non-empty list. Exactly one line contains a bug. Which line number is it? Give just the line number.\n\n```python\n1: def largest(nums):\n2:     best = nums[0]\n3:     for n in nums:\n4:         if n < best:\n5:             best = n\n6:     return best\n```",
+      "answer": "4"
+    },
+    {
+      "id": "cod-042",
+      "kind": "find_bug_line",
+      "difficulty": "easy",
+      "prompt": "This JavaScript function is supposed to clamp x into the range [lo, hi]: return lo if x is below lo, hi if x is above hi, otherwise x. Exactly one line contains a bug. Which line number is it? Give just the line number.\n\n```javascript\n1: function clamp(x, lo, hi) {\n2:   if (x < lo) return lo;\n3:   if (x > hi) return lo;\n4:   return x;\n5: }\n```",
+      "answer": "3"
+    },
+    {
+      "id": "cod-043",
+      "kind": "find_bug_line",
+      "difficulty": "easy",
+      "prompt": "This Python function is supposed to return the product 1 * 2 * ... * n (the factorial of n) for n >= 1. The loop variable k is meant to take every value from 1 to n. Exactly one line contains a bug. Which line number is it? Give just the line number.\n\n```python\n1: def factorial(n):\n2:     result = 1\n3:     for k in range(1, n):\n4:         result *= k\n5:     return result\n```",
+      "answer": "3"
+    },
+    {
+      "id": "cod-044",
+      "kind": "find_bug_line",
+      "difficulty": "medium",
+      "prompt": "This Python function is supposed to count how many vowels (a, e, i, o, u, case-insensitive) appear in the text. Exactly one line contains a bug. Which line number is it? Give just the line number.\n\n```python\n1: def count_vowels(text):\n2:     count = 0\n3:     for ch in text.lower():\n4:         if ch in \"aeiu\":\n5:             count += 1\n6:     return count\n```",
+      "answer": "4"
+    },
+    {
+      "id": "cod-045",
+      "kind": "find_bug_line",
+      "difficulty": "medium",
+      "prompt": "This Python function is supposed to return True for leap years: years divisible by 4 are leap years, except years divisible by 100, which are leap years only if also divisible by 400. Exactly one line contains a bug. Which line number is it? Give just the line number.\n\n```python\n1: def is_leap(year):\n2:     if year % 400 == 0:\n3:         return True\n4:     if year % 100 == 0:\n5:         return True\n6:     return year % 4 == 0\n```",
+      "answer": "5"
+    },
+    {
+      "id": "cod-046",
+      "kind": "find_bug_line",
+      "difficulty": "medium",
+      "prompt": "This Python function is supposed to return a new list with duplicates removed, keeping the first occurrence of each item in its original order. Exactly one line contains a bug. Which line number is it? Give just the line number.\n\n```python\n1: def unique(items):\n2:     seen = set()\n3:     out = []\n4:     for item in items:\n5:         if item in seen:\n6:             seen.add(item)\n7:             out.append(item)\n8:     return out\n```",
+      "answer": "5"
+    },
+    {
+      "id": "cod-047",
+      "kind": "find_bug_line",
+      "difficulty": "medium",
+      "prompt": "This JavaScript function is supposed to return the sum of all even numbers in the array. Exactly one line contains a bug. Which line number is it? Give just the line number.\n\n```javascript\n1: function sumEvens(arr) {\n2:   let total = 0;\n3:   for (let i = 1; i < arr.length; i++) {\n4:     if (arr[i] % 2 === 0) total += arr[i];\n5:   }\n6:   return total;\n7: }\n```",
+      "answer": "3"
+    },
+    {
+      "id": "cod-048",
+      "kind": "find_bug_line",
+      "difficulty": "medium",
+      "prompt": "This Python function is supposed to split a list into consecutive chunks of length size (the last chunk may be shorter). Exactly one line contains a bug. Which line number is it? Give just the line number.\n\n```python\n1: def chunks(items, size):\n2:     out = []\n3:     for start in range(0, len(items), size):\n4:         out.append(items[start:size])\n5:     return out\n```",
+      "answer": "4"
+    },
+    {
+      "id": "cod-049",
+      "kind": "find_bug_line",
+      "difficulty": "hard",
+      "prompt": "This Python function is supposed to return the n-th Fibonacci number, where fib(0) = 0, fib(1) = 1, fib(2) = 1, fib(3) = 2. After i passes of the loop, a is meant to hold fib(i) and b to hold fib(i + 1). Exactly one line contains a bug. Which line number is it? Give just the line number.\n\n```python\n1: def fib(n):\n2:     a, b = 0, 1\n3:     for _ in range(n):\n4:         a, b = b, a + b\n5:     return b\n```",
+      "answer": "5"
+    },
+    {
+      "id": "cod-050",
+      "kind": "find_bug_line",
+      "difficulty": "hard",
+      "prompt": "This Python function is supposed to return the index of target in an ascending sorted list using binary search, or -1 if it is absent. Exactly one line contains a bug. Which line number is it? Give just the line number.\n\n```python\n1: def find(sorted_list, target):\n2:     lo, hi = 0, len(sorted_list) - 1\n3:     while lo <= hi:\n4:         mid = (lo + hi) // 2\n5:         if sorted_list[mid] == target:\n6:             return mid\n7:         if sorted_list[mid] < target:\n8:             lo = mid + 1\n9:         else:\n10:             hi = mid + 1\n11:     return -1\n```",
+      "answer": "10"
+    },
+    {
+      "id": "cod-051",
+      "kind": "find_bug_line",
+      "difficulty": "hard",
+      "prompt": "This Python function is supposed to return the second-largest DISTINCT value in the list (the list has at least two distinct values; duplicates of the maximum must not count). Exactly one line contains a bug. Which line number is it? Give just the line number.\n\n```python\n1: def second_largest(nums):\n2:     first = second = float(\"-inf\")\n3:     for n in nums:\n4:         if n > first:\n5:             second = first\n6:             first = n\n7:         elif n > second:\n8:             second = n\n9:     return second\n```",
+      "answer": "7"
+    },
+    {
+      "id": "cod-052",
+      "kind": "find_bug_line",
+      "difficulty": "hard",
+      "prompt": "This JavaScript function is supposed to return an object counting how many times each word appears in the array, e.g. countWords([\"a\", \"b\", \"a\"]) gives {a: 2, b: 1}. Exactly one line contains a bug. Which line number is it? Give just the line number.\n\n```javascript\n1: function countWords(words) {\n2:   const counts = {};\n3:   for (const w of words) {\n4:     counts[w] = counts[w] + 1 || 0;\n5:   }\n6:   return counts;\n7: }\n```",
+      "answer": "4"
+    },
+    {
+      "id": "cod-053",
+      "kind": "concept",
+      "difficulty": "easy",
+      "prompt": "Which data structure removes items in last-in, first-out (LIFO) order? Reply with one word.",
+      "answer": "stack",
+      "accept": [
+        "(a )?stacks?"
+      ]
+    },
+    {
+      "id": "cod-054",
+      "kind": "concept",
+      "difficulty": "easy",
+      "prompt": "What is the worst-case time complexity of binary search on a sorted array of n elements? Answer in big-O notation.",
+      "answer": "O(log n)",
+      "accept": [
+        "o\\(\\s?log\\s?\\(?n\\)?\\s?\\)",
+        "o\\(\\s?lg\\s?n\\s?\\)",
+        "o\\(\\s?log2\\s?n\\s?\\)"
+      ]
+    },
+    {
+      "id": "cod-055",
+      "kind": "concept",
+      "difficulty": "medium",
+      "prompt": "In Python, which built-in exception type is raised by int(\"12a\")? Reply with just the exception name.",
+      "answer": "ValueError",
+      "accept": [
+        "(builtins\\.)?valueerror"
+      ]
+    }
+  ]
+}
