@@ -4,7 +4,8 @@ This page takes you from nothing to your first recommendation, and then to a run
 
 ## What you need
 
-- **Python 3.10 or newer.** Check with `python3 --version` (Windows: `py --version`).
+- **Python 3.10 or newer.** In a terminal (PowerShell on Windows, Terminal on macOS) type `python3 --version` (Windows: `py --version`). You should see something like `Python 3.12.4`. If you get an error or a number below 3.10, install Python from [python.org](https://www.python.org/downloads/).
+- **Memory:** most computers with 8 GB of RAM or more can run small models. More memory (or a graphics card) lets you run bigger, smarter ones.
 - **The computer you want to run models on.** The app measures the machine it runs on. If you run it on a server, it measures the server, not your laptop.
 - **Disk space** for the models you choose. A small model is 1–5 GB; big ones are 20–100+ GB. The app shows the size before downloading.
 - **Internet** for model information and downloads. Not needed for demo mode.
@@ -14,9 +15,11 @@ This page takes you from nothing to your first recommendation, and then to a run
 
 Pick one.
 
+> **Right now, use Option 3.** Options 1 and 2 need v0.4.0 to be published on PyPI (the Python package store).
+
 ### Option 1: uv (one command)
 
-[uv](https://docs.astral.sh/uv/) is a fast Python tool runner. `uvx` downloads the app into a private cache and runs it, like a pop-up shop that leaves nothing behind in your main Python.
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) first. uv is a fast Python tool runner. `uvx` downloads the app into a private cache and runs it, like a pop-up shop that leaves nothing behind in your main Python.
 
 ```bash
 uvx llm-configurator serve
@@ -24,7 +27,7 @@ uvx llm-configurator serve
 
 ### Option 2: pipx
 
-[pipx](https://pipx.pypa.io/) installs Python apps in their own box so they don't clash with anything else.
+Install [pipx](https://pipx.pypa.io/stable/installation/) first. pipx installs Python apps in their own box so they don't clash with anything else.
 
 ```bash
 pipx install llm-configurator
@@ -33,9 +36,9 @@ llm-config serve
 
 If your terminal says `llm-config: command not found`, run `pipx ensurepath` and open a new terminal.
 
-> **Note:** Options 1 and 2 need v0.4.0 to be published on PyPI (the Python package store). Until then, use Option 3.
-
 ### Option 3: from source
+
+Needs [Git](https://git-scm.com/downloads). No Git? Download the ZIP from the GitHub page (**Code → Download ZIP**), unzip it, open a terminal in that folder and skip the first two lines.
 
 Windows (PowerShell):
 
@@ -59,13 +62,13 @@ python3 -m venv .venv
 
 `.venv` is a "virtual environment": a private folder of Python packages just for this app.
 
-You can always use `python -m llm_configurator` instead of `llm-config`; they do the same thing.
+**Starting it again later:** open a terminal in the `LLM-Configurator` folder and run only the last line. If you installed from source, always use that full `.venv/...` path; the shorter `llm-config` works only with pipx (or after activating the virtual environment).
 
 ## First run
 
-`llm-config serve` starts the app and opens **http://127.0.0.1:8765** in your browser. That address only works on your own computer. Stop the app with **Ctrl+C** in the terminal.
+`llm-config serve` starts the app and opens **http://127.0.0.1:8765** in your browser. If no browser opens, copy that address into one. It only works on your own computer. Stop the app with **Ctrl+C** in the terminal.
 
-- Port already in use? `llm-config serve --port 8766`
+- See "address already in use"? Another program is using that spot. Run `llm-config serve --port 8766` to use a different one.
 - Don't want a browser tab to open? `llm-config serve --no-browser`
 - Just exploring? `llm-config serve --demo` uses **made-up models on your real hardware**. It is clearly marked, needs no internet, and never downloads, tests or starts anything.
 
@@ -74,9 +77,9 @@ You can always use `python -m llm_configurator` instead of `llm-config`; they do
 1. Click **Get started**. The app checks your hardware in the background.
 2. Choose whether to **include quality rankings**. Rankings come from Artificial Analysis and need a free API key (see [Quality checks](quality-checks.md#rankings-from-artificial-analysis)). You can skip this.
 3. Answer one question per screen:
-   - what you'll mainly use it for (general chat, coding, agents/tools, long documents)
+   - what you'll mainly use it for (general chat, coding, agents, long documents). **Agents** are AI helpers that take actions for you, such as calling tools.
    - whether you care more about quality or speed
-   - how much text it needs to keep in view at once (the **context**, like the size of its desk)
+   - how much text it needs to keep in view at once (the **context**, like the size of its desk, measured in **tokens**: pieces of words, about ¾ of a word each)
    - how many chats or agents run **at the same time** (one person running three agents counts as three)
    - whether other apps will stay open
    Exact numbers (tokens, words per second, memory to keep free) are under **advanced** controls.
@@ -93,7 +96,7 @@ While you answer, the app fetches model information (sizes and shapes, **not** t
 
 Each card has a **Get it running** button. It opens six steps:
 
-1. **Runtime** – installs [llama.cpp](https://github.com/ggml-org/llama.cpp), the engine that actually runs the model. One click. See [Troubleshooting](troubleshooting.md#installing-llamacpp) if it fails.
+1. **Runtime** (the engine) – installs [llama.cpp](https://github.com/ggml-org/llama.cpp), the engine that actually runs the model. One click. See [Troubleshooting](troubleshooting.md#installing-llamacpp) if it fails.
 2. **Download** – shows the size and your free disk space, then downloads with a progress bar. You can pause and resume. If the file is **already on your disk** (for example from LM Studio, Ollama or a Hugging Face download), it is reused instead.
 3. **Test** – loads the model, asks it a simple question, and measures speed and memory. See [Testing and tuning](testing-and-tuning.md).
 4. **Tune** – spends 1, 5 or 15 minutes trying settings and keeps the fastest safe ones.
@@ -109,7 +112,7 @@ The app keeps a small local database (settings, cached model info, your test res
 | System | Folder |
 |---|---|
 | Windows | `%LOCALAPPDATA%\LLMConfigurator` |
-| macOS / Linux | `$XDG_DATA_HOME/llm-configurator` (usually `~/.local/share/llm-configurator`) |
+| macOS / Linux | `~/.local/share/llm-configurator` (a hidden folder in your home folder; `$XDG_DATA_HOME/llm-configurator` if you set that variable) |
 
 Inside it: `models/` (downloaded models) and `runtime/` (llama.cpp). Change the main folder with the `LLM_CONFIG_HOME` environment variable or `llm-config --data-dir PATH ...`. Change only the models folder with `llm-config settings --models-dir DIR` or `LLM_CONFIG_MODELS`.
 

@@ -1,6 +1,6 @@
 # LLM Configurator
 
-Run an AI chat model on **your own computer** without guesswork.
+Run an AI chat model on **your own computer**, with less guesswork.
 
 LLM Configurator looks at your hardware and walks you through one loop:
 
@@ -8,7 +8,7 @@ LLM Configurator looks at your hardware and walks you through one loop:
 2. **Download** – it fetches the model file and checks it is not damaged.
 3. **Test** – it starts the model and measures how fast it really is.
 4. **Tune** – it tries different settings and keeps the fastest safe ones.
-5. **Use** – it starts a local server other apps can talk to, or gives you ready-made settings for Ollama, LM Studio and more.
+5. **Use** – it gives the model an address that chat apps and code on your computer can connect to (the same way they'd connect to ChatGPT), or ready-made settings for Ollama, LM Studio and more.
 
 It never makes up numbers. If something is unknown, it says "unknown". If something is an estimate, it says "estimate".
 
@@ -16,26 +16,13 @@ It never makes up numbers. If something is unknown, it says "unknown". If someth
 
 ## Quick start
 
-You need **Python 3.10 or newer**.
+You need **[Python](https://www.python.org/downloads/) 3.10 or newer**. Type the commands below in a terminal (**PowerShell** on Windows, **Terminal** on macOS). Most computers with 8 GB of memory or more can run small models; more memory means bigger, smarter models.
 
-**One command with [uv](https://docs.astral.sh/uv/)** (Windows, macOS, Linux):
+> **Right now, use "From source".** The shorter `uvx` / `pipx` options work once v0.4.0 is published on PyPI (the Python package store).
 
-```bash
-uvx llm-configurator serve
-```
+**From source** (needs [Git](https://git-scm.com/downloads), or download the ZIP from GitHub and unzip it):
 
-**Or install it with [pipx](https://pipx.pypa.io/)** (keeps it in its own box, away from your other Python tools):
-
-```bash
-pipx install llm-configurator
-llm-config serve
-```
-
-> `uvx` and `pipx` work once v0.4.0 is published on PyPI (the Python package store). Until then, use "From source" below.
-
-**From source:**
-
-<details>
+<details open>
 <summary>Windows (PowerShell)</summary>
 
 ```powershell
@@ -45,7 +32,7 @@ py -m venv .venv; .\.venv\Scripts\python.exe -m pip install .
 ```
 </details>
 
-<details>
+<details open>
 <summary>macOS / Linux</summary>
 
 ```bash
@@ -55,14 +42,29 @@ python3 -m venv .venv && .venv/bin/python -m pip install .
 ```
 </details>
 
-Your browser opens **http://127.0.0.1:8765**. Stop it with **Ctrl+C**. Want to look around first, with no internet and no downloads? Add `--demo`.
+To start it again later, open a terminal in the `LLM-Configurator` folder and run just the last line.
+
+**One command with [uv](https://docs.astral.sh/uv/getting-started/installation/)** (install uv first):
+
+```bash
+uvx llm-configurator serve
+```
+
+**Or with [pipx](https://pipx.pypa.io/stable/installation/)** (install pipx first; it keeps the app in its own box, away from your other Python tools):
+
+```bash
+pipx install llm-configurator
+llm-config serve
+```
+
+Your browser opens **http://127.0.0.1:8765** (if it doesn't, paste that address into your browser). Stop the app with **Ctrl+C** in the terminal. Want to look around first, with no internet and no downloads? Add `--demo` to the last command.
 
 More detail: [Getting started](https://github.com/Eyad-3D/LLM-Configurator/blob/main/docs/getting-started.md).
 
 ## What happens on your computer
 
 > - **Runs locally.** The app and any model server it starts listen on `127.0.0.1` only (your own computer). Other devices on your network cannot reach them.
-> - **Nothing is downloaded without you asking.** Model files and the llama.cpp engine are only fetched when you click Download / Install or run the matching command. Every file is checked against its published fingerprint (SHA256) before use.
+> - **Nothing is downloaded without you asking.** Model files and the llama.cpp engine are only fetched when you click Download / Install or run the matching command. Every file is checked against its published fingerprint (a unique code that changes if even one byte is different) before use.
 > - **No tracking.** The app sends no usage data. It only contacts Hugging Face (model info and files), GitHub (the llama.cpp engine, community results you choose to import) and, if you add a key, Artificial Analysis (quality rankings).
 > - **Your key stays in your system's password store** (Windows Credential Manager, macOS Keychain, or a Linux keyring). Never in a plain file.
 > - **Sharing is manual.** Community sharing only opens a pre-filled GitHub page. You review it and press submit yourself.
