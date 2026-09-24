@@ -179,6 +179,34 @@ class DiscoverTest(unittest.TestCase):
         self.assertEqual(len(records), 1)  # the in-folder alias and the file itself count once
         self.assertIn(records[0]["filename"], {"alias.gguf", "inside.gguf"})
 
+    def test_link_loops_and_linked_cache_folders_are_skipped(self):
+        outside = self.write(self.root / "outside/secret.gguf", model_bytes("x"))
+        lm = self.home / ".lmstudio/models"
+        lm.mkdir(parents=True)
+        (lm / "a.gguf").symlink_to(lm / "b.gguf")  # a loop: Python < 3.13 raises RuntimeError on resolve()
+        (lm / "b.gguf").symlink_to(lm / "a.gguf")
+        hub = self.home / ".cache/huggingface/hub"
+        (hub / "models--o--snap").mkdir(parents=True)
+        (hub / "models--o--snap/snapshots").symlink_to(outside.parent, target_is_directory=True)
+        blobs_repo = hub / "models--o--blobs"
+        (blobs_repo / "snapshots/r").mkdir(parents=True)
+        (blobs_repo / "blobs").symlink_to(outside.parent, target_is_directory=True)
+        (blobs_repo / "snapshots/r/evil.gguf").symlink_to("../../blobs/secret.gguf")
+        ollama = self.home / ".ollama/models"
+        ollama.mkdir(parents=True)
+        (ollama / "manifests").symlink_to(self.root, target_is_directory=True)
+        (ollama / "blobs").mkdir()
+        self.assertEqual(discover.scan(self.store), [])
+        with self.assertRaisesRegex(ValueError, "Could not read"):
+            discover.hash_cached(self.store, lm / "a.gguf")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs named pipes")
+    def test_hash_cached_refuses_a_pipe(self):
+        fifo = self.root / "pipe.gguf"
+        os.mkfifo(fifo)
+        with self.assertRaisesRegex(ValueError, "not a regular file"):
+            discover.hash_cached(self.store, fifo)
+
     def test_hf_copies_without_symlinks_match_on_name_and_size(self):
         data = model_bytes("win")
         self.write(self.home / ".cache/huggingface/hub/models--org--repo/snapshots/s/m-Q4_K_M.gguf", data)
@@ -335,6 +363,47 @@ class DiscoverTest(unittest.TestCase):
         path.unlink()
         self.assertEqual(discover.scan(self.store), [])
 
+
+    def test_local_variant_is_only_its_own_file(self):
+        data = model_bytes("mine")
+        path = self.write(self.root / "elsewhere/my-Q4_K_M.gguf", data)
+        discover.add_file(self.store, path)
+        variant = discover.local_variants(self.store)[0]
+        from llm_configurator.storage import models_dir
+        self.write(models_dir(self.store) / path.name, data)  # same name and size, but a different file
+        self.assertEqual(discover.find_for_variant(self.store, variant), path)
+        path.unlink()
+        self.assertIsNone(discover.find_for_variant(self.store, variant))
+
+    def test_scan_and_add_agree_on_the_local_id(self):
+        from llm_configurator import gguf
+        path = self.write(self.home / ".lmstudio/models/me/x/my-Q4_K_M.gguf", model_bytes("mine"))
+        scanned = discover.scan(self.store)[0]["local_variant_id"]
+        sha256 = discover.hash_cached(self.store, path)
+        self.assertEqual(gguf.variant_from_file(path, sha256=sha256).id, scanned)
+
+    def test_flat_download_of_a_foldered_catalogue_name_is_found(self):
+        from llm_configurator.storage import models_dir
+        data = model_bytes("q")
+        variant = catalogue_variant("org/x:Q4_K_M", "Q4_K_M/x-Q4_K_M.gguf", data)
+        path = self.write(models_dir(self.store) / "x-Q4_K_M.gguf", data)  # downloads keep only the file name
+        self.assertEqual(discover.find_for_variant(self.store, variant, verify=False), path)
+        self.assertEqual(discover.find_for_variant(self.store, variant), path)
+        path.write_bytes(data[:-1] + b"!")  # same size, different content: never accepted when verifying
+        self.assertIsNone(discover.find_for_variant(self.store, variant))
+
+    def test_remember_hash_spares_the_first_check_after_a_download(self):
+        from llm_configurator.storage import models_dir
+        data = model_bytes("r")
+        variant = catalogue_variant("org/y:Q4_K_M", "y-Q4_K_M.gguf", data)
+        path = self.write(models_dir(self.store) / "y-Q4_K_M.gguf", data)
+        discover.remember_hash(self.store, path, sha(data).upper())
+        with mock.patch.object(discover.hashlib, "sha256", side_effect=AssertionError("should be remembered")):
+            self.assertEqual(discover.find_for_variant(self.store, variant), path)
+        with self.assertRaisesRegex(ValueError, "64 hexadecimal"):
+            discover.remember_hash(self.store, path, "abc")
+        os.utime(path, (5, 5))  # a changed file is checked again
+        self.assertEqual(discover.find_for_variant(self.store, variant), path)
 
 if __name__ == "__main__":
     unittest.main()

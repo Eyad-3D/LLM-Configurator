@@ -77,7 +77,7 @@ class GGUFTest(unittest.TestCase):
         self.assertEqual(result["summary"], {
             "name": "Tiny Test", "layers": 4, "kv_heads": 2, "head_dim": 32, "context_length": 4096, "experts": 0,
             "active_experts": 0, "sliding_window": None, "sliding_layers": 0, "file_type": 15, "quant": "Q4_K_M",
-            "split_count": 1})
+            "split_count": 1, "vocab_size": 5000})
 
     def test_all_value_types_and_nested_arrays_version_2(self):
         kvs = [("general.architecture", STR, "qwen3"), ("a.u8", U8, 255), ("a.i8", I8, -3), ("a.u16", U16, 65535),
@@ -137,7 +137,8 @@ class GGUFTest(unittest.TestCase):
         self.assertEqual((variant.parameters, variant.active_parameters, variant.experts), (256 * 1256, 256 * 1256, 0))
         self.assertEqual((variant.license, variant.files, variant.sha256), ("mit", [], None))
         hashed = gguf.variant_from_file(path, sha256="AB" * 32)
-        self.assertEqual((hashed.id, hashed.sha256), (f"local:{'ab' * 8}:tiny-Q4_K_M.gguf", "ab" * 32))
+        # a scan (no hash yet) and `local --add` (hashed) must agree on the id, so it never depends on the hash
+        self.assertEqual((hashed.id, hashed.sha256), (variant.id, "ab" * 32))
         self.assertEqual(gguf.variant_from_file(path).id, variant.id)  # stable id per path
 
     def test_variant_from_moe_file_uses_expert_bytes(self):
@@ -187,6 +188,56 @@ class GGUFTest(unittest.TestCase):
         self.assertEqual(variant.parameters, 3 * 256 * 256)
         self.assertEqual(gguf.read_metadata(paths[0])["summary"]["split_count"], 3)
         self.assertEqual(gguf.shard_paths(self.write("single.gguf", first)), [self.dir / "single.gguf"])
+
+    def test_split_fingerprint_and_count_checks(self):
+        first = build_gguf(llama_kvs(extra=[("split.count", U16, 2)]), [("blk.0.attn_q.weight", [256, 256], 1)])
+        rest = build_gguf([("split.count", U16, 2)], [("blk.1.attn_q.weight", [256, 256], 1)])
+        self.write("m-00001-of-00002.gguf", first)
+        second = self.write("m-00002-of-00002.gguf", rest)
+        # a hash of part 2 must not be stored as the first part's fingerprint
+        variant = gguf.variant_from_file(second, sha256="cd" * 32)
+        self.assertEqual((variant.sha256, variant.files[0]["sha256"]), (None, None))
+        # a split model renamed to a plain name cannot load: its header still says 2 parts
+        renamed = self.write("renamed.gguf", first)
+        with self.assertRaisesRegex(ValueError, "split into 2 parts"):
+            gguf.variant_from_file(renamed)
+
+    def test_vocab_size_from_token_list_count_or_scalar(self):
+        self.assertEqual(gguf.read_metadata(self.write("a.gguf", build_gguf(llama_kvs())))["summary"]["vocab_size"], 5000)
+        kvs = [kv for kv in llama_kvs() if not kv[0].startswith("tokenizer")] + [("llama.vocab_size", U32, 777)]
+        self.assertEqual(gguf.read_metadata(self.write("b.gguf", build_gguf(kvs)))["summary"]["vocab_size"], 777)
+        kvs = [kv for kv in llama_kvs() if not kv[0].startswith("tokenizer")]
+        self.assertIsNone(gguf.read_metadata(self.write("c.gguf", build_gguf(kvs)))["summary"]["vocab_size"])
+
+    def test_newest_types_and_guessed_flag(self):
+        tensors = [("blk.0.ffn_down_exps.weight", [256, 256, 4], 42), ("blk.0.attn_q.weight", [256, 256], 42)]
+        table = gguf.read_metadata(self.write("q.gguf", build_gguf(llama_kvs(), tensors)), tensors=True)["tensors"]
+        self.assertEqual((table["unknown_types"], table["bytes"]), (0, 5 * 256 * 256 // 64 * 18))
+        summary = gguf.read_metadata(self.write("g.gguf", build_gguf(llama_kvs(file_type=1024 | 7))))["summary"]
+        self.assertEqual((summary["file_type"], summary["quant"]), (7, "Q8_0"))
+
+    def test_weights_cut_short_are_an_incomplete_download(self):
+        data = build_gguf(llama_kvs(), [("blk.0.attn_q.weight", [256, 256], 1)])
+        cut = self.write("cut.gguf", data[: len(data) - 1000])  # header intact, weights cut (like corrupt.gguf)
+        self.assertEqual(gguf.read_metadata(cut)["summary"]["layers"], 4)  # the header alone still reads
+        with self.assertRaisesRegex(ValueError, "download is incomplete"):
+            gguf.variant_from_file(cut)
+        gguf.variant_from_file(self.write("whole.gguf", data))
+
+    def test_huge_block_count_does_not_hang(self):
+        kvs = llama_kvs(arch="gemma3", extra=[("gemma3.attention.sliding_window", U32, 512)])
+        kvs = [(k, U64 if k.endswith("block_count") else t, 2**62 if k.endswith("block_count") else v) for k, t, v in kvs]
+        start = time.monotonic()
+        gguf.read_metadata(self.write("h.gguf", build_gguf(kvs)))
+        self.assertLess(time.monotonic() - start, 1)
+
+    @unittest.skipUnless(hasattr(__import__("os"), "mkfifo"), "needs named pipes")
+    def test_named_pipe_is_refused_without_blocking(self):
+        import os
+        fifo = self.dir / "pipe.gguf"
+        os.mkfifo(fifo)
+        with self.assertRaisesRegex(ValueError, "not a regular file"):
+            gguf.read_metadata(fifo)
 
     def test_corrupt_and_truncated_files_give_plain_errors(self):
         good = build_gguf(llama_kvs())
