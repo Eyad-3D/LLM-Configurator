@@ -836,7 +836,8 @@ def run_bench(args):
 
 class Printer:
     def __init__(self, fmt):
-        self.fmt, self.count = fmt, 0
+        self.fmt, self.count = ("md" if fmt == "sql" else fmt), 0
+        fmt = self.fmt
         if fmt == "json":
             sys.stdout.write("[\n")
         elif fmt == "md":
