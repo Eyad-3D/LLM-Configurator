@@ -361,7 +361,7 @@ def _stream(response, part, have, size, hasher, record, progress, cancel, done_b
                 speed = round(received / elapsed) if elapsed >= 0.5 else None
                 remaining = (grand_total or size) - (done_before + written)
                 progress({"stage": "download", "done": done_before + written, "total": grand_total or size,
-                          "message": f"Downloading {record['name']}", "bytes_per_second": speed,
+                          "unit": "bytes", "message": f"Downloading {record['name']}", "bytes_per_second": speed,
                           "eta_seconds": round(remaining / speed) if speed else None})
 
 
@@ -929,10 +929,8 @@ def install(store, hardware, progress=None, cancel=None, release=None, allow_unv
         notes = [f"The {choice['backend']} build would not start here, so the CPU-only build was installed instead. "
                  "Updating your graphics driver may let the faster build work."]
         choice = cpu
+    notes += _forget_chosen_folder(store)
     result = detect(store)
-    if result["source"] == "configured":
-        notes.append("The new llama.cpp was installed, but the app keeps using the llama.cpp folder you chose earlier "
-                     "with 'llm-config runtime use'. Remove that setting to switch to the new install.")
     result["warnings"] = notes + result["warnings"]
     result["reason"] = choice["reason"]
     if choice.get("unverified"):
@@ -975,7 +973,20 @@ def install_archive(store, archive_path, progress=None, cancel=None):
             "cuda": ".".join(map(str, guess["cuda"])) if guess.get("cuda") else None, "source": "archive",
             "asset": archive.name, "sha256": _sha256(archive), "companions": []}
     _finish(store, [archive], info, progress, cancel)
-    return detect(store)
+    notes = _forget_chosen_folder(store)
+    result = detect(store)
+    result["warnings"] = notes + result["warnings"]
+    return result
+
+
+def _forget_chosen_folder(store):
+    """An install the user just asked for (web page or CLI) must be the one used. detect() prefers a folder
+    chosen with 'runtime use', so that choice is cleared, and the returned note says so."""
+    if not (store.get("settings") or {}).get("runtime_dir"):
+        return []
+    store.update("settings", lambda saved: {k: v for k, v in (saved or {}).items() if k != "runtime_dir"}, {})
+    return ["The app now uses this new llama.cpp instead of the folder you chose earlier with 'llm-config runtime use'. "
+            "To go back to that folder, run 'llm-config runtime use' with it again."]
 
 
 def use_directory(store, directory):

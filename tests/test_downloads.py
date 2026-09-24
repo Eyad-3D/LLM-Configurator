@@ -113,6 +113,7 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual(events[-1]["total"], len(body))
         for key in ("bytes_per_second", "eta_seconds", "file", "file_index", "file_count", "message"):
             self.assertIn(key, events[-1])
+        self.assertEqual({e["unit"] for e in events}, {"bytes"})   # done/total are byte counts in every stage
         # Running again reuses the verified file without touching the network.
         self.assertEqual(self.run_download(variant, Hub({})), path)
 

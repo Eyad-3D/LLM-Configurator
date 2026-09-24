@@ -476,7 +476,8 @@ class DownloadTests(Base):
             path = ri._download(self.record, self.folder, progress=events.append)
         self.assertEqual(path.read_bytes(), self.data)
         self.assertEqual(events[-1]["done"], len(self.data))
-        self.assertEqual(set(events[0]), {"stage", "done", "total", "message", "bytes_per_second", "eta_seconds"})
+        self.assertEqual(set(events[0]), {"stage", "done", "total", "unit", "message", "bytes_per_second", "eta_seconds"})
+        self.assertEqual({e["unit"] for e in events}, {"bytes"})
 
     def test_progress_is_throttled_and_has_speed(self):
         events, ticks = [], iter(range(10**6))
@@ -644,15 +645,36 @@ class InstallTests(Base):
         self.assertTrue((folder / "libcudart.so.13").is_file())
         self.assertFalse((folder / "libggml-evil.so").exists() or (folder / "libggml-evil.so").is_symlink())
 
-    def test_install_says_when_a_chosen_folder_still_wins(self):
+    def test_fresh_install_wins_over_an_older_chosen_folder(self):
+        # The web page has no "runtime use"; an install it starts must not stay shadowed by an old choice.
+        mine = self.root / "mine"
+        mine.mkdir()
+        (mine / "llama-server").write_text(GOOD)
+        (mine / "llama-server").chmod(0o755)
+        self.store.put("settings", {"runtime_dir": str(mine), "models_dir": "/keep"})
+        result = self.run_install({"llama-b11158-bin-ubuntu-x64.tar.gz": tar_bytes(server_tree())}, NONE)
+        self.assertEqual(result["source"], "managed")
+        self.assertEqual(Path(result["directory"]).parent, runtime_dir(self.store) / "b11158-cpu")
+        self.assertIn("instead of the folder you chose earlier", result["warnings"][0])
+        self.assertNotIn(str(mine), result["warnings"][0])
+        self.assertEqual(self.store.get("settings"), {"models_dir": "/keep"})
+        self.assertEqual(ri.detect(self.store)["source"], "managed")
+
+    def test_install_archive_also_wins_over_a_chosen_folder(self):
         mine = self.root / "mine"
         mine.mkdir()
         (mine / "llama-server").write_text(GOOD)
         (mine / "llama-server").chmod(0o755)
         self.store.put("settings", {"runtime_dir": str(mine)})
+        archive = self.root / "llama-b4242-bin-ubuntu-x64.tar.gz"
+        archive.write_bytes(tar_bytes(server_tree()))
+        result = ri.install_archive(self.store, archive)
+        self.assertEqual(result["source"], "managed")
+        self.assertIn("instead of the folder you chose earlier", result["warnings"][0])
+
+    def test_install_without_a_chosen_folder_adds_no_note(self):
         result = self.run_install({"llama-b11158-bin-ubuntu-x64.tar.gz": tar_bytes(server_tree())}, NONE)
-        self.assertEqual(result["source"], "configured")
-        self.assertIn("keeps using the llama.cpp folder you chose", result["warnings"][0])
+        self.assertFalse(any("chose earlier" in w for w in result["warnings"]))
 
     def test_damaged_archive_is_a_plain_error(self):
         archive = self.root / "llama-b1-bin-ubuntu-x64.tar.gz"
