@@ -281,8 +281,9 @@ class SpeedTests(TestingBase):
         config = dict(self.config, cache_type_k="q8_0", cache_type_v="q8_0")
         testing.estimate_memory(self.variant, config, hardware(), new_allocations)
         self.assertEqual(seen, {"kv_cache_type": "q8_0", "n_cpu_moe": 0})
+        # The merged engine accepts kv_cache_type, so the compressed notes shrink the estimate.
         self.assertEqual(testing.estimate_memory(self.variant, config, hardware(), allocations)[0],
-                         allocations(self.variant, 4096, 1, 0)["ram"])
+                         allocations(self.variant, 4096, 1, 0, kv_cache_type="q8_0")["ram"])
 
     def test_server_stopped_when_chat_fails(self):
         class Broken(FakeServer):

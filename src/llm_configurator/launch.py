@@ -106,7 +106,8 @@ def server_args(config):
     if c["draft_model_path"]:
         args += ["-md", c["draft_model_path"]]
         if c["draft_max"]:
-            args += ["--draft-max", str(c["draft_max"])]
+            # Current llama.cpp removed --draft-max; --spec-draft-n-max replaced it.
+            args += ["--spec-draft-n-max", str(c["draft_max"])]
     if c["alias"]:
         args += ["--alias", c["alias"]]
     return args

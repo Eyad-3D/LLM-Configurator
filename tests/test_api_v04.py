@@ -250,7 +250,7 @@ class ApiCase(unittest.TestCase):
         try:
             with urlopen(Request(self.url + path, data=data, headers=request_headers)) as response:
                 raw = response.read().decode()
-                return response.status, json.loads(raw), raw
+                return response.status, json.loads(raw) if raw[:1] in "{[" else raw, raw
         except HTTPError as error:
             raw = error.read().decode()
             return error.code, json.loads(raw) if raw.startswith("{") else raw, raw
