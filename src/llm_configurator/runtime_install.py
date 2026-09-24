@@ -509,26 +509,47 @@ def find_bin_dir(directory, depth=4):
     return None
 
 
-def _run_version(argv):
-    """Run `llama-server --version`; returns (ok, combined output). llama.cpp prints it to stderr."""
+def _run_tool(argv, flag):
+    """Run a llama.cpp tool with one info flag; returns (ok, stdout + stderr). llama.cpp prints
+    `--version` on stderr and `--list-devices` on stdout."""
     try:
-        done = subprocess.run(list(argv) + ["--version"], capture_output=True, text=True, timeout=VERSION_TIMEOUT,
+        done = subprocess.run(list(argv) + [flag], capture_output=True, text=True, timeout=VERSION_TIMEOUT,
                               errors="replace", creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
     except subprocess.TimeoutExpired:
-        return False, "llama-server did not answer --version in time"
+        return False, f"llama-server did not answer {flag} in time"
     except OSError as error:
         return False, str(error)
     return done.returncode == 0, (done.stdout or "") + "\n" + (done.stderr or "")
 
 
+def _run_version(argv):
+    """Run `llama-server --version`; returns (ok, combined output)."""
+    return _run_tool(argv, "--version")
+
+
+def _run_devices(argv):
+    """Run `llama-server --list-devices` (also works for llama-bench); returns (ok, combined output)."""
+    return _run_tool(argv, "--list-devices")
+
+
+# Current builds: `version: 0.1.0-dev (build 1234, commit abc1234)`; older ones: `version: 1234 (abc1234)`.
+_NEW_VERSION = re.compile(r"^\s*version:\s*(\S+)\s+\(build\s+(\d+),\s*commit\s+([0-9a-fA-F]+)\)", re.M)
+_OLD_VERSION = re.compile(r"^\s*version:\s*(\S+)(?:\s*\(([0-9a-fA-F]+)\))?", re.M)
+
+
 def parse_version(text):
-    """Read `version: 4589 (1d1e6a90)`-style output plus backend hints from load/init lines."""
+    """Read the `--version` output plus backend hints from load/init lines. `version` is `b<build>`
+    whenever the build number is known: current builds print a constant `0.1.0-dev` semver, so the
+    build number is the only version that tells builds apart (the raw semver is kept in `semver`)."""
     text = text or ""
     result = {"version": None, "build": None, "commit": None, "backend": None}
-    match = re.search(r"^\s*version:\s*(\S+)(?:\s*\(([0-9a-fA-F]+)\))?", text, re.M)
-    if match:
-        raw = match.group(1)
-        result["commit"] = match.group(2)
+    new = _NEW_VERSION.search(text)
+    old = None if new else _OLD_VERSION.search(text)
+    if new:
+        result.update(build=int(new.group(2)), version=f"b{int(new.group(2))}", commit=new.group(3), semver=new.group(1))
+    elif old:
+        raw = old.group(1)
+        result["commit"] = old.group(2)
         if raw.isdigit():
             result["build"], result["version"] = int(raw), f"b{raw}"
         else:
@@ -549,6 +570,50 @@ def parse_version(text):
         elif "apple-darwin" in lower and "arm64" in lower:
             result["backend"] = "metal"     # Homebrew/Apple builds embed Metal and print no load line
     return result
+
+
+# ggml device-name prefixes (`--list-devices`) -> our backend names. CUDA builds compiled for AMD
+# (HIP) name their devices ROCm0...; Metal is `Metal` on older builds and `MTL0` on newer ones.
+DEVICE_BACKENDS = (("cuda", "CUDA"), ("rocm", "ROCm"), ("rocm", "HIP"), ("vulkan", "Vulkan"), ("metal", "Metal"),
+                   ("metal", "MTL"))
+# Accelerators that run on the main processor; they are not graphics cards.
+_CPU_DEVICES = ("BLAS", "CPU", "AMX", "KLEIDIAI", "ACCELERATE", "RPC")
+_DEVICE_LINE = re.compile(r"^\s+([A-Za-z][\w.-]*):\s*(.*?)(?:\s+\((\d+) MiB, (\d+) MiB free\))?\s*$")
+
+
+def device_backend(name):
+    """The backend of a ggml device name (`CUDA0` -> cuda), "cpu" for CPU-side accelerators, else "unknown"."""
+    for backend, prefix in DEVICE_BACKENDS:
+        if re.fullmatch(re.escape(prefix) + r"\d*", name or ""):
+            return backend
+    return "cpu" if (name or "").upper().startswith(_CPU_DEVICES) else "unknown"
+
+
+def parse_devices(text):
+    """Read `--list-devices` output: `Available devices:` then `  CUDA0: NVIDIA ... (24080 MiB, 23000 MiB free)`
+    lines, or `  (none)`. Returns None when the text has no device list at all (old build or failure)."""
+    lines = (text or "").splitlines()
+    start = next((i for i, line in enumerate(lines) if line.strip().lower().startswith("available devices")), None)
+    if start is None:
+        return None
+    devices = []
+    for line in lines[start + 1:]:
+        match = _DEVICE_LINE.match(line)
+        if not match:
+            if line.strip() and not line.startswith((" ", "\t")):
+                break           # the list is over
+            continue
+        name, description, total, free = match.groups()
+        devices.append({"name": name, "description": description, "backend": device_backend(name),
+                        "total": int(total) * 1024**2 if total else None, "free": int(free) * 1024**2 if free else None})
+    return devices
+
+
+def list_devices(argv):
+    """GPU devices a llama.cpp tool can offload to (CPU-side accelerators left out), or None if it could not say."""
+    ok, output = _run_devices(argv)
+    devices = parse_devices(output) if ok else None
+    return None if devices is None else [d for d in devices if d["backend"] != "cpu"]
 
 
 def _backend_from_files(folder):
@@ -591,11 +656,27 @@ def _inspect(folder, source, manifest=None):
     manifest = manifest or {}
     result.update(installed=True, version=info["version"], build=info["build"] or manifest.get("build"),
                   commit=info["commit"], tag=manifest.get("tag"))
-    result["backend"] = manifest.get("backend") or info["backend"] or _backend_from_files(folder) or "unknown"
+    devices = list_devices([str(server)])
+    result["devices"] = [{k: d[k] for k in ("name", "description", "backend")} for d in devices or []]
+    installed_as = manifest.get("backend")
+    if devices:
+        # What the build can actually use right now beats what it was installed as.
+        result["backend"] = devices[0]["backend"]
+    elif devices is not None:
+        result["backend"] = "cpu"
+        if installed_as in ("cuda", "rocm", "vulkan", "metal"):
+            result["warnings"].append(f"This {_BACKEND_WORDS.get(installed_as, installed_as)} build of llama.cpp found no "
+                                      "usable graphics card, so it will run on the CPU only. Updating your graphics "
+                                      "driver may fix this.")
+    else:
+        result["backend"] = installed_as or info["backend"] or _backend_from_files(folder) or "unknown"
     if _quarantined(server):
         result["warnings"].append("macOS has marked this llama.cpp as downloaded from the internet, so it may refuse "
                                   f"to run it. If it does, run: xattr -dr com.apple.quarantine \"{folder}\"")
     return result
+
+
+_BACKEND_WORDS = {"cuda": "CUDA (NVIDIA)", "rocm": "ROCm (AMD)", "vulkan": "Vulkan", "metal": "Metal"}
 
 
 def empty_result():
@@ -747,7 +828,9 @@ def _finish(store, archives, info, progress, cancel):
         if not ok or not parsed["version"]:
             raise ValueError("The downloaded llama.cpp would not start on this computer"
                              + (f" ({output.strip().splitlines()[-1][:200]})" if output.strip() else "") + ".")
-        backend = info["backend"] or parsed["backend"] or _backend_from_files(bin_dir) or "unknown"
+        devices = None if info["backend"] else list_devices([str(bin_dir / _exe("llama-server"))])
+        backend = (info["backend"] or (devices[0]["backend"] if devices else "cpu" if devices is not None else None)
+                   or parsed["backend"] or _backend_from_files(bin_dir) or "unknown")
         if info["backend"] is None:
             folder_name = re.sub(r"[^A-Za-z0-9._-]", "_", f"{info['tag']}-{backend}")
         manifest = dict(info, backend=backend, build=info.get("build") or parsed["build"],

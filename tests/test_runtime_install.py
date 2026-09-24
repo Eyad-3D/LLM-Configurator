@@ -138,12 +138,26 @@ def fake_run(argv):
     return ("FAIL" not in text), text
 
 
+def fake_devices(argv):
+    """Scripts that contain a `#devices` block answer --list-devices with it; others act like old builds."""
+    path = Path(argv[0])
+    text = path.read_text(errors="replace") if path.is_file() else ""
+    if "#devices\n" not in text:
+        return False, "error: invalid argument: --list-devices"
+    return True, "Available devices:\n" + text.split("#devices\n", 1)[1]
+
+
+def with_devices(script, *lines):
+    return script + "#devices\n" + ("\n".join(lines) if lines else "  (none)") + "\n"
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.store = Store(self.root / "data")
         patches = [mock.patch.object(ri, "_run_version", side_effect=fake_run),
+                   mock.patch.object(ri, "_run_devices", side_effect=fake_devices),
                    mock.patch.object(ri, "_path_candidates", return_value=iter(())),
                    mock.patch.object(ri, "CHUNK", 16)]
         for patch in patches:
@@ -318,6 +332,35 @@ class VersionParsingTests(unittest.TestCase):
         semver = ri.parse_version("version: 0.5.0 (d2e5458)\nbuilt from b11158\n")
         self.assertEqual((semver["version"], semver["build"]), ("0.5.0", 11158))
         self.assertIsNone(ri.parse_version("Segmentation fault")["version"])
+
+    def test_current_format_from_a_real_build(self):
+        # tests/integration/samples/version.txt (llama.cpp 4df29be, Aug 2026)
+        info = ri.parse_version("\nversion: 0.1.0-dev (build 1, commit 4df29be)\nbuilt with GNU 13.3.0 for Linux x86_64\n")
+        self.assertEqual((info["version"], info["build"], info["commit"], info["semver"]), ("b1", 1, "4df29be", "0.1.0-dev"))
+        info = ri.parse_version("load_backend: loaded CUDA backend from /x/libggml-cuda.so\n"
+                                "version: 0.5.0 (build 11158, commit d2e5458)\n")
+        self.assertEqual((info["version"], info["build"], info["backend"]), ("b11158", 11158, "cuda"))
+
+
+class DeviceListTests(unittest.TestCase):
+    def test_cpu_only_build(self):
+        # Real output of `llama-server --list-devices` on a CPU-only build.
+        self.assertEqual(ri.parse_devices("Available devices:\n  (none)\n"), [])
+
+    def test_gpu_builds(self):
+        devices = ri.parse_devices("ggml_cuda_init: found 2 CUDA devices:\n  Device 0: NVIDIA GeForce RTX 4090\n"
+                                   "Available devices:\n  CUDA0: NVIDIA GeForce RTX 4090 (24080 MiB, 23000 MiB free)\n"
+                                   "  CUDA1: NVIDIA GeForce RTX 3060 (12288 MiB, 12000 MiB free)\n  BLAS: OpenBLAS (0 MiB, 0 MiB free)\n")
+        self.assertEqual([(d["name"], d["backend"]) for d in devices],
+                         [("CUDA0", "cuda"), ("CUDA1", "cuda"), ("BLAS", "cpu")])
+        self.assertEqual(devices[0]["description"], "NVIDIA GeForce RTX 4090")
+        self.assertEqual(devices[0]["free"], 23000 * 1024**2)
+        for name, backend in [("Vulkan0", "vulkan"), ("ROCm1", "rocm"), ("Metal", "metal"), ("MTL0", "metal"),
+                              ("SYCL0", "unknown"), ("CPU", "cpu")]:
+            self.assertEqual(ri.device_backend(name), backend, name)
+
+    def test_no_list_means_unknown(self):
+        self.assertIsNone(ri.parse_devices("error: invalid argument: --list-devices"))
 
 
 class ExtractTests(Base):
@@ -693,6 +736,28 @@ class DetectTests(Base):
         self.make(leftover / "bin")
         (leftover / "manifest.json").write_text(json.dumps({"tag": "b1", "backend": "cpu", "bin_dir": "bin"}))
         self.assertFalse(ri.detect(self.store)["installed"])
+
+    def test_backend_comes_from_the_device_list(self):
+        folder = runtime_dir(self.store) / "b6000-cuda"
+        self.make(folder / "bin", script=with_devices(GOOD, "  CUDA0: NVIDIA GeForce RTX 4090 (24080 MiB, 23000 MiB free)"))
+        (folder / "manifest.json").write_text(json.dumps({"tag": "b6000", "backend": "cuda", "bin_dir": "bin"}))
+        result = ri.detect(self.store)
+        self.assertEqual((result["backend"], result["warnings"]), ("cuda", []))
+        self.assertEqual(result["devices"], [{"name": "CUDA0", "description": "NVIDIA GeForce RTX 4090", "backend": "cuda"}])
+        # Same CUDA build, but the driver is broken: it lists no devices, so it will run on the CPU.
+        self.make(folder / "bin", script=with_devices(GOOD))
+        result = ri.detect(self.store)
+        self.assertEqual((result["backend"], result["devices"]), ("cpu", []))
+        self.assertIn("found no usable graphics card", result["warnings"][0])
+
+    def test_self_built_cpu_runtime_is_cpu_not_unknown(self):
+        new_style = VERSION_SCRIPT.format(text="version: 0.1.0-dev (build 1, commit 4df29be)\nbuilt with GNU 13.3.0 for Linux x86_64")
+        self.make(self.root / "mine", script=with_devices(new_style))
+        self.store.put("settings", {"runtime_dir": str(self.root / "mine")})
+        result = ri.detect(self.store)
+        self.assertEqual((result["version"], result["build"], result["commit"], result["backend"]), ("b1", 1, "4df29be", "cpu"))
+        self.make(self.root / "mine", script=with_devices(new_style, "  Vulkan0: AMD Radeon RX 7900 XTX (RADV NAVI31) (24560 MiB, 24000 MiB free)"))
+        self.assertEqual(ri.detect(self.store)["backend"], "vulkan")
 
     def test_path_uses_which_for_missing_siblings(self):
         path_dir = self.make(self.root / "brew", names=("llama-server",))
