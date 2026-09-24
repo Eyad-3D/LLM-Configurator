@@ -68,7 +68,7 @@ class Fakes:
         m["downloads"].download_variant = self.download
         m["downloads"].remove_variant = lambda variant, directory: self.calls.append(("remove", variant.id, directory)) or 123
         m["discover"].find_for_variant = lambda store, variant, verify=True: self.local.get(variant.id)
-        m["discover"].locations = lambda: [{"source": "hf_cache", "path": str(Path.home() / ".cache/huggingface/hub"), "exists": True},
+        m["discover"].locations = lambda store=None, extra_dirs=(): [{"source": "hf_cache", "path": str(Path.home() / ".cache/huggingface/hub"), "exists": True},
                                            {"source": "custom", "path": f"{SECRET}/elsewhere", "exists": False}]
         m["discover"].scan = self.scan
         m["discover"].hash_cached = lambda store, path, progress=None, cancel=None: "cd" * 32
@@ -175,7 +175,7 @@ class Fakes:
         fakes = self
 
         class ServerRegistry:
-            def __init__(self):
+            def __init__(self, log_dir=None):
                 self.state = {"running": False, "base_url": None, "openai_base_url": None, "pid": None, "config": None,
                               "started_at": None, "model": None, "log_tail": ""}
 
