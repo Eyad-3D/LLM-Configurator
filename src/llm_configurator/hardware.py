@@ -51,24 +51,33 @@ def run(argv, timeout=TIMEOUT):
 
 
 def nvidia_gpus():
+    """Returns (gpus, other_gpus, warnings, nvidia_smi_found)."""
     executable = shutil.which("nvidia-smi")
     if not executable:
-        return [], []
+        return [], [], [], False
     try:
         kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
         result = subprocess.run(
             [executable, "--query-gpu=index,uuid,name,memory.total,memory.free,utilization.gpu,driver_version", "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=2, check=True, **kwargs,
         )
-        gpus = []
-        for row in csv.reader(io.StringIO(result.stdout), skipinitialspace=True):
-            index, uuid, name, total, free, utilization, driver = row
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return [], [], ["Could not read NVIDIA memory. GPU capacity is unknown, not zero."], True
+    gpus, others = [], []
+    for row in csv.reader(io.StringIO(result.stdout), skipinitialspace=True):
+        if len(row) != 7:
+            continue
+        index, uuid, name, total, free, utilization, driver = row
+        try:
             gpus.append({"index": int(index), "uuid": uuid, "name": name, "total": int(float(total) * 1024**2),
                          "available": int(float(free) * 1024**2), "utilization": float(utilization) if utilization.isdigit() else None,
                          "driver": driver, "backend": "cuda", "vendor": "nvidia", "unified": False})
-        return gpus, []
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return [], ["Could not read NVIDIA memory. GPU capacity is unknown, not zero."]
+        except ValueError:
+            # "[N/A]" memory (e.g. unified-memory boards such as GB10) must not hide the other GPUs.
+            others.append({"name": name, "vendor": "nvidia", "backend": "cuda", "total": None, "available": None,
+                           "unified": None, "driver": driver or None, "uuid": uuid or None,
+                           "reason": "nvidia-smi does not report this GPU's memory."})
+    return gpus, others, [], True
 
 
 # ---------- small readers ----------
@@ -138,7 +147,8 @@ def _mac_static():
             "hw.perflevel1.physicalcpu", "hw.optional.avx1_0", "hw.optional.avx2_0", "hw.optional.avx512f",
             "hw.optional.fma", "hw.optional.arm.FEAT_DotProd", "hw.optional.arm.FEAT_I8MM", "sysctl.proc_translated"]
     values = sysctl(keys)
-    arm = values.get("hw.optional.arm64") == "1"
+    # If sysctl fails, an Apple Silicon Mac must still not be treated as an Intel Mac.
+    arm = values.get("hw.optional.arm64") == "1" or (not values and platform.machine().lower() == "arm64")
     features = None
     if values:
         if arm:
@@ -162,10 +172,13 @@ def _windows_features():
     except (ImportError, AttributeError, OSError):
         return None
     # Documented PF_* constants from winnt.h.
-    check = lambda code: bool(present(code))
+    # IsProcessorFeaturePresent answers 0 when Windows cannot detect a feature: AVX flags need Windows 10 2004
+    # (build 19041), DotProd needs Windows 11 (22000). Before that, "no" really means "unknown".
+    build = getattr(sys.getwindowsversion(), "build", 0) if hasattr(sys, "getwindowsversion") else 0
+    check = lambda code, since: bool(present(code)) if build >= since else (True if present(code) else None)
     arm = platform.machine().lower() in ("arm64", "aarch64")
-    return {"avx": check(39), "avx2": check(40), "avx512": check(41), "fma": None, "f16c": None,
-            "neon": arm and check(29), "dotprod": check(43) if arm else None, "i8mm": None, "sve": None}
+    return {"avx": check(39, 19041), "avx2": check(40, 19041), "avx512": check(41, 19041), "fma": None, "f16c": None,
+            "neon": arm and bool(present(29)), "dotprod": check(43, 22000) if arm else None, "i8mm": None, "sve": None}
 
 
 def _windows_registry_reader():
@@ -210,13 +223,12 @@ def mac_gpu_limit(ram_total, wired_limit_mb):
     """Bytes macOS lets the GPU keep resident.
 
     An explicit `sysctl iogpu.wired_limit_mb` (> 0) wins. 0 or missing means macOS's default, which Metal reports
-    as `recommendedMaxWorkingSetSize`: roughly two thirds of RAM on smaller Macs and about three quarters on
-    larger ones. Reports vary by chip and macOS version (65-78%), so we use the cautious end: 2/3 up to 36 GiB,
-    3/4 above. The override is capped at installed RAM.
+    as `recommendedMaxWorkingSetSize`: two thirds of RAM up to 32 GiB and three quarters above (llama.cpp logs:
+    16 GiB -> 10922.67 MiB, 32 GiB -> 21845.34 MiB, 36 GiB -> 27648 MiB). The override is capped at installed RAM.
     """
     if wired_limit_mb and wired_limit_mb > 0:
         return min(ram_total, wired_limit_mb * MIB), "iogpu.wired_limit_mb"
-    share = 0.75 if ram_total > 36 * GIB else 2 / 3
+    share = 0.75 if ram_total > 32 * GIB else 2 / 3
     return int(ram_total * share), "estimated_default"
 
 
@@ -242,8 +254,16 @@ def apple_gpus(ram_total, ram_available):
     warnings = []
     displays = _cached("mac_displays", _mac_displays)
     if mac["arm64"]:
-        chip = (mac["name"] or "Apple Silicon").strip()
-        wired = _int(sysctl(["iogpu.wired_limit_mb"]).get("iogpu.wired_limit_mb"))
+        chip = (mac["name"] or "").strip()
+        if not chip.startswith("Apple"):
+            # Under Rosetta the brand string is not the chip; the graphics listing still names it.
+            chip = next((str(d.get("sppci_model")) for d in displays or [] if str(d.get("sppci_model", "")).startswith("Apple")),
+                        "Apple Silicon")
+        # macOS 14+ uses iogpu.wired_limit_mb (MiB); macOS 13 used debug.iogpu.wired_limit (bytes).
+        values = sysctl(["iogpu.wired_limit_mb", "debug.iogpu.wired_limit"])
+        wired = _int(values.get("iogpu.wired_limit_mb"))
+        if not wired and (_int(values.get("debug.iogpu.wired_limit")) or 0) > 0:
+            wired = _int(values["debug.iogpu.wired_limit"]) // MIB
         limit, source = mac_gpu_limit(ram_total, wired)
         cores = next((_int(d.get("sppci_cores")) for d in displays or [] if "apple" in str(d.get("sppci_model", "")).lower()), None)
         if mac["translated"]:
@@ -272,6 +292,11 @@ def apple_gpus(ram_total, ram_available):
 
 # ---------- Linux DRM (AMD / Intel) ----------
 
+def _real_name(text):
+    text = (text or "").strip()
+    return "" if text.lower() in {"n/a", "na", "unknown", "none"} else text
+
+
 def _rocm_names():
     """Marketing names from rocm-smi or amd-smi, in the tools' own device order, and whether ROCm is installed."""
     rocm = bool(shutil.which("amd-smi") or shutil.which("rocm-smi"))
@@ -280,7 +305,7 @@ def _rocm_names():
         try:
             data = json.loads(run([tool, "static", "--asic", "--json"], timeout=4) or "")
             items = data if isinstance(data, list) else data.get("gpu_data", [])
-            names = [((item.get("asic") or {}).get("market_name") or "").strip() for item in items]
+            names = [_real_name((item.get("asic") or {}).get("market_name")) for item in items]
             if names and all(names):
                 return names, rocm
         except (ValueError, AttributeError, TypeError):
@@ -290,12 +315,23 @@ def _rocm_names():
         try:
             data = json.loads(run([tool, "--showproductname", "--json"], timeout=4) or "")
             cards = sorted((k for k in data if k.startswith("card")), key=lambda k: _int(k[4:]) or 0)
-            names = [(data[k].get("Card Series") or data[k].get("Card series") or "").strip() for k in cards]
+            names = [_real_name(data[k].get("Card Series") or data[k].get("Card series")) for k in cards]
             if names and all(names):
                 return names, rocm
         except (ValueError, AttributeError, TypeError):
             pass
     return [], rocm
+
+
+def _rocm_names_once():
+    # Cache only a usable answer: a tool that timed out once must not pin a generic name (and so a different
+    # fingerprint) for the whole run.
+    if "rocm_names" not in _cache:
+        names, rocm = _rocm_names()
+        if names or not rocm:
+            _cache["rocm_names"] = (names, rocm)
+        return names, rocm
+    return _cache["rocm_names"]
 
 
 def drm_cards(root=None):
@@ -326,25 +362,34 @@ def drm_cards(root=None):
     return cards
 
 
-def linux_gpus(start_index, have_nvidia, root=None):
+_NVIDIA_REASON = {False: "nvidia-smi is missing, so free graphics memory cannot be read.",
+                  True: "nvidia-smi did not answer, so free graphics memory cannot be read."}
+_NVIDIA_MISSING = ("An NVIDIA GPU is present but nvidia-smi was not found. Install or repair the NVIDIA driver "
+                   "so its memory can be read.")
+
+
+def linux_gpus(start_index, have_nvidia, root=None, smi_found=False):
     """AMD cards with sysfs memory counters go in `gpus`; everything else we can see goes in `other_gpus`."""
     cards = drm_cards(root or DRM_ROOT)
     gpus, others, warnings = [], [], []
     amd = [c for c in cards if c["vendor"] == "amd"]
-    names, rocm = _cached("rocm_names", _rocm_names) if amd else ([], False)
+    names, rocm = _rocm_names_once() if amd else ([], False)
     if len(names) != len(amd):
         names = []  # Tool order only maps safely onto sysfs order when the counts agree.
     for position, card in enumerate(amd):
         name = (names[position] if names else None) or card["product_name"] or f"AMD Radeon GPU ({card['device_id'] or card['pci']})"
         total, used = card["vram_total"], card["vram_used"]
+        # `backend` is the llama.cpp build that drives this card out of the box. The installer only picks Vulkan
+        # for AMD (ROCm builds need vendor libraries), so "rocm" would promise a build the user does not have.
+        # `rocm` says whether ROCm tools are installed, for people who bring their own HIP build.
         if total and used is not None and total >= 2 * GIB:
             gpus.append({"index": start_index + len(gpus), "uuid": f"amdgpu-{card['unique_id'] or card['pci']}",
                          "name": name, "total": total, "available": max(0, total - used), "utilization": None,
-                         "driver": card["driver"], "backend": "rocm" if rocm else "vulkan", "vendor": "amd",
+                         "driver": card["driver"], "backend": "vulkan", "vendor": "amd", "rocm": rocm,
                          "unified": False, "pci": card["pci"], "gtt_total": card["gtt_total"]})
         else:
             # Small or missing VRAM usually means an integrated APU sharing system RAM; its GPU budget is not readable.
-            others.append({"name": name, "vendor": "amd", "backend": "rocm" if rocm else "vulkan", "total": total,
+            others.append({"name": name, "vendor": "amd", "backend": "vulkan", "rocm": rocm, "total": total,
                            "available": None, "unified": total is not None and total < 2 * GIB, "pci": card["pci"],
                            "driver": card["driver"],
                            "reason": "Integrated or unreadable AMD graphics: dedicated memory is too small or unknown."})
@@ -357,24 +402,41 @@ def linux_gpus(start_index, have_nvidia, root=None):
         elif card["vendor"] == "nvidia" and not have_nvidia:
             others.append({"name": f"NVIDIA GPU ({card['device_id'] or card['pci']})", "vendor": "nvidia", "backend": "cuda",
                            "total": None, "available": None, "unified": False, "pci": card["pci"], "driver": card["driver"],
-                           "reason": "nvidia-smi is missing, so free graphics memory cannot be read."})
-            warnings.append("An NVIDIA GPU is present but nvidia-smi was not found. Install or repair the NVIDIA driver "
-                            "so its memory can be read.")
+                           "reason": _NVIDIA_REASON[smi_found]})
+            if not smi_found:
+                warnings.append(_NVIDIA_MISSING)
     return gpus, others, warnings
 
 
 # ---------- Windows ----------
 
-def windows_gpus(have_nvidia, registry=None):
+def windows_gpus(have_nvidia, registry=None, smi_found=False):
     """Display adapters from the registry. Free memory is never exposed there, so all go in `other_gpus`.
 
     `HardwareInformation.qwMemorySize` is the 64-bit dedicated memory size; WMI's AdapterRAM caps at 4 GiB.
+    The registry list is read once per process; which NVIDIA cards count as "read" is decided on every scan.
     """
+    adapters = _windows_adapters(registry) if registry else _cached("windows_adapters", _windows_adapters)
+    if adapters is None:
+        return [], ["Could not list graphics adapters from the Windows registry."]
+    others, warnings = [], []
+    for adapter in adapters:
+        if adapter["vendor"] == "nvidia":
+            if have_nvidia:
+                continue
+            adapter = {**adapter, "reason": _NVIDIA_REASON[smi_found]}
+            if not smi_found and _NVIDIA_MISSING not in warnings:
+                warnings.append(_NVIDIA_MISSING)
+        others.append(adapter)
+    return others, warnings
+
+
+def _windows_adapters(registry=None):
     registry = registry or _windows_registry_reader()
     root = registry(WINDOWS_GPU_CLASS) if registry else None
     if not root:
-        return [], ["Could not list graphics adapters from the Windows registry."]
-    others, warnings, seen = [], [], set()
+        return None
+    others, seen = [], set()
     for sub in root.get("subkeys", []):
         if not re.fullmatch(r"\d{4}", sub):
             continue
@@ -384,44 +446,42 @@ def windows_gpus(have_nvidia, registry=None):
             continue  # virtual/remote display adapters
         vendor = PCI_VENDORS.get("0x" + match.group(1), "unknown")
         name = values.get("DriverDesc") or "Unknown graphics adapter"
-        if (vendor == "nvidia" and have_nvidia) or (name, values.get("MatchingDeviceId")) in seen:
+        if (name, values.get("MatchingDeviceId")) in seen:
             continue
         seen.add((name, values.get("MatchingDeviceId")))
         size = values.get("HardwareInformation.qwMemorySize")
         if isinstance(size, (bytes, bytearray)):
             size = int.from_bytes(size[:8], "little")
         total = size if isinstance(size, int) and size > 0 else None
-        reason = ("nvidia-smi is missing, so free graphics memory cannot be read." if vendor == "nvidia"
-                  else "Windows does not report free graphics memory for this adapter.")
         others.append({"name": name, "vendor": vendor, "backend": "cuda" if vendor == "nvidia" else "vulkan",
                        "total": total, "available": None, "unified": vendor == "intel" and (total or 0) < 2 * GIB,
-                       "driver": values.get("DriverVersion"), "reason": reason})
-        if vendor == "nvidia":
-            warnings.append("An NVIDIA GPU is present but nvidia-smi was not found. Install or repair the NVIDIA driver "
-                            "so its memory can be read.")
-    return others, warnings
+                       "driver": values.get("DriverVersion"),
+                       "reason": "Windows does not report free graphics memory for this adapter."})
+    return others
 
 
 # ---------- scan ----------
 
 def gpu_scan(system, ram_total, ram_available, registry=None, drm_root=None):
     """Returns (gpus, other_gpus, warnings, unified_memory)."""
-    gpus, warnings = nvidia_gpus()
+    gpus, nvidia_others, warnings, smi_found = nvidia_gpus()
     others, unified = [], False
+    have_nvidia = bool(gpus or nvidia_others)
     try:
         if system == "Darwin":
             apple, others, extra, unified = apple_gpus(ram_total, ram_available)
             gpus += apple
         elif system == "Linux":
-            found, others, extra = linux_gpus(len(gpus), bool(gpus), drm_root)
+            found, others, extra = linux_gpus(len(gpus), have_nvidia, drm_root, smi_found)
             gpus += found
         elif system == "Windows":
-            others, extra = _cached("windows_gpus", lambda: windows_gpus(bool(gpus), registry))
+            others, extra = windows_gpus(have_nvidia, registry, smi_found)
         else:
             extra = []
     except Exception:  # Detection must never break the app; the NVIDIA result above still stands.
         extra = ["Could not check for non-NVIDIA graphics. Only the GPUs listed are known."]
     warnings += extra
+    others = nvidia_others + others
     if not gpus:
         if others:
             warnings.append("Graphics found, but their free memory cannot be read, so estimates use the CPU and system RAM only.")
