@@ -105,7 +105,7 @@ PowerShell 7.6.6.
 ### Unit tests
 - `python3 -m pip install -e .`, then `python3 -m unittest discover -s tests` (with `pwsh` on PATH): **626 tests, 2 failures,
   24 skipped**. The 2 failures are the known fake-llama.cpp gaps from FIXUPS.md (`test_server_rejects_removed_draft_max_like_real`,
-  `test_bench_has_no_version_flag_like_real`), owned by `server-fake`. `test_community` (54) and `test_export` (42) all pass.
+  `test_bench_has_no_version_flag_like_real`), owned by `server-fake`. `test_community` (52) and `test_export` (42) all pass.
 - `tests.integration.test_real_runtime` against the real build: 24 tests, 1 failure. It is the known `runtime_install` version parsing
   (owned by `runtime-downloads`).
 - `tests/test_export.py` now **runs the exported scripts** in real bash and, when `pwsh` is on PATH, in real PowerShell, with a
