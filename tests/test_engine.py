@@ -101,7 +101,8 @@ from datetime import datetime, timedelta, timezone
 
 from llm_configurator.domain import KV_BYTES_PER_ELEMENT
 from llm_configurator.engine import interpolated_speed, placements, verdict
-from llm_configurator.launch import from_candidate, server_args
+from llm_configurator.launch import from_candidate, runtime_gpu_layers, server_args
+from llm_configurator.speed import gpu_blocks, output_bytes
 
 
 def real(model, **changes):
@@ -145,7 +146,25 @@ class CompressedNotesTests(unittest.TestCase):
         per_token_layer = 2 * 4 * 128 * 2
         expected = per_token_layer * (8 * 65536 + 24 * (1024 + 512))
         self.assertEqual(allocations(sliding, 65536, 1, 0)["kv_total"], expected)
-        self.assertEqual(allocations(sliding, 65536, 2, 0)["kv_total"], per_token_layer * (8 * 65536 * 2 + 24 * (2048 + 512)))
+        # Every user has its own window + one micro-batch (llama-server -np N gives N separate caches).
+        self.assertEqual(allocations(sliding, 65536, 2, 0)["kv_total"], per_token_layer * (8 * 65536 * 2 + 24 * (1024 + 512) * 2))
+        self.assertEqual(allocations(sliding, 65536, 1, 0, ubatch=1024)["kv_total"], per_token_layer * (8 * 65536 + 24 * 2048))
+
+    def test_kv_matches_real_llama_cpp_logs(self):
+        # `llama_kv_cache: size = … MiB` lines from a real llama-server (see docs/v0.4/fixups/engine.md):
+        # a 12-layer Gemma-3-like model, 4 KV heads × 128, window 512, pattern 6 (2 full + 10 sliding layers).
+        gemma = replace(self.model, layers=12, kv_heads=4, head_dim=128, sliding_window=512, sliding_layers=10)
+        mib = lambda context, users, **kw: allocations(gemma, context, users, 0, **kw)["kv_total"] / 2**20
+        for context, users, logged in [(512, 1, 12.0), (512, 4, 48.0), (2048, 1, 28.0), (2048, 4, 112.0), (8192, 2, 104.0),
+                                       (32768, 4, 592.0), (5000, 1, 40.0)]:
+            with self.subTest(context=context, users=users):
+                self.assertEqual(mib(context, users), logged)
+        self.assertEqual(mib(8192, 2, ubatch=1024), 124.0)
+        self.assertAlmostEqual(mib(8192, 1, kv_cache_type="q8_0"), 27.62, places=2)
+        dense = replace(self.model, layers=12, kv_heads=4, head_dim=64)
+        for context, users, kind, logged in [(4096, 1, "f16", 48.0), (4096, 3, "q8_0", 76.5), (16384, 3, "q4_0", 162.0)]:
+            with self.subTest(context=context, kind=kind):
+                self.assertEqual(allocations(dense, context, users, 0, kind)["kv_total"] / 2**20, logged)
 
     def test_user_choice_is_respected_and_ids_are_marked(self):
         report = recommend([self.model], hardware(), Requirements(kv_cache_type="q8_0"))
@@ -188,6 +207,19 @@ class ExpertOffloadTests(unittest.TestCase):
         split = allocations(self.model, 8192, 1, 40)
         self.assertEqual(allocations(self.model, 8192, 1, 40, "f16", 8)["vram"], split["vram"])
         self.assertLess(allocations(self.model, 8192, 1, 40, "f16", 12)["vram"], split["vram"])
+
+    def test_split_counts_the_output_layer_llama_cpp_puts_on_the_gpu(self):
+        # llama.cpp's -ngl n puts the output layer and the last n-1 blocks on the GPU; the output
+        # layer (vocabulary × width) is usually bigger than a block, so small splits need more VRAM.
+        model = real(demo_variants()[0], size_bytes=int(8 * GIB), layers=32)
+        blocks, output = gpu_blocks(model, 4)
+        self.assertEqual(blocks + output, runtime_gpu_layers(4, 32))
+        split = allocations(model, 8192, 1, 4)
+        self.assertGreaterEqual(split["weights_vram"], output_bytes(model) * 1.10 + (blocks) * 8 * GIB * 1.10 * 0.8 / 32)
+        self.assertEqual(split["weights_ram"] + split["weights_vram"], allocations(model, 8192, 1, 0)["weights_ram"])
+        full = allocations(model, 8192, 1, 32)
+        self.assertEqual(full["weights_ram"], 0)
+        self.assertEqual(full["weights_vram"], math.ceil(8 * GIB * 1.10))
 
     def test_dense_models_ignore_n_cpu_moe(self):
         dense = real(demo_variants()[0])
@@ -346,8 +378,9 @@ class EvidenceTests(unittest.TestCase):
         return {**base, **changes}
 
     def test_measurement_beats_tuned_and_tuned_beats_everything_else(self):
-        tuned = [self.tune()]
-        c = self.pick(recommend([self.model], self.hw, Requirements(), [record(self.model)], tuned=tuned))
+        tuned = [self.tune(settings={"depth": 7552})]
+        same_launch = dict(threads=6, settings={"batch": 1024, "flash_attn": "on"}, kind="speed_test")
+        c = self.pick(recommend([self.model], self.hw, Requirements(), [record(self.model, **same_launch)], tuned=tuned))
         self.assertEqual((c["evidence"], c["tps"]), ("measured", 25))
         self.assertEqual(c["tuned"]["tps"], 40)
         c = self.pick(recommend([self.model], self.hw, Requirements(), [record(self.model, context=4096)], tuned=tuned,
@@ -356,6 +389,46 @@ class EvidenceTests(unittest.TestCase):
         self.assertIn("Tuned and tested on this computer", c["verdict_text"])
         self.assertEqual((c["launch"]["threads"], c["launch"]["batch"], c["launch"]["flash_attn"]), (6, 1024, "on"))
         self.assertEqual(c["threads"], 6)
+
+    def test_a_test_counts_only_for_the_launch_settings_it_ran_with(self):
+        # The launch carries the tune's threads/batch/flash attention; a default-settings test no longer describes it.
+        tuned = [self.tune(settings={"depth": 7552})]
+        c = self.pick(recommend([self.model], self.hw, Requirements(), [record(self.model)], tuned=tuned))
+        self.assertEqual((c["evidence"], c["tps"]), ("tuned", 40))
+        for change in [{"settings": {"batch": 2048}}, {"settings": {"flash_attn": "off"}}, {"settings": {"cache_type_v": "q8_0"}}]:
+            with self.subTest(change=change):
+                c = self.pick(recommend([self.model], self.hw, Requirements(), [record(self.model, **change)]))
+                self.assertNotEqual(c["evidence"], "measured")
+
+    def test_short_tests_do_not_verify_long_contexts(self):
+        # Tune trials run with ~1k tokens in memory; that says little about an 8k conversation.
+        c = self.pick(recommend([self.model], self.hw, Requirements(), tuned=[self.tune(settings={"depth": 1024})]))
+        self.assertEqual((c["evidence"], c["verdict"], c["tps"], c["speed_meets_target"]), ("tuned", "unknown", None, None))
+        self.assertIn("short test", c["verdict_text"])
+        self.assertEqual(self.pick(recommend([self.model], self.hw, Requirements(), tuned=[self.tune()]))["tps"], None)
+        shallow = record(self.model, kind="tune", depth=1024)
+        self.assertNotEqual(self.pick(recommend([self.model], self.hw, Requirements(), [shallow]))["evidence"], "measured")
+        full = record(self.model, kind="speed_test", depth=8192 - 640)
+        self.assertEqual(self.pick(recommend([self.model], self.hw, Requirements(), [full]))["evidence"], "measured")
+
+    def test_speed_tests_are_preferred_over_other_records(self):
+        newer_bench = record(self.model, tps=50, kind="bench")
+        test = record(self.model, tps=20, kind="speed_test", depth=7552)
+        self.assertEqual(self.pick(recommend([self.model], self.hw, Requirements(), [test, newer_bench]))["tps"], 20)
+
+    def test_tunes_match_the_pinned_record_shape(self):
+        # FIXUPS.md: {**tune_result, variant_id, sha256, fingerprint, context, gpu_layers, n_cpu_moe, kv_cache_type, timestamp}
+        pinned = self.tune(context=8192, gpu_layers=0, n_cpu_moe=0, kv_cache_type="f16", settings={"depth": 7552},
+                           best={"threads": 6, "gpu_layers": 0, "cache_type_k": "f16", "n_cpu_moe": 0, "context": 8192})
+        c = self.pick(recommend([self.model], self.hw, Requirements(), tuned=[pinned]))
+        self.assertEqual((c["evidence"], c["tps"], c["launch"]["threads"]), ("tuned", 40, 6))
+        # The tuner moved to q8_0: that speed belongs to another candidate, so nothing is merged or claimed.
+        moved = {**pinned, "best": {**pinned["best"], "cache_type_k": "q8_0", "cache_type_v": "q8_0"}}
+        c = self.pick(recommend([self.model], self.hw, Requirements(), tuned=[moved]))
+        self.assertFalse(c["tuned"]["same_placement"])
+        self.assertEqual(c["tuned"]["best_placement"]["cache_type_k"], "q8_0")
+        self.assertNotEqual(c["evidence"], "tuned")
+        self.assertIsNone(c["launch"].get("batch"))
 
     def test_tuned_results_for_other_placements_or_machines_do_not_count(self):
         for change in [{"fingerprint": "other"}, {"variant_id": "x"}, {"timestamp": "2000-01-01T00:00:00+00:00"},
@@ -401,15 +474,20 @@ class EvidenceTests(unittest.TestCase):
 class VerdictTests(unittest.TestCase):
     def test_thresholds(self):
         self.assertEqual(verdict("measured", 15, 34)[0], "runs_well")
-        self.assertIn("comfortably above your 15", verdict("measured", 15, 34)[1])
-        self.assertEqual(verdict("measured", 15, 15), ("runs_well", "Tested on this computer: about 15 tokens per second — above your 15."))
+        self.assertIn("comfortably above your target of 15", verdict("measured", 15, 34)[1])
+        self.assertEqual(verdict("measured", 15, 15),
+                         ("runs_well", "Tested on this computer: about 15 tokens per second, which meets your target of 15."))
+        self.assertIn("about 14.9 tokens per second, a bit below", verdict("measured", 15, 14.9)[1])  # never "15 … below 15"
+        self.assertEqual(verdict("measured", 0, 3)[1], "Tested on this computer: about 3.0 tokens per second.")
         self.assertEqual(verdict("measured", 15, 7.5)[0], "runs_slowly")
         self.assertEqual(verdict("measured", 15, 7.4)[0], "too_slow")
         self.assertEqual(verdict("tuned", 0, 1)[0], "runs_well")
 
     def test_estimates_never_run_well(self):
         estimate = {"available": True, "low_tps": 90, "high_tps": 200, "target_status": "likely_meets"}
-        self.assertEqual(verdict("estimated", 15, speed_estimate=estimate), ("unknown", "Not tested yet; a rough estimate says 90–200 tokens per second — likely fast enough."))
+        self.assertEqual(verdict("estimated", 15, speed_estimate=estimate), ("unknown", "Not tested yet; a rough estimate says 90–200 tokens per second, likely fast enough."))
+        tiny = {"low_tps": 0.01, "high_tps": 0.04, "target_status": "likely_below"}
+        self.assertIn("under 0.1 tokens per second", verdict("estimated", 15, speed_estimate=tiny)[1])
         self.assertEqual(verdict("interpolated", 15, interpolated={"tps": 99})[0], "unknown")
         self.assertEqual(verdict("community", 15, community={"median_tps": 99, "n": 1})[0], "unknown")
         self.assertEqual(verdict("none", 15)[0], "unknown")
@@ -428,6 +506,15 @@ class VerdictTests(unittest.TestCase):
         report = recommend([a, b], hardware(vram=0), Requirements(), [record(a, tps=5)])
         self.assertEqual(report["candidates"][0]["variant_id"], "b")
 
+
+    def test_speed_priority_never_puts_a_guess_above_a_verified_speed(self):
+        a = real(demo_variants()[0], id="a", base_repo="test/a", sha256="a")
+        b = real(demo_variants()[0], id="b", base_repo="test/b", sha256="b")
+        crowd = lambda records, variant, hardware, config: {"median_tps": 99, "n": 5} if variant.id == "b" else None
+        report = recommend([a, b], hardware(vram=0), Requirements(priority="speed"), [record(a, tps=25)],
+                           community=[{"r": 1}], community_evidence=crowd)
+        first = report["candidates"][0]
+        self.assertEqual((first["variant_id"], first["evidence"]), ("a", "measured"))
 
 class CandidateShapeTests(unittest.TestCase):
     def test_ids_are_unique_and_launch_fragments_valid(self):
@@ -448,6 +535,39 @@ class CandidateShapeTests(unittest.TestCase):
         hw["gpus"][0]["backend"] = "cuda"
         c = next(c for c in recommend([demo_variants()[0]], hw, Requirements())["candidates"] if c["mode"] == "cpu")
         self.assertIn("-dev", server_args(from_candidate(c, "/m/x.gguf", hw)))
+
+
+    def test_cpu_candidates_hide_gpus_whose_memory_is_unknown(self):
+        # A GPU without free-memory telemetry (or only in other_gpus) is still used by llama.cpp unless hidden.
+        unknown = hardware(ram=64, vram=1)
+        unknown["gpus"][0].update(backend="rocm", available=None)
+        other = hardware(ram=64, vram=0)
+        other["other_gpus"] = [{"name": "Radeon 780M", "vendor": "amd", "backend": "vulkan", "total": None, "available": None}]
+        for hw in [unknown, other]:
+            with self.subTest(hw=hw):
+                candidates = recommend([demo_variants()[0]], hw, Requirements())["candidates"]
+                self.assertTrue(candidates)
+                for c in candidates:
+                    self.assertEqual(c["gpu_layers"], 0)
+                    args = server_args(from_candidate(c, "/m/x.gguf", hw))
+                    self.assertEqual(args[args.index("-dev") + 1], "none")
+
+    def test_real_community_records_must_share_cache_type_expert_offload_and_depth(self):
+        from llm_configurator import community
+        model = real(demo_variants()[0], sha256="a" * 64)
+        hw = hardware(vram=0)
+        hw.update(cpu_name="Test CPU", arch="x86_64")
+        base = {"variant_id": model.id, "sha256": model.sha256, "fingerprint": "other", "timestamp": now(), "context": 8192,
+                "users": 1, "gpu_layers": 0, "gpu_uuid": None, "threads": 8, "tps": 30, "kind": "speed_test", "depth": 7552,
+                "settings": {"cache_type_k": "f16", "cache_type_v": "f16", "n_cpu_moe": 0}}
+        rows = lambda **change: [community.anonymize({**base, **change}, hw, model) for _ in range(3)]
+        pick = lambda records, kv="f16": next(c for c in recommend([model], hw, Requirements(kv_cache_type=kv), community=records)["candidates"]
+                                              if c["context"] == 8192)
+        self.assertEqual(pick(rows())["evidence"], "community")
+        self.assertEqual(pick(rows(), "q8_0")["evidence"], "none")
+        q8 = rows(settings={"cache_type_k": "q8_0", "cache_type_v": "q8_0", "n_cpu_moe": 0})
+        self.assertEqual((pick(q8)["evidence"], pick(q8, "q8_0")["evidence"]), ("none", "community"))
+        self.assertEqual(pick(rows(depth=512, kind="tune"))["evidence"], "none")
 
 
 class PerformanceTests(unittest.TestCase):

@@ -12,13 +12,17 @@ from .speed import estimate
 MIN_MEASUREMENTS = 2
 MAX_AGE_DAYS = 90
 MIN_SPREAD = 0.10  # never claim better than about ±10% from a handful of tests
+FULL_DEPTH_SLACK = 1024  # same rule as engine: a test describes a context only when run (nearly) that deep
 
 
 def _usable(record, hardware):
     try:
         age = (datetime.now(timezone.utc) - datetime.fromisoformat(record["timestamp"])).total_seconds()
-        tps = record["tps"]
-        return (record.get("fingerprint") == hardware.get("fingerprint") and (record.get("users") or 1) == 1
+        tps, depth = record["tps"], record.get("depth")
+        # Tune trials run with ~1k tokens in memory; comparing them with a long-context estimate would skew the fit.
+        deep = depth is None or (type(depth) is int and depth + FULL_DEPTH_SLACK >= record["context"])
+        return (deep and hardware.get("fingerprint") and record.get("fingerprint") == hardware.get("fingerprint")
+                and (record.get("users") or 1) == 1
                 and 0 <= age < MAX_AGE_DAYS * 86400 and isinstance(tps, (int, float)) and not isinstance(tps, bool)
                 and math.isfinite(tps) and tps > 0)
     except (KeyError, TypeError, ValueError):

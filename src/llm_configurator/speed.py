@@ -6,32 +6,65 @@ memory model and the speed model can never disagree about how many bytes exist.
 import math
 
 from .calibration import positive, valid
-from .domain import KV_BYTES_PER_ELEMENT, QUANT_BYTES_PER_PARAMETER
+from .domain import GIB, KV_BYTES_PER_ELEMENT, QUANT_BYTES_PER_PARAMETER
+from .launch import runtime_gpu_layers
 
 # Kept for callers of v0.3; the domain table is the single source of truth.
 BYTES_PER_PARAMETER = QUANT_BYTES_PER_PARAMETER
-# llama.cpp keeps one extra micro-batch of tokens in a sliding-window cache (n_swa * seqs + n_ubatch).
-SLIDING_MARGIN_TOKENS = 512
+# llama-server's default micro-batch; a sliding-window cache holds the window plus one micro-batch per user.
+DEFAULT_UBATCH = 512
+SLIDING_MARGIN_TOKENS = DEFAULT_UBATCH  # kept for v0.3 callers
+CELL_PAD = 256  # llama.cpp rounds every per-user cache up to a multiple of 256 cells
 
 
-def kv_bytes(variant, context, users, kv_cache_type="f16"):
-    """K + V bytes for all sequences; sliding-window layers hold at most the window."""
+def _pad(tokens):
+    return -(-tokens // CELL_PAD) * CELL_PAD
+
+
+def kv_bytes(variant, context, users, kv_cache_type="f16", ubatch=None):
+    """K + V bytes for all users, sized the way llama-server allocates them.
+
+    `launch` passes `-c context*users -np users`, so every user gets a separate cache of
+    pad256(context) cells; a sliding-window layer holds pad256(min(context, window + ubatch))
+    per user (checked against llama.cpp's own `llama_kv_cache: size = …` log lines).
+    """
     per_token_layer = 2 * variant.kv_heads * variant.head_dim * KV_BYTES_PER_ELEMENT[kv_cache_type]
     sliding = variant.sliding_layers if variant.sliding_window else 0
-    full = (variant.layers - sliding) * context * users
-    capped = sliding * min(context * users, variant.sliding_window * users + SLIDING_MARGIN_TOKENS) if sliding else 0
-    return math.ceil(per_token_layer * (full + capped))
+    cells = _pad(context)
+    full = (variant.layers - sliding) * cells * users
+    window = _pad(min(cells, variant.sliding_window + (ubatch or DEFAULT_UBATCH))) if sliding else 0
+    return math.ceil(per_token_layer * (full + sliding * window * users))
+
+
+def gpu_blocks(variant, gpu_layers):
+    """(transformer blocks on the GPU, output layer on the GPU) for our gpu_layers setting.
+
+    llama.cpp counts the output layer as one more layer after the last block: `-ngl n`
+    offloads the output layer plus the last n-1 blocks. `launch.runtime_gpu_layers` decides n.
+    """
+    n = runtime_gpu_layers(gpu_layers, variant.layers)
+    return min(max(n - 1, 0), variant.layers), n >= 1
+
+
+def output_bytes(variant):
+    """Allowance for the output layer (vocabulary × width), which is usually bigger than one block.
+
+    The catalogue has no vocabulary size, so this is a bounded share of the file: large enough
+    for the tied 262k-token output of Gemma-3-27B (≈1.2 GB) and never below one average block.
+    """
+    return max(variant.size_bytes / variant.layers, min(0.15 * variant.size_bytes, 2 * GIB))
 
 
 def moved_expert_layers(variant, gpu_layers, n_cpu_moe):
-    """GPU layers whose expert tensors `--n-cpu-moe` keeps in RAM.
+    """GPU blocks whose expert tensors `--n-cpu-moe` keeps in RAM.
 
     llama.cpp pins the experts of blocks 0..n-1 to the CPU and offloads the *last*
-    gpu_layers blocks, so only blocks in [layers - gpu_layers, n_cpu_moe) actually move.
+    blocks, so only GPU blocks in [layers - on_gpu, n_cpu_moe) actually move.
     """
     if not variant.moe or not n_cpu_moe:
         return 0
-    return max(0, min(gpu_layers, n_cpu_moe - (variant.layers - gpu_layers)))
+    on_gpu = gpu_blocks(variant, gpu_layers)[0]
+    return max(0, min(on_gpu, n_cpu_moe - (variant.layers - on_gpu)))
 
 
 def active_fraction(variant):
@@ -60,8 +93,9 @@ def estimate(variant, hardware, calibration, context, layers, users, gpu, target
     layer_bytes = variant.size_bytes / total
     expert_active = layer_bytes * variant.expert_fraction * (variant.active_experts / variant.experts if variant.moe else 0)
     kv_layer = kv_bytes(variant, context, 1, kv_cache_type) / total
-    gpu_traffic = layers * (layer_bytes * share + kv_layer) - moved * expert_active
-    cpu_traffic = (total - layers) * (layer_bytes * share + kv_layer) + moved * expert_active
+    on_gpu = gpu_blocks(variant, layers)[0]
+    gpu_traffic = on_gpu * (layer_bytes * share + kv_layer) - moved * expert_active
+    cpu_traffic = (total - on_gpu) * (layer_bytes * share + kv_layer) + moved * expert_active
     parameters = variant.active_parameters or (variant.parameters or variant.size_bytes / bp) * share
     cpu_share = cpu_traffic / (cpu_traffic + gpu_traffic)
     cpu = calibration.get('cpu') or {}
