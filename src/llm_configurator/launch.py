@@ -124,6 +124,9 @@ def server_env(config, base=None):
     c = normalize(config)
     # LLAMA_ARG_* variables silently fill llama-server settings; drop them so a run matches what was tested.
     env = {k: v for k, v in (os.environ if base is None else base).items() if not k.upper().startswith("LLAMA_ARG_")}
+    # llama-server lets any website read its answers by default (CORS "*"); allow only pages on this computer.
+    # An environment variable, not a flag, so builds without the option ignore it instead of refusing to start.
+    env["LLAMA_ARG_CORS_ORIGINS"] = "localhost"
     if c["gpu_backend"] == "cuda" and c["gpu_uuid"] and c["gpu_layers"]:
         env["CUDA_VISIBLE_DEVICES"] = c["gpu_uuid"]
     return env

@@ -115,6 +115,7 @@ class LlamaServerScriptTests(unittest.TestCase):
 # Start Demo Small Q4_K_M with the settings LLM Configurator tested.
 # OpenAI-compatible address: http://127.0.0.1:8080/v1  (stop with Ctrl+C)
 set -euo pipefail
+export LLAMA_ARG_CORS_ORIGINS=localhost
 exec llama-server \\
     -m /models/demo.gguf \\
     -c 8192 \\
@@ -134,6 +135,7 @@ exec llama-server \\
         self.assertEqual(result["content"], """# Start Demo Small Q4_K_M with the settings LLM Configurator tested.
 # OpenAI-compatible address: http://127.0.0.1:8080/v1  (stop with Ctrl+C)
 $ErrorActionPreference = 'Stop'
+$env:LLAMA_ARG_CORS_ORIGINS = 'localhost'
 & 'llama-server' `
     -m 'C:\\AI Models\\demo.gguf' `
     -c 8192 `
