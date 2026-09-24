@@ -42,6 +42,7 @@ Branch: `claude/v04-r3-ui`. Files: `src/llm_configurator/static/*`, `tests/ui-ru
 - Every `other_gpus` entry is listed with its `reason`, for example "Also found Intel Arc A380 (not counted in memory estimates): Intel drivers do not…".
 - With no readable GPU, the summary line counts the chips found ("A graphics chip was found, but free memory can't be read, so estimates use RAM") instead of naming only the first one.
 - Names and reasons are escaped. A test covers hostile names.
+- Found in the screenshots: these notes (and the older `warnings`) sat inside the four-number grid with no padding and split across two columns. They now span the full width with padding, in light and dark (`style.css`).
 
 ### From the independent review (a subagent reviewed accessibility, wording and XSS)
 
@@ -92,4 +93,5 @@ Branch: `claude/v04-r3-ui`. Files: `src/llm_configurator/static/*`, `tests/ui-ru
   - a tuned card with an interpolation and a community number.
 
   All read as described above. Details list each number with its own label.
+- **Hardware box** with two unreadable graphics chips, at 360 px (light) and 1280 px (dark): each chip gets its own full-width line after the CSS fix.
 - **Keyring panic:** the first demo run hit it on `/api/credentials` (empty response). Fixed with `pip install --ignore-installed cryptography`, as documented.
