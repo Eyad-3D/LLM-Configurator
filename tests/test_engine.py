@@ -101,7 +101,8 @@ from datetime import datetime, timedelta, timezone
 
 from llm_configurator.domain import KV_BYTES_PER_ELEMENT
 from llm_configurator.engine import interpolated_speed, placements, verdict
-from llm_configurator.launch import from_candidate, server_args
+from llm_configurator.launch import from_candidate, runtime_gpu_layers, server_args
+from llm_configurator.speed import gpu_blocks, output_bytes
 
 
 def real(model, **changes):
@@ -145,7 +146,25 @@ class CompressedNotesTests(unittest.TestCase):
         per_token_layer = 2 * 4 * 128 * 2
         expected = per_token_layer * (8 * 65536 + 24 * (1024 + 512))
         self.assertEqual(allocations(sliding, 65536, 1, 0)["kv_total"], expected)
-        self.assertEqual(allocations(sliding, 65536, 2, 0)["kv_total"], per_token_layer * (8 * 65536 * 2 + 24 * (2048 + 512)))
+        # Every user has its own window + one micro-batch (llama-server -np N gives N separate caches).
+        self.assertEqual(allocations(sliding, 65536, 2, 0)["kv_total"], per_token_layer * (8 * 65536 * 2 + 24 * (1024 + 512) * 2))
+        self.assertEqual(allocations(sliding, 65536, 1, 0, ubatch=1024)["kv_total"], per_token_layer * (8 * 65536 + 24 * 2048))
+
+    def test_kv_matches_real_llama_cpp_logs(self):
+        # `llama_kv_cache: size = … MiB` lines from a real llama-server (see docs/v0.4/fixups/engine.md):
+        # a 12-layer Gemma-3-like model, 4 KV heads × 128, window 512, pattern 6 (2 full + 10 sliding layers).
+        gemma = replace(self.model, layers=12, kv_heads=4, head_dim=128, sliding_window=512, sliding_layers=10)
+        mib = lambda context, users, **kw: allocations(gemma, context, users, 0, **kw)["kv_total"] / 2**20
+        for context, users, logged in [(512, 1, 12.0), (512, 4, 48.0), (2048, 1, 28.0), (2048, 4, 112.0), (8192, 2, 104.0),
+                                       (32768, 4, 592.0), (5000, 1, 40.0)]:
+            with self.subTest(context=context, users=users):
+                self.assertEqual(mib(context, users), logged)
+        self.assertEqual(mib(8192, 2, ubatch=1024), 124.0)
+        self.assertAlmostEqual(mib(8192, 1, kv_cache_type="q8_0"), 27.62, places=2)
+        dense = replace(self.model, layers=12, kv_heads=4, head_dim=64)
+        for context, users, kind, logged in [(4096, 1, "f16", 48.0), (4096, 3, "q8_0", 76.5), (16384, 3, "q4_0", 162.0)]:
+            with self.subTest(context=context, kind=kind):
+                self.assertEqual(allocations(dense, context, users, 0, kind)["kv_total"] / 2**20, logged)
 
     def test_user_choice_is_respected_and_ids_are_marked(self):
         report = recommend([self.model], hardware(), Requirements(kv_cache_type="q8_0"))
@@ -188,6 +207,19 @@ class ExpertOffloadTests(unittest.TestCase):
         split = allocations(self.model, 8192, 1, 40)
         self.assertEqual(allocations(self.model, 8192, 1, 40, "f16", 8)["vram"], split["vram"])
         self.assertLess(allocations(self.model, 8192, 1, 40, "f16", 12)["vram"], split["vram"])
+
+    def test_split_counts_the_output_layer_llama_cpp_puts_on_the_gpu(self):
+        # llama.cpp's -ngl n puts the output layer and the last n-1 blocks on the GPU; the output
+        # layer (vocabulary × width) is usually bigger than a block, so small splits need more VRAM.
+        model = real(demo_variants()[0], size_bytes=int(8 * GIB), layers=32)
+        blocks, output = gpu_blocks(model, 4)
+        self.assertEqual(blocks + output, runtime_gpu_layers(4, 32))
+        split = allocations(model, 8192, 1, 4)
+        self.assertGreaterEqual(split["weights_vram"], output_bytes(model) * 1.10 + (blocks) * 8 * GIB * 1.10 * 0.8 / 32)
+        self.assertEqual(split["weights_ram"] + split["weights_vram"], allocations(model, 8192, 1, 0)["weights_ram"])
+        full = allocations(model, 8192, 1, 32)
+        self.assertEqual(full["weights_ram"], 0)
+        self.assertEqual(full["weights_vram"], math.ceil(8 * GIB * 1.10))
 
     def test_dense_models_ignore_n_cpu_moe(self):
         dense = real(demo_variants()[0])

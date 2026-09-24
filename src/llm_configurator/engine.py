@@ -11,7 +11,7 @@ import math
 
 from .domain import GIB, KV_BYTES_PER_ELEMENT, Requirements, Variant
 from .learning import fit_efficiency
-from .speed import active_fraction, estimate, kv_bytes, moved_expert_layers
+from .speed import active_fraction, estimate, gpu_blocks, kv_bytes, moved_expert_layers, output_bytes
 
 MAX_AGE_DAYS = 30          # local measurements and tune results older than this are ignored
 SLOW_FRACTION = 0.5        # verified speed at or above half the target "runs slowly"; below that "too slow"
@@ -24,7 +24,7 @@ KV_TEXT = {"f16": "full precision (f16)",
            "q4_0": "4-bit compression (q4_0): about a quarter of the memory of full precision, with a small quality cost"}
 
 
-def allocations(variant, context, users, gpu_layers, kv_cache_type="f16", n_cpu_moe=0, unified=False):
+def allocations(variant, context, users, gpu_layers, kv_cache_type="f16", n_cpu_moe=0, unified=False, ubatch=None):
     """Estimated bytes per memory pool.
 
     Returns {"ram", "vram", "kv_total", "kv_vram", "weights_ram", "weights_vram", "expert_ram",
@@ -38,16 +38,25 @@ def allocations(variant, context, users, gpu_layers, kv_cache_type="f16", n_cpu_
         raise ValueError("kv_cache_type must be f16, q8_0 or q4_0")
     if type(n_cpu_moe) is not int or not 0 <= n_cpu_moe <= total_layers:
         raise ValueError("n_cpu_moe must be between 0 and the number of layers")
-    # K + V per sequence; no assumed prefix sharing. Sliding-window layers hold at most the window.
-    kv = kv_bytes(variant, context, users, kv_cache_type)
-    fraction = gpu_layers / total_layers
+    # K + V per user as llama-server allocates them; no assumed prefix sharing.
+    kv = kv_bytes(variant, context, users, kv_cache_type, ubatch)
     # Whole-file placement is approximate; 10% placement/metadata margin protects the estimate.
     weights = variant.size_bytes * 1.10
-    # --n-cpu-moe keeps the expert tensors of the affected GPU layers in RAM.
+    # What llama.cpp really offloads: the last `blocks` transformer blocks plus, for any GPU run,
+    # the output layer, which can be several blocks' worth of bytes (large vocabularies).
+    blocks, output_on_gpu = gpu_blocks(variant, gpu_layers)
+    fraction = blocks / total_layers
+    if blocks == total_layers or not output_on_gpu:
+        weights_vram = weights * fraction
+    else:
+        output = output_bytes(variant) * 1.10
+        weights_vram = (weights - output) * fraction + output
+    # --n-cpu-moe keeps the expert tensors of the affected GPU blocks in RAM.
     expert_ram = weights * variant.expert_fraction * moved_expert_layers(variant, gpu_layers, n_cpu_moe) / total_layers
-    weights_ram = weights * (1 - fraction) + expert_ram
-    weights_vram = weights * fraction - expert_ram
+    weights_vram -= expert_ram
+    weights_ram = weights - weights_vram
     buffer = (0.75 + users * 0.20) * GIB
+    # A layer's KV lives on that layer's device, even when its experts stay in RAM.
     ram = weights_ram + kv * (1 - fraction) + buffer
     vram = 0
     if gpu_layers:
