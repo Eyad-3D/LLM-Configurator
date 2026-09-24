@@ -1415,6 +1415,13 @@ pre.export-content:focus-visible {
   opacity: 0;
 }
 
+.wizard-nav #compare {
+  width: auto;
+  margin-top: 0;
+}
+body.has-jobs main {
+  padding-bottom: 72px;
+}
 /* Background tasks tray */
 #jobs-tray {
   position: fixed;

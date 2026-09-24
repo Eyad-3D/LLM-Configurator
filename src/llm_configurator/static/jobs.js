@@ -180,6 +180,7 @@
     const jobs = visibleJobs();
     const active = jobs.filter((j) => !FINAL.has(j.state));
     tray.hidden = jobs.length === 0;
+    document.body.classList.toggle("has-jobs", !tray.hidden);
     const count = tray.querySelector("#jobs-count");
     if (count)
       count.textContent = active.length
@@ -226,14 +227,17 @@
     if (jobs.some((j) => FINAL.has(j.state)))
       fadeTimer = setTimeout(render, 6100); // Finished rows leave the tray.
   }
-  tray
-    ?.querySelector("#jobs-toggle")
-    ?.addEventListener("click", (event) => {
-      const button = event.currentTarget;
-      const open = button.getAttribute("aria-expanded") !== "true";
-      button.setAttribute("aria-expanded", String(open));
-      tray.querySelector("#jobs-list").hidden = !open;
-    });
+  function expandTray(open) {
+    tray.querySelector("#jobs-toggle").setAttribute("aria-expanded", String(open));
+    tray.querySelector("#jobs-list").hidden = !open;
+  }
+  if (tray) {
+    // Small screens start with the tray folded so it doesn't cover the page.
+    expandTray(!window.matchMedia?.("(max-width: 600px)").matches);
+    tray.querySelector("#jobs-toggle").addEventListener("click", (event) =>
+      expandTray(event.currentTarget.getAttribute("aria-expanded") !== "true"),
+    );
+  }
 
   window.Jobs = {
     watch,

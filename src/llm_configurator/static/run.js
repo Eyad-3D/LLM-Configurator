@@ -107,6 +107,13 @@
   const bytes = (n) => fmt().bytes(n);
   const number = (n, digits = 1) =>
     n == null || !Number.isFinite(Number(n)) ? null : Number(n).toFixed(digits);
+  // Speeds: one decimal for small numbers, whole numbers once they are large.
+  const rate = (n) =>
+    n == null || !Number.isFinite(Number(n))
+      ? null
+      : Number(n) >= 100
+        ? Math.round(Number(n)).toLocaleString()
+        : Number(n).toFixed(1);
   function announce(text) {
     const live = document.getElementById("run-live");
     if (!live) return;
@@ -393,12 +400,8 @@
     state.status = "working";
     state.job = job;
     window.Jobs.track(job);
-    const refresh = () => {
-      if (!current(candidateId) && id !== "runtime") return;
-      if (id === "serve") return render("use");
-      render(id);
-    };
-    refresh();
+    // Starting work can block later steps, so refresh them all.
+    if (current(candidateId) || id === "runtime") renderAll();
     state.stop = window.Jobs.watch(job.id, (latest) => {
       state.job = latest;
       if (["done", "failed", "cancelled"].includes(latest.state)) {
@@ -519,6 +522,7 @@
         variant_id: candidate.variant_id,
       });
       state.plan = plan;
+      if (state.status === "working") return; // A job took over while we asked.
       if (plan.remaining_bytes === 0) state.status = "done";
       else if (plan.local_copy) state.status = "ready";
       else if (plan.enough_space === false) {
@@ -527,6 +531,7 @@
       } else state.status = plan.remaining_bytes < plan.total_bytes ? "paused" : "ready";
       if (state.status !== "blocked") state.reason = null;
     } catch (error) {
+      if (state.status === "working") return;
       Object.assign(state, problem(error));
     }
     if (current(candidate.id)) renderAll();
@@ -705,10 +710,6 @@
       sub ? el("small", { text: sub }) : null,
     );
   }
-  function memoryText(peak, estimate) {
-    if (peak == null) return null;
-    return `${bytes(peak)} used${estimate != null ? ` · estimate ${bytes(estimate)}` : ""}`;
-  }
   function testResult(result) {
     const verdict = {
       works: ["good", "It works"],
@@ -750,15 +751,23 @@
           : null,
       );
     if (speed) {
-      const ramLine = memoryText(mem.peak_ram_bytes, mem.estimated_ram_bytes);
-      const vramLine = memoryText(mem.peak_vram_bytes, mem.estimated_vram_bytes);
+      const used = [
+        mem.peak_ram_bytes != null && `${bytes(mem.peak_ram_bytes)} RAM`,
+        mem.peak_vram_bytes != null && `${bytes(mem.peak_vram_bytes)} graphics`,
+      ].filter(Boolean);
+      const estimated = [
+        mem.estimated_ram_bytes != null && `${bytes(mem.estimated_ram_bytes)} RAM`,
+        mem.peak_vram_bytes != null &&
+          mem.estimated_vram_bytes != null &&
+          `${bytes(mem.estimated_vram_bytes)} graphics`,
+      ].filter(Boolean);
       nodes.push(
         el(
           "div",
           { class: "run-metrics" },
           metricBox(
             "Reading speed",
-            number(summaryData.pp_tps) && `${number(summaryData.pp_tps)} tokens/s`,
+            rate(summaryData.pp_tps) && `${rate(summaryData.pp_tps)} tokens/s`,
             "How fast it reads what you send",
           ),
           metricBox(
@@ -768,18 +777,18 @@
           ),
           metricBox(
             "Writing speed",
-            number(summaryData.tps) && `${number(summaryData.tps)} tokens/s`,
+            rate(summaryData.tps) && `${rate(summaryData.tps)} tokens/s`,
             "How fast the answer appears",
           ),
           metricBox(
-            "Memory",
-            ramLine ? `RAM: ${ramLine}` : null,
+            "Memory used",
+            used.length ? used.join(" + ") : null,
             [
-              vramLine && `Graphics memory: ${vramLine}`,
+              estimated.length && `We estimated ${estimated.join(" + ")}`,
               mem.within_estimate === true
-                ? "Within our estimate"
+                ? "within our estimate"
                 : mem.within_estimate === false
-                  ? "More than we estimated"
+                  ? "more than we estimated"
                   : null,
             ]
               .filter(Boolean)
@@ -850,8 +859,8 @@
   }
   function speedChange(label, before, after) {
     if (before == null && after == null) return null;
-    const b = number(before);
-    const a = number(after);
+    const b = rate(before);
+    const a = rate(after);
     const pct =
       before > 0 && after != null
         ? Math.round((after / before - 1) * 100)
@@ -1287,7 +1296,7 @@
   // ---- open / close ----
   function reattach() {
     // Pick up server jobs started earlier (for example before a page reload).
-    window.Jobs?.list().then(
+    return window.Jobs?.list().then(
       (jobs) => {
         if (!ctx) return;
         const running = jobs.filter((j) => ["queued", "running"].includes(j.state));
@@ -1308,6 +1317,8 @@
     );
   }
   function firstOpenStep() {
+    const busy = STEPS.find((step) => status(step.id).state === "working");
+    if (busy) return busy.id;
     return (
       STEPS.find((step) => {
         const { state } = status(step.id);
@@ -1337,7 +1348,7 @@
     document.getElementById("run-title")?.focus();
     const checks = [checkRuntime(), checkServe()];
     if (mem.download.status !== "working") checks.push(planDownload(candidate));
-    reattach();
+    checks.push(reattach());
     await Promise.all(checks);
     if (ctx?.candidate.id === candidate.id && !expanded) expand(firstOpenStep());
   }

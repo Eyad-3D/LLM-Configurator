@@ -429,11 +429,11 @@ test("test results show reading speed, first-word delay, writing speed and memor
   });
   await until(() => /It works/.test(s.stepText("test")), "result");
   const text = s.stepText("test");
-  assert.match(text, /Reading speed412\.5 tokens\/s/);
+  assert.match(text, /Reading speed413 tokens\/s/);
   assert.match(text, /First-word delay0\.42 s/);
   assert.match(text, /Writing speed21\.3 tokens\/s/);
-  assert.match(text, /RAM: 5\.0 GiB used · estimate 4\.8 GiB/);
-  assert.match(text, /Within our estimate/);
+  assert.match(text, /Memory used5\.0 GiB RAMWe estimated 4\.8 GiB RAM/);
+  assert.match(text, /within our estimate/);
   assert.match(text, /Passed: Answer is correct/);
   assert.match(text, /7,552 tokens already in the chat/);
   assert.match(text, /Done/);
@@ -508,7 +508,7 @@ test("tuning takes a time budget and shows before and after", async () => {
   });
   const text = s.stepText("tune");
   assert.match(text, /Writing speed20\.0 → 25\.0 tokens\/s25% faster/);
-  assert.match(text, /Reading speed400\.0 → 480\.0 tokens\/s20% faster/);
+  assert.match(text, /Reading speed400 → 480 tokens\/s20% faster/);
   assert.match(text, /CPU threads: 4 → 8/);
   assert.match(text, /Flash attention.*automatic → on/);
   assert.match(text, /Tried 2 settings\. Stopped early/);
