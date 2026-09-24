@@ -1,11 +1,17 @@
 name: Tests
 on: [push, pull_request]
+
+permissions:
+  contents: read
+
 jobs:
   test:
+    name: Python ${{ matrix.python }} on ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        python: ['3.10', '3.12']
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ['3.10', '3.13']
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -27,3 +33,35 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+
+  package:
+    # Proves `pipx install` / `uvx` will work: the wheel builds, carries its data files, and installs cleanly.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install build twine
+      - run: python -m build
+      - run: python -m twine check --strict dist/*
+      - name: Wheel contains every bundled data file
+        shell: python
+        run: |
+          import glob, pathlib, zipfile
+          src = pathlib.Path("src")
+          expected = {p.relative_to(src).as_posix() for pattern in
+                      ["static/*", "evals/*.json", "data/*", "catalogue.json"]
+                      for p in (src / "llm_configurator").glob(pattern) if p.is_file()}
+          wheel = zipfile.ZipFile(glob.glob("dist/*.whl")[0]).namelist()
+          missing = sorted(expected - set(wheel))
+          print("\n".join(sorted(expected)))
+          assert "llm_configurator/catalogue.json" in expected, "catalogue.json not found in source"
+          assert not missing, f"Missing from wheel: {missing}"
+      - name: Install the wheel in a fresh environment
+        run: |
+          python -m venv /tmp/fresh
+          /tmp/fresh/bin/python -m pip install dist/*.whl
+          cd /tmp
+          /tmp/fresh/bin/llm-config --help
+          /tmp/fresh/bin/llm-configurator --help
