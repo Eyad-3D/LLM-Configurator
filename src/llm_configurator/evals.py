@@ -39,9 +39,17 @@ _ANSWER_LINE = re.compile(r"\b(?:final\s+)?answer\s*(?:\*\*|__)?\s*[:：]\s*(.*)
 _BOXED = re.compile(r"\\boxed\{([^{}]*)\}")
 _NUMBER_WORDS = {w: i for i, w in enumerate(
     "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
-    "sixteen seventeen eighteen nineteen twenty".split())}
-_NUMBER = re.compile(r"[-+]?\$?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?|[-+]?\$?\.\d+%?")
+    "sixteen seventeen eighteen nineteen".split())}
+_TENS = {w: 20 + 10 * i for i, w in enumerate("twenty thirty forty fifty sixty seventy eighty ninety".split())}
+_NUMBER = re.compile(r"[-+]?[$€£]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?|[-+]?[$€£]?\.\d+%?")
+_FRACTION = re.compile(r"([-+]?)(?:(\d+) )?(\d+)/(\d+)")
+_VULGAR = {"½": " 1/2", "¼": " 1/4", "¾": " 3/4", "⅓": " 1/3", "⅔": " 2/3"}
+_UNIT_POWER = re.compile(r"(?<=[a-z])(?:\^[23]|[23])(?![\w.])")  # the 2 in "cm²" ("cm2" after NFKC) is not an answer
+_NEGATION = re.compile(r"\b(?:not|no|never|none|neither|nor)\b|n't\b")
+_HEDGE = re.compile(r"\b(?:or|maybe|possibly|perhaps|unsure)\b")
+_CHOICE = re.compile(r"\(?([a-e])\)")  # "(b)" or "b)" for a multiple-choice letter
 _OUTER = " \t\n.,;:!?\"'`*“”‘’"
+_LEFT_OUTER = re.compile("^[" + re.escape(_OUTER) + "]*")
 
 
 def visible_text(text):
@@ -76,50 +84,111 @@ def final_answer(text):
     return rest[-1] if rest else ""
 
 
-def normalize(text):
-    text = unicodedata.normalize("NFKC", str(text)).replace("\u2212", "-").lower()
-    return re.sub(r"\s+", " ", text).strip(_OUTER).strip()
+def normalize(text, case=False):
+    """One space between words, outer quotes/markdown/punctuation removed, lowercased unless `case`.
+    A leading '.' right before a digit is kept, so '.7' stays 0.7 and never reads as 7."""
+    text = str(text)
+    for symbol, spelled in _VULGAR.items():
+        text = text.replace(symbol, spelled)
+    text = unicodedata.normalize("NFKC", text).replace("\u2212", "-").replace("\u2044", "/")
+    text = re.sub(r"\s+", " ", text if case else text.lower()).strip().rstrip(_OUTER)
+    prefix = _LEFT_OUTER.match(text).group(0)
+    rest = text[len(prefix):]
+    if prefix.endswith(".") and rest[:1].isdigit():
+        rest = "." + rest
+    return re.sub(r"\b([ap])\.m\b\.?", r"\1m", rest).strip()
+
+
+def _word_number(text):
+    words = text.replace("-", " ").split()
+    if len(words) == 1 and words[0] in _NUMBER_WORDS:
+        return _NUMBER_WORDS[words[0]]
+    if 1 <= len(words) <= 2 and words[0] in _TENS and (len(words) == 1 or 0 < _NUMBER_WORDS.get(words[1], 0) < 10):
+        return _TENS[words[0]] + (_NUMBER_WORDS[words[1]] if len(words) == 2 else 0)
+    return None
 
 
 def _number(text):
+    """Value of a reply that is only a number: '1,250', '$3', '25%', '.5', '12/5', '2 1/2', 'forty-two'."""
     text = normalize(text)
-    if text in _NUMBER_WORDS:
-        return float(_NUMBER_WORDS[text])
+    word = _word_number(text)
+    if word is not None:
+        return float(word)
+    fraction = _FRACTION.fullmatch(text)
+    if fraction:
+        sign, whole, top, bottom = fraction.groups()
+        if int(bottom) == 0:
+            return None
+        value = int(whole or 0) + int(top) / int(bottom)
+        return -value if sign == "-" else value
     if not _NUMBER.fullmatch(text):
         return None
     try:
-        return float(text.replace(",", "").replace("$", "").rstrip("%"))
+        return float(re.sub(r"[,$€£]", "", text).rstrip("%"))
     except ValueError:
         return None
 
 
 def _numbers_in(text):
-    return [value for value in (_number(match) for match in _NUMBER.findall(normalize(text))) if value is not None]
+    """Every number mentioned, in figures or words; unit powers such as the 2 in 'cm²' are not counted."""
+    text = _UNIT_POWER.sub("", normalize(text))
+    found = [_number(match.group(0)) for match in _FRACTION.finditer(text)]
+    text = _FRACTION.sub(" ", text)
+    found += [_word_number(word) for word in re.findall(r"[a-z]+(?:-[a-z]+)?", text)]
+    found += [_number(match) for match in _NUMBER.findall(text)]
+    return [float(value) for value in found if value is not None]
 
 
 def _close(a, b):
     return abs(a - b) <= 1e-9 * max(1.0, abs(a), abs(b))
 
 
+def _squeeze(text):
+    """Drop spaces next to punctuation only: '[1,16]' equals '[1, 16]' but '24' never equals '2 4'."""
+    return re.sub(r"\s*([^\w\s])\s*", r"\1", text)
+
+
+def _readings(got, strict):
+    """The answer as written, plus the result after a last '=' and the part before a trailing '(...)' note,
+    so '40 x 12 = 480' and '20.2 (60.6 / 3)' still count. Program output is only read as written."""
+    readings = [got]
+    if not strict:
+        if "=" in got:
+            readings.append(got.rsplit("=", 1)[1])
+        note = re.fullmatch(r"(.+?)\s*\(([^()]*)\)", got.strip())
+        if note and not _HEDGE.search(note.group(2).lower()):
+            readings.append(note.group(1))
+    return readings
+
+
+def _matches(item, reply, strict):
+    said, wanted = normalize(reply, case=strict), normalize(item["answer"], case=strict)
+    if not said:
+        return False
+    accepted = any(re.fullmatch(pattern, said, 0 if strict else re.I) for pattern in item.get("accept", ()))
+    if strict:  # program output: exact, case matters, only spacing around punctuation may differ
+        return accepted or said == wanted or _squeeze(said) == _squeeze(wanted)
+    if accepted or said == wanted or said.replace(" ", "") == wanted.replace(" ", ""):
+        return True
+    choice = _CHOICE.fullmatch(said)
+    if choice and choice.group(1) == wanted:
+        return True
+    expected = _number(wanted)
+    if expected is None:
+        return False
+    value = _number(said)
+    if value is None and not _NEGATION.search(said):  # "42 apples" answers 42; "not 42" does not
+        found = _numbers_in(said)
+        value = found[0] if len(found) == 1 else None
+    return value is not None and _close(value, expected)
+
+
 def check_text(item, reply_text):
     """(ok, extracted answer). Exact after normalising; numbers compared by value unless the item is strict."""
     got = final_answer(reply_text)
-    wanted, said = normalize(item["answer"]), normalize(got)
-    if said and (said == wanted or said.replace(" ", "") == wanted.replace(" ", "")):
-        return True, got
-    if any(re.fullmatch(pattern, said, re.I) for pattern in item.get("accept", ())):
-        return True, got
-    # Program output must match exactly ("1.0" is not "1"); elsewhere "42 apples" answers "42".
+    # Program output must match exactly ("1.0" is not "1", "HOP" is not "hop"); elsewhere "42 apples" answers "42".
     strict = item.get("strict", str(item.get("kind", "")).endswith("_output"))
-    expected = _number(wanted)
-    if not strict and expected is not None and said:
-        value = _number(said)
-        if value is None:
-            found = _numbers_in(said)
-            value = found[0] if len(found) == 1 else None
-        if value is not None and _close(value, expected):
-            return True, got
-    return False, got
+    return any(_matches(item, reading, strict) for reading in _readings(got, strict)), got
 
 
 def parse_tool_call(text):
@@ -160,6 +229,11 @@ def _same(expected, got):
     if isinstance(expected, dict) and "$regex" in expected:
         return (isinstance(got, (str, int, float)) and not isinstance(got, bool)
                 and re.fullmatch(expected["$regex"], normalize(got), re.I) is not None)
+    if isinstance(expected, dict) and "$unordered" in expected:  # a set written as a list: any order is right
+        wanted = list(expected["$unordered"])
+        if not isinstance(got, list) or len(got) != len(wanted):
+            return False
+        return _pairs_up(wanted, list(got))
     if isinstance(expected, bool) or isinstance(got, bool):
         return expected is got
     if isinstance(expected, (int, float)):
@@ -174,14 +248,25 @@ def _same(expected, got):
     return expected is None and got is None
 
 
+def _pairs_up(wanted, got):
+    if not wanted:
+        return True
+    return any(_same(wanted[0], value) and _pairs_up(wanted[1:], got[:i] + got[i + 1:]) for i, value in enumerate(got))
+
+
+def _tool_name(name):
+    name = name.strip().lower()
+    return name.split(".", 1)[1] if name.startswith(("functions.", "tools.")) else name
+
+
 def check_tool_call(item, reply_text):
     """(ok, what the model called). Right tool, every expected argument equal, no invented argument names."""
     call = parse_tool_call(reply_text)
-    if call is None:
+    expected = item["answer"]
+    if call is None:  # even "no tool fits" must be said in the requested JSON form: format-following is tested
         return False, "(no valid JSON tool call)"
     got = json.dumps(call, ensure_ascii=False)
-    expected = item["answer"]
-    if call["name"].strip().lower() != expected["name"].lower():
+    if _tool_name(call["name"]) != expected["name"].lower():
         return False, got
     if expected["name"].lower() == "none":
         return True, got
@@ -269,6 +354,8 @@ def validate_quiz(quiz):
 def _example(value):
     """A concrete value for an expected argument: {"$regex"} placeholders carry an `example`."""
     if isinstance(value, dict):
+        if "$unordered" in value:
+            return [_example(v) for v in reversed(value["$unordered"])]  # reversed: proves order is ignored
         return value.get("example") if "$regex" in value else {k: _example(v) for k, v in value.items()}
     return [_example(v) for v in value] if isinstance(value, list) else value
 
@@ -303,6 +390,8 @@ def _regex_problems(value):
         except re.error:
             ok = False
         return [] if ok and "example" in value else [value["$regex"]]
+    if isinstance(value, dict) and "$unordered" in value:
+        value = value["$unordered"] if isinstance(value["$unordered"], list) else [{"$regex": "("}]
     items = value.values() if isinstance(value, dict) else value if isinstance(value, list) else ()
     return [p for v in items for p in _regex_problems(v)]
 
@@ -326,16 +415,22 @@ def wilson(correct, total, z=1.96):
     return max(0.0, centre - half), min(1.0, centre + half)
 
 
-def _ask(chat, messages, max_tokens):
-    """Call an injected chat function; pass greedy settings when it accepts them (LlamaServer.chat does)."""
-    options = {"max_tokens": max_tokens}
+GREEDY = {"temperature": 0.0, "seed": 1}
+# Quizzes and the recall test ask for a short answer, so reasoning models are asked not to think first
+# (llama-server passes this to the chat template; templates without the switch ignore it).
+NO_THINKING = {**GREEDY, "enable_thinking": False}
+
+
+def _ask(chat, messages, max_tokens, options=GREEDY):
+    """Call an injected chat function with the extra settings it accepts (LlamaServer.chat takes them all)."""
+    extra = {}
     try:
         parameters = inspect.signature(chat).parameters
         takes_any = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
-        options.update({k: v for k, v in (("temperature", 0.0), ("seed", 1)) if takes_any or k in parameters})
+        extra = {k: v for k, v in options.items() if takes_any or k in parameters}
     except (TypeError, ValueError):
         pass
-    reply = chat(messages, **options)
+    reply = chat(messages, max_tokens=max_tokens, **extra)
     return {"text": reply} if isinstance(reply, str) else dict(reply or {})
 
 
@@ -344,7 +439,7 @@ def _report(progress, stage, done, total, message):
         progress({"stage": stage, "done": done, "total": total, "message": message})
 
 
-def run_quiz(chat, workload, limit=None, progress=None, cancel=None, max_tokens=256):
+def run_quiz(chat, workload, limit=None, progress=None, cancel=None, max_tokens=512):
     """Ask each quiz question once (greedy), check answers locally and score with a 95% range."""
     quiz = load_quiz(workload)
     items = _select(quiz["items"], limit)
@@ -354,7 +449,7 @@ def run_quiz(chat, workload, limit=None, progress=None, cancel=None, max_tokens=
         _report(progress, "quiz", index, len(items), f"Question {index + 1} of {len(items)}")
         began = time.monotonic()
         try:
-            reply = _ask(chat, quiz_messages(quiz, item), max_tokens)
+            reply = _ask(chat, quiz_messages(quiz, item), max_tokens, NO_THINKING)
         except Cancelled:
             raise
         except Exception as error:
@@ -362,7 +457,7 @@ def run_quiz(chat, workload, limit=None, progress=None, cancel=None, max_tokens=
         ok, got = check_item(item, reply.get("text") or "")
         results.append({"id": item["id"], "kind": item["kind"], "ok": ok, "expected": expected_text(item),
                         "got": got[:300], "seconds": round(time.monotonic() - began, 3),
-                        "truncated": reply.get("finish_reason") == "length"})
+                        "truncated": not ok and reply.get("finish_reason") == "length"})
     _report(progress, "quiz", len(items), len(items), "Quiz finished")
     correct, total = sum(r["ok"] for r in results), len(results)
     low, high = wilson(correct, total)
@@ -387,7 +482,7 @@ def _quiz_note(correct, total, low, high, truncated):
     note = (f"{correct} of {total} right. With only {total} questions the true score is probably between "
             f"{round(low * 100)}% and {round(high * 100)}%, so treat differences under about {spread} points as noise.")
     if truncated:
-        note += (f" {truncated} answers hit the length limit (often a model still 'thinking'), "
+        note += (f" {truncated} wrong answers hit the length limit (often a model still 'thinking'), "
                  "so this score may understate the model.")
     return note
 
@@ -452,7 +547,7 @@ def _fit(tokenize, budget, seed, code):
 
 
 def needle_test(chat, tokenize, context_tokens, positions=(0.1, 0.5, 0.9), progress=None, cancel=None,
-                max_tokens=64, seed=7):
+                max_tokens=96, seed=7):
     """Hide 'The secret code is <word>' at each depth of a synthetic document sized to `context_tokens`."""
     if type(context_tokens) is not int or not 512 <= context_tokens <= 1048576:
         raise ValueError("The recall test needs a context between 512 and 1,048,576 tokens.")
@@ -460,7 +555,8 @@ def needle_test(chat, tokenize, context_tokens, positions=(0.1, 0.5, 0.9), progr
     if not positions or not all(isinstance(p, (int, float)) and not isinstance(p, bool) and 0 <= p <= 1
                                 for p in positions):
         raise ValueError("Positions must be numbers between 0 (start) and 1 (end).")
-    budget = context_tokens - max_tokens - 64  # room for the reply and the chat template's own tokens
+    # Room for the reply and for the chat template's own tokens (some templates add a system message).
+    budget = context_tokens - max_tokens - max(128, context_tokens // 50)
     rng = random.Random(f"needle:{seed}")
     codes = rng.sample(CODE_WORDS, len(positions)) if len(positions) <= len(CODE_WORDS) else \
         [rng.choice(CODE_WORDS) for _ in positions]
@@ -469,27 +565,36 @@ def needle_test(chat, tokenize, context_tokens, positions=(0.1, 0.5, 0.9), progr
     if n < 8:
         raise ValueError("The context is too small for a meaningful recall test. Try at least 1,024 tokens.")
     sentences = [_sentence(i, seed) for i in range(n)]
-    started, results = time.monotonic(), []
-    for index, (position, code) in enumerate(zip(positions, codes)):
+    started, rows = time.monotonic(), {}
+    # Deepest needle first with prompt caching on: each later prompt re-reads only the text after its needle.
+    order = sorted(range(len(positions)), key=lambda i: -positions[i])
+    for done, index in enumerate(order):
+        position, code = positions[index], codes[index]
         check_cancel(cancel)
-        _report(progress, "needle", index, len(positions),
-                f"Checking recall {round(position * 100)}% of the way in ({index + 1} of {len(positions)})")
+        _report(progress, "needle", done, len(positions),
+                f"Checking recall {round(position * 100)}% of the way in ({done + 1} of {len(positions)})")
         prompt = needle_prompt(sentences, position, code)
         prompt_tokens = len(tokenize(prompt))
         began = time.monotonic()
-        reply = _ask(chat, [{"role": "user", "content": prompt}], max_tokens)
+        reply = _ask(chat, [{"role": "user", "content": prompt}], max_tokens, {**NO_THINKING, "cache_prompt": True})
         text = reply.get("text") or ""
         found = re.search(rf"\b{code}\b", visible_text(text), re.I) is not None
-        results.append({"position": position, "found": found, "expected": code, "got": final_answer(text)[:120],
-                        "prompt_tokens": prompt_tokens, "seconds": round(time.monotonic() - began, 3)})
+        rows[index] = {"position": position, "found": found, "expected": code, "got": final_answer(text)[:120],
+                       "prompt_tokens": prompt_tokens, "seconds": round(time.monotonic() - began, 3),
+                       "truncated": not found and reply.get("finish_reason") == "length"}
+    results = [rows[i] for i in range(len(positions))]
     _report(progress, "needle", len(positions), len(positions), "Recall test finished")
     hits = sum(r["found"] for r in results)
-    missed = [f"{round(r['position'] * 100)}%" for r in results if not r["found"]]
+    cut = [f"{round(r['position'] * 100)}%" for r in results if r["truncated"]]
+    missed = [f"{round(r['position'] * 100)}%" for r in results if not r["found"] and not r["truncated"]]
     note = (f"Found the hidden code at {hits} of {len(results)} places in a document of about "
             f"{max(r['prompt_tokens'] for r in results):,} tokens.")
     if missed:
         note += (f" Missed at {', '.join(missed)} of the way in: the model may lose details there "
                  "in long documents at this context size.")
+    if cut:
+        note += (f" At {', '.join(cut)} the reply hit the length limit before answering (often a model still "
+                 "'thinking'), so those places tell us nothing either way.")
     return {"kind": "needle", "context_tokens": context_tokens, "results": results, "found": hits,
             "total": len(results), "score": round(hits / len(results), 4),
             "seconds": round(time.monotonic() - started, 3), "note": note, "timestamp": now()}
@@ -517,7 +622,7 @@ def _validate_prompts(prompts):
 def _validate_labels(labels):
     if not isinstance(labels, (list, tuple)) or not 2 <= len(labels) <= len(SLOTS):
         raise ValueError(f"Compare between 2 and {len(SLOTS)} models.")
-    if any(not isinstance(label, str) or not label.strip() or len(label) > 200 for label in labels):
+    if any(not isinstance(label, str) or not label.strip() or len(label) > 600 for label in labels):
         raise ValueError("Each model needs a short name.")
     if len(set(labels)) != len(labels):
         raise ValueError("Each model in a comparison must be different.")
@@ -528,12 +633,21 @@ def _keep_recent(comparisons):
     return dict(ordered[-KEEP_COMPARISONS:])
 
 
-def start_comparison(store, prompts, labels):
+def _names(labels, names):
+    """Friendly name per label, shown only after reveal (labels may be ids such as candidate ids)."""
+    names = names or {}
+    if not isinstance(names, dict):
+        raise ValueError("Model names must be given as a label -> name mapping.")
+    return {label: str(names.get(label) or label)[:200] for label in labels}
+
+
+def start_comparison(store, prompts, labels, names=None):
     _validate_prompts(prompts)
     _validate_labels(labels)
     comparison_id = secrets.token_hex(6)
     record = {"id": comparison_id, "created_at": now(), "state": "running", "prompts": list(prompts),
-              "labels": list(labels), "order": [_slot_order(labels, comparison_id, i) for i in range(len(prompts))],
+              "labels": list(labels), "names": _names(labels, names),
+              "order": [_slot_order(labels, comparison_id, i) for i in range(len(prompts))],
               "outputs": {label: [None] * len(prompts) for label in labels}, "votes": [None] * len(prompts),
               "revealed": False}
     store.update("comparisons", lambda all_: _keep_recent({**(all_ or {}), comparison_id: record}), {})
@@ -580,16 +694,22 @@ def _set_state(store, comparison_id, state):
 
 
 def blinded(store, comparison_id):
-    """Answers under slot letters only: no model names, timings or errors that could give them away."""
+    """Answers under slot letters only: no model names, timings or errors that could give them away.
+
+    A prompt's answers appear only once every model has answered it. Models run one after another, so
+    showing answers as they arrive would tell the user which slots belong to the model running now.
+    """
     record = _get(store, comparison_id)
     items = []
     for index, prompt in enumerate(record["prompts"]):
+        order = record["order"][index]
+        ready = all(record["outputs"][label][index] is not None for label in order)
         outputs = []
-        for slot, label in zip(SLOTS, record["order"][index]):
+        for slot, label in zip(SLOTS, order):
             output = record["outputs"][label][index]
-            text = "" if output is None else "(No answer: this model failed to run.)" if output.get("error") \
+            text = "" if not ready else "(No answer: this model failed to run.)" if output.get("error") \
                 else output["text"]
-            outputs.append({"slot": slot, "text": text, "ready": output is not None})
+            outputs.append({"slot": slot, "text": text, "ready": ready})
         items.append({"item": index, "prompt": prompt, "outputs": outputs, "vote": record["votes"][index]})
     voted = sum(v is not None for v in record["votes"])
     return {"comparison_id": comparison_id, "state": record["state"], "revealed": record["revealed"],
@@ -631,7 +751,7 @@ def reveal(store, comparison_id):
             tallies[winner] += 1
         ties += choice == TIE
         unvoted += choice is None
-        mapping.append({"item": index, "slots": slots, "vote": choice, "winner": winner})
+        mapping.append({**slots, "item": index, "slots": slots, "vote": choice, "winner": winner})
     best = max(tallies.values())
     leaders = [label for label, wins in tallies.items() if wins == best]
     overall = leaders[0] if best and len(leaders) == 1 else None
@@ -648,7 +768,8 @@ def reveal(store, comparison_id):
         note += " No single model came out ahead."
     if len(mapping) < 5:
         note += " With this few prompts, a one-vote lead is a hint, not proof."
-    return {"comparison_id": comparison_id, "mapping": mapping, "tallies": tallies, "ties": ties,
+    names = record.get("names") or {label: label for label in labels}
+    return {"comparison_id": comparison_id, "mapping": mapping, "tallies": tallies, "labels": names, "ties": ties,
             "unvoted": unvoted, "overall": overall, "speed": speed, "note": note,
             "prompts": record["prompts"]}
 
@@ -658,14 +779,15 @@ def _open_runner(factory):
     return runner if hasattr(runner, "__enter__") else contextlib.nullcontext(runner)
 
 
-def run_comparison(store, prompts, runners, max_tokens=512, progress=None, cancel=None):
+def run_comparison(store, prompts, runners, max_tokens=512, progress=None, cancel=None, names=None):
     """Answer every prompt with each model in turn. Only one model is loaded at a time, to spare memory.
 
     `runners` maps a label to a factory returning a context manager (it starts and stops a server)
-    that yields a chat callable, or an object with a `.chat` method.
+    that yields a chat callable, or an object with a `.chat` method. `names` optionally maps each label
+    to the friendly name `reveal()` returns under "labels".
     """
     labels = list(runners)
-    comparison_id = start_comparison(store, prompts, labels)
+    comparison_id = start_comparison(store, prompts, labels, names)
     total, done = len(labels) * len(prompts), 0
     try:
         for number, label in enumerate(labels, 1):

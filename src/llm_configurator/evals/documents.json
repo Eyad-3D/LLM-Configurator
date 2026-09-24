@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "workload": "documents",
   "description": "Reading comprehension questions answered only from short original synthetic passages.",
   "passages": {
@@ -23,7 +23,7 @@
       "prompt": "Who leads the dispatch team? Give the full name.",
       "answer": "Owen Castellan",
       "accept": [
-        "owen( castellan)?"
+        "((mr|dr)\\.? )?owen( castellan)?"
       ]
     },
     {
@@ -50,7 +50,7 @@
       "prompt": "According to the most recent update, on what date will Pellam Road open for customer collections? Give the day and month.",
       "answer": "17 March",
       "accept": [
-        "(monday,? )?(the )?(17(th)? (of )?march|march 17(th)?)( at 8( a\\.?m|am)?)?"
+        "(mon(day)?,? )?(the )?(17(th)? (of )?mar(ch)?|mar(ch)? 17(th)?),?( at 8( ?am)?)?"
       ]
     },
     {
@@ -85,7 +85,7 @@
       "prompt": "Which of these may the tenants keep WITHOUT the landlord's written consent: a cat, a rabbit, or a caged bird? Reply with just the animal.",
       "answer": "caged bird",
       "accept": [
-        "(a |one )?(caged )?bird"
+        "(a |one |the )?(caged )?bird"
       ]
     },
     {
@@ -131,7 +131,7 @@
       "prompt": "According to the latest information, at what time does the Day 5 ferry to Callowmere depart? Give the time in 24-hour HH:MM format.",
       "answer": "12:05",
       "accept": [
-        "12[:.]05( pm)?"
+        "12[:.]05( ?pm)?"
       ]
     },
     {
@@ -150,7 +150,7 @@
       "prompt": "What phone number should be called if the tour leader cannot be reached in an emergency? Give the number.",
       "answer": "0161 550 3020",
       "accept": [
-        "0161[ -]?550[ -]?3020"
+        "(the )?(saltmarsh travel[^0-9]*)?\\(?0161\\)?[ -]?550[ -]?3020( \\(.*\\))?"
       ]
     },
     {
@@ -161,7 +161,7 @@
       "prompt": "Using the latest timetable, at what time does the Day 5 ferry arrive at Callowmere? Give the time in 24-hour HH:MM format.",
       "answer": "13:55",
       "accept": [
-        "13[:.]55|1[:.]55 pm"
+        "13[:.]55( \\(1[:.]55 ?pm\\))?|1[:.]55 ?pm"
       ]
     },
     {
@@ -258,7 +258,7 @@
       "prompt": "What problem does error code E4 indicate? Give a short phrase.",
       "answer": "grind cup missing",
       "accept": [
-        "(the )?grind cup (is )?missing|missing grind cup|no grind cup"
+        "(e4\\W*)?(the )?grind cup( or (a |the )?portafilter)?( is)? (missing|absent|not (in place|present|detected|fitted|seated|in( the)? cradle))( (from|in)( the)?( portafilter)? cradle)?|(a )?missing grind cup( or portafilter)?|no grind cup( or (a )?portafilter)?( in( the)? cradle)?"
       ]
     },
     {
@@ -434,7 +434,7 @@
       "prompt": "Who approved this policy? Give the full name.",
       "answer": "Ines Carvalho",
       "accept": [
-        "in(e|é)s carvalho"
+        "in[eéê]s carvalho"
       ]
     },
     {
