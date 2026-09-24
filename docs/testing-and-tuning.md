@@ -14,13 +14,15 @@ The test has two parts. In the app, **Run the full test** does both; **Quick che
 
 ### 1. Smoke test ("does it work at all?")
 
-The app starts the model and asks one question with a checkable answer: "What is 17 + 25?". It then checks the reply:
+The app starts the model and asks one question with a checkable answer: "What is 17 + 25?". It asks the model to answer straight away, without "thinking" out loud first. It then checks the reply:
 
 - it is not empty (hidden "thinking" text doesn't count),
 - it has no broken characters,
 - it is not the same thing repeated over and over,
 - it does not contain leaked template text (raw control markers like `<|im_start|>`, a sign the model's chat format is wrong),
 - it answers 42.
+
+If a model spends its whole answer thinking and never replies, the test says so: its chat template may not let the app turn thinking off.
 
 If the model fails to **start**, you get a plain reason where possible: not enough memory, model type not supported by this llama.cpp version, file missing or damaged, port in use, or graphics card unavailable. On the command line, `--json` also includes the last lines of the engine's log.
 
@@ -30,25 +32,27 @@ If the smoke test fails, the speed test is skipped.
 
 | Result | Plain meaning | How it is measured |
 |---|---|---|
-| **Reading speed** | How fast it reads your prompt, in tokens per second | `llama-bench`, 512 prompt tokens (each `llama-bench` test runs twice and is averaged) |
-| **Writing speed** | How fast it writes the reply, in tokens per second | `llama-bench`, 128 new tokens, with the notepad already filled near your chosen context |
-| **First-word delay** | How long you wait before the reply starts | One real request to `llama-server` with about 1,500 tokens of text |
-| **Memory used** | The most RAM (and NVIDIA graphics memory) it actually used | Watched while that request and a short reply run |
+| **Reading speed** | How fast it reads your prompt, in tokens per second | `llama-bench`, 512 prompt tokens, with the notepad already filled near your chosen context (each `llama-bench` test runs twice and is averaged) |
+| **Writing speed** | How fast it writes the reply, in tokens per second | `llama-bench`, 128 new tokens, with the same filled notepad |
+| **First-word delay** | How long you wait before the reply starts to a new message | One real request to `llama-server` with about 1,500 tokens of fresh text (see below) |
+| **Memory used** | The most RAM (and NVIDIA graphics memory) it actually used | Watched from the moment the model starts loading, through that request and a short reply |
 
 (A token is a piece of a word, roughly ¾ of a word.)
 
-"Near your chosen context" matters: models slow down as the notepad fills, so the test measures with `context − 640` tokens already in the chat. The test then ends exactly at your chosen size. Very short contexts use a smaller test.
+"Near your chosen context" matters: models slow down as the notepad fills, like working at a desk that gets more cluttered. So the test measures with `context − 640` tokens already in the chat, then reads 512 and writes 128, ending exactly at your chosen size. Very short contexts (under 768 tokens) use a smaller test. Very long ones stop at 32,768 tokens already in the chat, because going deeper can take hours on a processor. The result says which depth it used. For contexts over about 33,800 tokens, recommendations treat such a test as scaled from 32,768 tokens ("interpolated"), not as measured at your length.
 
-The result shows **measured memory next to the estimate**, and says whether it stayed within the estimate. This is the best way to see how accurate the memory maths is for your machine.
+**First-word delay, in detail.** The app sends a tiny warm-up request first, so one-off start-up costs don't count. The timed message is sized with the model's own tokenizer, so it always fits (short contexts get `context − 256` tokens instead of 1,500). The app also tells the server not to reuse text it has read before (`cache_prompt: false`), so the whole message is read, as it would be for a message you have never sent.
 
-Graphics memory is only measured on NVIDIA cards (via `nvidia-smi`). On Apple Silicon, graphics memory is part of RAM and is counted there. On other cards it is not measured.
+The result shows **measured memory next to the estimate**, and says whether it stayed within the estimate (or by how many percent it went over). This is the best way to see how accurate the memory maths is for your machine.
+
+Graphics memory is only measured on NVIDIA cards with llama.cpp's CUDA version (via `nvidia-smi`). On Apple Silicon, graphics memory is part of RAM and is counted there. On other cards it is not measured.
 
 ### The verdict
 
 After the test you get one of:
 
 - **It works** – started, passed the checks, and (if the speed test ran) how fast it writes.
-- **It works, but slowly** – started and passed the checks, but writes slower than your speed target. *This needs a fix that is in progress; for now the app always says "It works" when the checks pass.*
+- **It works, but slowly** – started and passed the checks, but writes slower than your speed target. In the app, the target is the one from your latest comparison. On the command line use `--min-tps` (default 15; `0` turns the check off).
 - **It didn't work** – with a plain reason and what to try next.
 
 If the smoke test passes but the speed test fails, you still get **It works**, with a note that the speed test did not finish.
@@ -84,17 +88,18 @@ In the app, pick a time budget of **1, 5 or 15 minutes**, choose what should get
 | Threads | How many processor cores work on it. More is not always faster. | Always |
 | Flash attention | A faster way to do the attention maths; tried on and off | When the notepad is not compressed |
 | Batch sizes | How many prompt tokens are read in one go | Only for the **balanced** and **prompt** goals (it doesn't change writing speed) |
-| Notepad compression | Stores the notepad (KV cache) at half size | Only after a setting was skipped because memory was tight |
-
-Tuning measures with up to 1,024 tokens already in the chat (less than the test, to save time), so its speeds can be a little higher than the test's.
+| Notepad compression | Stores the notepad (KV cache) at about half size (`q8_0`), on its own or using the room saved for 2 more layers on the graphics card (or 2 fewer expert layers in RAM) | Only when compression is allowed; the tuner never changes your chosen notepad format on its own |
 
 ### How it searches
 
 1. Measure your current settings (the "baseline").
-2. Change **one setting at a time**. Keep a change only if it is at least 3% faster (or more, if the measurements were noisy). Go round up to three times.
+2. Change **one setting at a time**. Keep a change only if it is at least 3% faster (or more, if the measurements were noisy or the computer's speed drifted between runs). Go round up to three times.
 3. Test several values in one run to save time.
 4. **Skip** any setting the memory check says would not fit, rather than risk a crash.
-5. Re-run the winner with more repetitions to confirm it wasn't a lucky reading. If it no longer beats the baseline, your starting settings are kept.
+5. Re-run the winner with more repetitions (5 instead of 2) to confirm it wasn't a lucky reading. If it no longer beats the baseline, your starting settings are kept.
+6. **Check at your full length.** To save time, the search runs with only a short conversation in the chat (up to 1,024 tokens). If there is time left in the budget, your starting settings and the winner are measured once more with your full context in the chat (`context − 640` tokens, at most 32,768), like the speed test. The saved speeds then come from this run. If the winner is not clearly faster there, or does not run, your starting settings are kept.
+
+If there is no time for step 6, the notes say the speeds come from the shorter test. Such a tune shows as "tuned with a short test": its speed is only an estimate at your length and can't earn a *Runs well* verdict.
 
 It stops when time runs out, when a round finds nothing faster, or when you cancel. It never goes over the budget by more than one trial.
 
@@ -102,10 +107,11 @@ It stops when time runs out, when a round finds nothing faster, or when you canc
 
 You see before and after speeds (for example "Found settings about 30% faster"), which settings changed, how many were tried, why it stopped, and short notes. The best settings are saved on this computer. A cancelled tune is not saved.
 
-On the command line, use the saved settings with `--tuned` on `test`, `export` and `run`. The app's **Use it** step uses the recommended settings, not the tuned ones.
+**Using the tuned settings.** A saved tune belongs to one model, context, placement and notepad format. The app uses it automatically for **Test it**, **Use it** and **Copy a setup**. If the tuner moved layers between the graphics card and RAM, that change is only used while it still fits in free memory. On the command line, a tune that kept the same placement is used automatically too. Add `--tuned` to `test`, `export` or `run` to also use a tune that moved layers, or to get an error if there is no matching tune.
 
 ### Limits of tuning
 
 - Small differences (a few percent) can be noise.
 - It tunes for one chat at a time.
 - Settings tuned with one llama.cpp version may not be best on another.
+- Tunes older than 30 days are ignored, like speed tests.

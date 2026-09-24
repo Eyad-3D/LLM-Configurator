@@ -38,6 +38,8 @@ notepad bytes = 2 × layers × KV heads × head size × bytes per value × conte
 - The first **2** is because the notepad has two parts (K and V).
 - It uses the model's KV heads, not its total attention heads (models with "grouped-query attention" share notepads between heads).
 - Context includes everything: your input, history, the model's thinking and its reply.
+- Like llama.cpp, the app rounds the context up to the next multiple of 256 tokens.
+- Each chat at once gets its own full-size notepad. The app starts llama.cpp with context × chats in total, and llama.cpp gives each chat an equal share.
 - No savings from shared prompts are assumed.
 
 **Notepad compression (new in v0.4).** llama.cpp can store the notepad in a smaller format. Bytes per value:
@@ -50,7 +52,7 @@ notepad bytes = 2 × layers × KV heads × head size × bytes per value × conte
 
 Compressed notepads let you fit a much longer context, at a small quality cost that is usually minor for `q8_0` and more noticeable for `q4_0`. llama.cpp needs **flash attention** (a faster way to compute attention) to compress the V half, so the app turns it on when you choose this. If a model only fits with a compressed notepad, the results say so.
 
-**Sliding-window layers (new in v0.4).** Some models (for example Gemma 2, Gemma 3 and gpt-oss) have layers that only look back a fixed number of tokens. Their notepad stops growing at that window, so the app caps those layers' notepad at the window size (plus a small 512-token margin that llama.cpp keeps).
+**Sliding-window layers (new in v0.4).** Some models (Gemma 2, Gemma 3 and gpt-oss) have layers that only look back a fixed number of tokens, the "window", like reading through a letterbox. Those layers' notepad stops growing at the window. For each chat, the app counts those layers at the window plus one batch of incoming text (512 tokens by default), rounded up to a multiple of 256, and never more than the full context. For example, with a 1,024-token window those layers need room for 1,536 tokens per chat, however long the context is. This matches the sizes llama.cpp itself reports.
 
 ### Weights, buffers and headroom
 
@@ -67,22 +69,26 @@ Loading peaks, unusual model parts, and different llama.cpp versions can go abov
 
 ### Splitting between graphics card and RAM
 
-The app tries: everything on the processor, everything on the graphics card, and the largest split that fits. Memory for a split is shared out in proportion to the number of layers on each side. Model files are "memory-mapped" (read from disk as needed), so the app does not assume a full second copy in RAM.
+The app tries three placements: everything on the processor, everything on the graphics card, and the largest split that fits.
+
+- **The output layer goes on the graphics card first.** The output layer is the model's last step, which turns its thinking into word choices. llama.cpp counts it as one extra layer and puts it on the graphics card before any other. So when the app puts N layers on the graphics card, it asks llama.cpp for N + 1 (you will see `-ngl N+1` in exported commands). It keeps room on the card for the output layer: 15% of the file, capped at 2 GiB, but never less than one average layer. Models with large vocabularies have big output layers.
+- The rest of the weights and the notepad are shared out in proportion to the number of layers on each side.
+- Model files are "memory-mapped" (read from disk as needed), so the app does not assume a full second copy in RAM.
 
 ### MoE models (new in v0.4)
 
 In an MoE model most of the file is "experts". llama.cpp can keep the experts of some layers in RAM while the rest runs on the graphics card (the `--n-cpu-moe` setting). Because each word only uses a few experts, this costs less speed than you might expect. The app:
 
-- works out what share of the model is experts (from the expert counts and parameter count in the model's `config.json`),
-- counts expert bytes for those layers in RAM and the rest in VRAM,
-- when the whole model does not fit on the graphics card, offers the "experts on CPU" placement that moves the fewest expert layers to RAM.
+- works out what share of the model is experts, from the expert counts and sizes in the model's `config.json`,
+- counts the expert bytes of those layers in RAM and everything else in VRAM (each layer's notepad stays on the graphics card with the layer),
+- when the whole model does not fit on the graphics card, offers the "experts on CPU" placement: all layers on the graphics card, with the experts of as few layers as possible moved to RAM.
 
 ### Apple Silicon and unified memory (new in v0.4)
 
 On Apple Silicon, the processor and graphics chip share memory. The app treats it as **one pool** so nothing is counted twice. macOS only lets the graphics side use part of the memory (the "wired limit"):
 
 - If you have set `sysctl iogpu.wired_limit_mb` above 0, that is the limit (never more than your installed RAM).
-- Otherwise the app uses a cautious guess at macOS's default: **2/3 of RAM on Macs with up to 36 GiB, 3/4 above that**. (Reported defaults range from about 65% to 78% depending on chip and macOS version.)
+- Otherwise the app uses macOS's usual default: **2/3 of RAM on Macs with up to 32 GiB, 3/4 above that** (so a 36 GiB Mac gets 27 GiB). These are the limits llama.cpp reports on such Macs, but they can differ with the chip and macOS version.
 
 The graphics side can never use more than the RAM that is free right now.
 
@@ -99,18 +105,21 @@ Each recommendation also shows a **memory-only context ceiling**: the largest co
 
 ## Part 2: how fast? (speed)
 
-Speed comes from the best evidence available. Each card says which kind it is:
+Speed comes from the best evidence available. The app uses the first kind in this list that it has, and each card says which kind it is:
 
 | Evidence | Meaning |
 |---|---|
-| **measured** | You tested exactly this model, file, hardware and settings on this computer. |
-| **tuned** | Measured with settings found by the tuner. |
-| **interpolated** | Worked out from your own tests of the same file and placement at other context sizes. Never labelled "measured". |
-| **community** | Median speed from at least two people with similar hardware (only if you imported community results). |
+| **measured** | A speed test of exactly this model file, computer, placement and settings, at this context. |
+| **tuned** | The tuner's best settings, measured with (nearly) this context already in the chat. |
+| **interpolated** | Worked out from your own tests of the same file and placement at other context sizes (see below). Never labelled "measured". |
+| **tuned with a short test** | A tune that only measured near the start of a conversation. Its speed is scaled to this context as an estimate. |
+| **community** | Median speed from at least two people with similar hardware, the same model file and the same settings (only if you imported community results). |
 | **estimated** | Worked out from a short hardware check. Low confidence. |
 | **none** | Not enough information. Speed shows as "Unavailable". |
 
-The **verdict badge** compares speed with the speed you asked for. Only **measured** or **tuned** speed can earn *Runs well*, *Runs slowly* (at least half your target) or *Too slow*. Everything else shows *Not tested yet*, with a sentence such as "likely fast enough" and where the number came from.
+The **verdict badge** compares speed with the speed you asked for. Only **measured** or **tuned** speed can earn *Runs well* (meets your target), *Runs slowly* (at least half your target) or *Too slow* (under half). Everything else shows *Not tested yet*, with a sentence such as "likely fast enough" and where the number came from.
+
+**How interpolation works.** Between two tests, the app draws a straight line. If it only has a shorter test, it scales the speed by how much more each word must read as the notepad grows, takes off 10% to stay cautious, and never stretches a test to more than 4× its length. If it only has a longer test, it reuses that speed, because a shorter chat is not slower.
 
 ### Why speed is mostly about memory speed
 
@@ -140,23 +149,32 @@ These are **wide, low-confidence ranges, not statistical confidence intervals or
 
 An estimate needs the file's compression level to be one of those listed under [Supported models](#supported-models), or the model's parameter count.
 
-**Learning from your tests (new in v0.4).** Once you have at least two speed tests on this computer (from the last 90 days, one chat at a time), the app compares them with its own estimates and shifts and narrows the range for models you haven't tested yet. If a placement (processor, graphics card or split) has two tests of its own, those are used for it. It never claims better than about ±10%. Such estimates are labelled "adjusted from N local measurements". They are still estimates, never "verified".
+**Learning from your tests (new in v0.4).** Once you have at least two speed tests on this computer (from the last 90 days, one chat at a time, each run with nearly its full context in the chat), the app compares them with its own estimates and adjusts the range for models you haven't tested yet. If a placement (processor, graphics card or split) has two tests of its own, they shift and narrow its range. Otherwise the range is only shifted, keeping its full width. It never claims better than about ±10%. Such estimates are labelled "adjusted from N local measurements". They are still estimates, never "verified".
 
 ### What is not estimated
 
-- Speed for several chats at once (it depends on batching, which needs a real test). Memory for several chats **is** estimated.
-- Speed estimates never reject a configuration, and never count as "verified" for the strict speed filter. Only real tests (measured or tuned) do.
+- Speed for several chats at once. It depends on how llama.cpp batches the chats together, and the speed test measures one chat at a time. Memory for several chats **is** estimated.
+- Speed estimates never reject a configuration, and never count as "verified" for the strict speed filter. Only a real test at this context does (measured, or tuned with the full context).
 
 Reading speed (how fast it reads your prompt) and first-word delay are **measured** by the Test step, not estimated. See [Testing and tuning](testing-and-tuning.md).
 
 ### How measurements are matched
 
-A measurement counts for a recommendation only when the file (exact fingerprint), hardware and driver, placement, processor threads and settings (notepad compression, experts on CPU) match, with one chat at a time. For **measured** the context must match exactly too. Measurements and tuning results expire after 30 days. They reflect the conditions at the time: other apps, heat, power mode and llama.cpp version can change speed.
+A measurement counts for a recommendation only when all of these match, with one chat at a time:
+
+- the model file (exact checksum; a file found on your disk that has not been checksummed yet matches by its ID),
+- the computer (hardware and driver),
+- the placement and processor threads,
+- the settings: notepad compression, experts on CPU, batch sizes and flash attention.
+
+For **measured**, the context must match exactly too, and the test must have run with nearly that much text already in the chat (within 1,024 tokens). Speed tests stop at 32,768 tokens in the chat, so a test of a context over about 33,800 tokens counts as **interpolated** (scaled from 32,768), not measured.
+
+Measurements and tuning results expire after 30 days. They reflect the conditions at the time: other apps, heat, power mode and llama.cpp version can change speed.
 
 ## Part 3: ranking
 
 - **Quality priority** orders by the base model's quality score (if you turned rankings on), then speed.
-- **Speed priority** orders by the best speed number available: measured or tuned, then interpolated, then the community median, then the low end of the estimate.
+- **Speed priority** puts configurations with a real test that meets your target first. Then it orders by the best speed number available: measured or tuned, then interpolated, then a short tune scaled to this context, then the community median, then the low end of the estimate.
 - **Balanced** puts configurations with verified speed that meets your target first, then ones not known to miss it, then quality.
 
 Unknown stays unknown. See [Quality checks](quality-checks.md) for what the quality scores do and don't mean.
@@ -165,7 +183,7 @@ Unknown stays unknown. See [Quality checks](quality-checks.md) for what the qual
 
 Scores come from Artificial Analysis and need an API key. Which key wins: a key entered for this session only, then a key saved on this computer, then the `AA_API_KEY` environment variable.
 
-Each built-in model is matched to exactly one Artificial Analysis entry by name (its `aa_slug`), never by guessing, so for example a "thinking" and a normal version are never mixed up. Models without a match have no score; you can pick one yourself under **Match benchmark entries** in the rankings setup. Scores from different versions of the benchmark are never ranked against each other. Scores describe the original model, not the compressed file.
+A model gets a score only after you match it to exactly one Artificial Analysis entry under **Match benchmark entries** in the rankings setup (or with `llm-config map`). Matches start empty on purpose, and the app never guesses from similar names, so for example a "thinking" and a normal version are never mixed up. Models without a match have no score. Scores from different versions of the benchmark are never ranked against each other. Scores describe the original model, not the compressed file.
 
 ## Supported models
 
@@ -178,7 +196,7 @@ Compression levels with known sizes: Q2_K, Q3_K_M, IQ4_XS, Q4_0, Q4_K_M, MXFP4, 
 
 The built-in list (39 models) covers Qwen3 (including the Qwen3-30B-A3B and 235B MoE models and Qwen3-Coder), Qwen2.5-Coder, DeepSeek-R1 distills (Qwen and Llama), Llama 3.1, 3.2 and 3.3, Gemma 3, Mistral (7B, Nemo, Small 24B), Phi-4 and Phi-4-mini, gpt-oss (20B and 120B), SmolLM2, Granite 3.3 and OLMo 2. You can add a model with `llm-config models add BASE_REPO GGUF_REPO` (the original Hugging Face repository and the one with its GGUF files), or use a GGUF file you already have (`llm-config local --add PATH`).
 
-The app reads each model's shape (layers, heads, context length) from the original repository's `config.json`. Some original repositories are **gated** (you must log in and accept a licence first); set `HF_TOKEN` to your Hugging Face token to use them. Some catalogue entries also have a `config_repo`: an ungated copy of the same model, used only to read its `config.json` when you have no token.
+The app reads each model's shape (layers, heads, context length) from the original repository's `config.json`. Some original repositories are **gated** (you must log in and accept a licence first); set `HF_TOKEN` to your Hugging Face token to use them. Some catalogue entries also have a `config_repo`: an ungated copy of the same model, used only to read its `config.json` when you have no token. `llm-config models add` takes `--config-repo REPO` for the same purpose.
 
 ## Not covered yet
 

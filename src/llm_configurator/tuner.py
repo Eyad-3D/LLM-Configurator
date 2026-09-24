@@ -652,7 +652,9 @@ def _steps(variant, goal, allow_kv, state):
     steps += ["threads", "flash_attn"]
     if goal != "generation":  # batch sizes only change prompt reading, never token-by-token writing
         steps.append("batch")
-    if allow_kv or state["skipped_memory"]:
+    # The notepad format is the user's choice (compression costs a little quality); only try it when allowed.
+    # A tune that silently switched format could never be applied to the candidate it started from.
+    if allow_kv:
         steps.append("cache")
     return steps
 

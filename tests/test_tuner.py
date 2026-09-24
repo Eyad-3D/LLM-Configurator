@@ -262,14 +262,18 @@ class TuneTests(unittest.TestCase):
         base = config(gpu_layers=20, total_layers=32, gpu_backend="cuda")
         # f16 notes only fit 20 layers; q8_0 notes leave room for 22.
         check = lambda c: c["gpu_layers"] <= (22 if c["cache_type_k"] == "q8_0" else 20)
-        result, _, _ = run(base=base, memory_check=check)
+        # Tight memory alone never changes the user's notepad format: such a tune could not be applied.
+        kept, _, _ = run(base=base, memory_check=check)
+        self.assertEqual(kept["best"]["cache_type_k"], "f16")
+        self.assertFalse(any(t["step"] == "cache" for t in kept["trials"]))
+        result, _, _ = run(base=base, memory_check=check, allow_kv_compression=True)
         self.assertEqual(result["best"]["cache_type_k"], "q8_0")
         self.assertEqual(result["best"]["cache_type_v"], "q8_0")
         self.assertEqual(result["best"]["flash_attn"], "on")
         self.assertGreaterEqual(result["best"]["gpu_layers"], 22)
         self.assertTrue(any("short-term notepad" in n for n in result["notes"]))
 
-    def test_compressed_notes_only_when_allowed_or_tight(self):
+    def test_compressed_notes_only_when_allowed(self):
         result, _, _ = run()
         self.assertFalse(any(t["step"] == "cache" for t in result["trials"]))
         result, _, _ = run(allow_kv_compression=True)
