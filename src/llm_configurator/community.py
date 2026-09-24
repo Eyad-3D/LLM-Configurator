@@ -20,6 +20,7 @@ import secrets
 import socket
 import statistics
 from datetime import datetime, timezone
+from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
@@ -30,6 +31,7 @@ SCHEMA = 1
 REPO = "Eyad-3D/LLM-Configurator"
 DEFAULT_SOURCE = f"https://raw.githubusercontent.com/{REPO}/main/community/results.json"
 LABEL = "community-results"
+TEMPLATE = "community-results.yml"
 MAX_BYTES = 10 * 1024**2
 MAX_ROWS = 50_000
 MAX_URL = 8000  # GitHub rejects much longer "new issue" links; fall back to pasting the JSON.
@@ -54,6 +56,11 @@ _SHA = re.compile(r"[0-9a-f]{64}")
 _QUANT = re.compile(r"[A-Z0-9_]{1,16}")
 _VERSION = re.compile(r"b\d{1,6}|\d{1,4}(?:\.\d{1,4}){0,3}", re.A)  # llama.cpp build tags; nothing free-form
 _FILLER = {"cpu", "processor", "@"}
+# Words in real hardware names; a host called "Johns-MacBook-Pro" must not turn "Apple M3 Pro" into "Apple M3".
+_HARDWARE_WORDS = {"pro", "max", "ultra", "air", "mini", "studio", "macbook", "imac", "mac", "laptop", "desktop",
+                   "gpu", "core", "intel", "amd", "apple", "nvidia", "geforce", "radeon", "ryzen", "xeon", "epyc",
+                   "graphics", "mobile", "ti", "super", "plus", "arc", "quadro", "tesla", "rtx", "gtx"}
+_LOWER_WORDS = {"rev", "with"}  # the few all-lowercase words vendors use in names
 _ARCH_WORDS = {"x86_64", "amd64", "arm64", "aarch64", "i386", "i686", "arm", "unknown", ""}
 
 
@@ -77,18 +84,18 @@ def _personal_words():
     for value in values:
         value = value.lower()
         words |= {value} | set(re.split(r"[-._ ]+", value))  # "johns-macbook.local" -> johns, macbook, local
-    return {word for word in words if len(word) >= 3 and word not in {"local", "localhost", "lan", "home"}}
+    return {word for word in words if len(word) >= 3 and word not in {"local", "localhost", "lan", "home"} | _HARDWARE_WORDS}
 
 
 def _looks_personal(low, personal):
-    return any(low == word or (len(word) >= 4 and word in low) for word in personal)
+    return any(low == word or (len(word) >= 5 and word in low) for word in personal)
 
 
 def _looks_like_id(token):
     """Serial numbers, UUID pieces and asset tags rather than model names."""
     low = token.lower()
     switches = len(re.findall(r"[a-z](?=\d)|\d(?=[a-z])", low))  # "ZX9K2LQ7WP" flips letter/digit constantly
-    return bool(re.search(r"[0-9a-f]{8,}", low) or re.search(r"\d{6,}", low) or switches >= 5
+    return bool(re.search(r"[0-9a-f]{8,}", low) or re.search(r"\d{6,}", low) or (switches >= 4 and len(low) >= 6)
                 or re.match(r"(gpu-|uuid|s/?n\d|serial)", low) or low.count(".") >= 2)
 
 
@@ -102,7 +109,9 @@ def clean_name(value, personal=None):
     kept = []
     for token in text.replace("_", " ").split():
         low = token.lower()
-        if (not _TOKEN.fullmatch(token) or len(token) > 24 or low in _FILLER
+        # All-lowercase words ("zorblax-laptop") are names people typed, not vendor model names.
+        typed = re.fullmatch(r"[a-z][a-z-]*", token) is not None and low not in _LOWER_WORDS
+        if (not _TOKEN.fullmatch(token) or len(token) > 24 or low in _FILLER or typed
                 or _looks_like_id(token) or _looks_personal(low, personal)):
             continue
         kept.append(token)
@@ -144,17 +153,26 @@ def _arch(hardware):
     return "other"
 
 
-def _placement(gpu_layers, total_layers):
+def _placement(gpu_layers, total_layers, n_cpu_moe=0):
     if not gpu_layers:
         return "cpu"
-    return "gpu" if total_layers and gpu_layers >= total_layers else "split"
+    # Expert weights kept in RAM (--n-cpu-moe) make a "full" offload a split one, as the engine labels it.
+    return "gpu" if total_layers and gpu_layers >= total_layers and not n_cpu_moe else "split"
 
 
-def hardware_class(hardware, gpu_uuid=None, uses_gpu=True, personal=None):
+def _pick_gpu(gpus, gpu_uuid, backend):
+    """The GPU a run used: by UUID, else the largest one of the run's backend, else the first."""
+    by_uuid = [g for g in gpus if gpu_uuid and g.get("uuid") == gpu_uuid]
+    same = [g for g in gpus if backend and g.get("backend") == backend]
+    size = lambda g: g.get("total") if type(g.get("total")) in (int, float) else 0
+    return (by_uuid or sorted(same, key=size, reverse=True) or gpus or [None])[0]
+
+
+def hardware_class(hardware, gpu_uuid=None, uses_gpu=True, personal=None, backend=None):
     """The coarse, shareable description of a computer. Also used to match community records."""
     hardware = hardware or {}
     gpus = [g for g in hardware.get("gpus") or [] if isinstance(g, dict)]
-    gpu = next((g for g in gpus if gpu_uuid and g.get("uuid") == gpu_uuid), gpus[0] if gpus else None) if uses_gpu else None
+    gpu = _pick_gpu(gpus, gpu_uuid, backend) if uses_gpu else None
     os_family, os_version = _os_family(hardware)
     backend = "cpu"
     if gpu:
@@ -187,7 +205,31 @@ def _month(timestamp):
         moment = datetime.fromisoformat(str(timestamp))
     except ValueError:
         moment = datetime.now(timezone.utc)
+    if moment.tzinfo is not None:
+        moment = moment.astimezone(timezone.utc)
     return moment.strftime("%Y-%m")
+
+
+def _runtime_version(value):
+    """A llama.cpp build tag "b<N>". Build 1 comes from source copies without git history, so it says nothing."""
+    match = re.fullmatch(r"b?(\d{1,6})", str(value).strip(), re.A) if value is not None else None
+    if match:
+        return f"b{int(match.group(1))}" if int(match.group(1)) > 1 else None
+    return _text(value, _VERSION)
+
+
+def _runtime_backend(value):
+    """llama-bench says "CUDA" or "Metal,BLAS"; the schema uses lowercase names."""
+    first = str(value or "").split(",")[0].strip().lower()
+    return _choice({"blas": "cpu", "hip": "rocm"}.get(first, first), BACKENDS)
+
+
+def _catalogue_repos():
+    try:
+        from .catalogue import packaged_entries
+        return {str(e.get("gguf_repo", "")).lower() for e in packaged_entries()}
+    except Exception:  # no catalogue means nothing counts as public
+        return set()
 
 
 def anonymize(measurement, hardware, variant):
@@ -198,13 +240,17 @@ def anonymize(measurement, hardware, variant):
         raise ValueError("This result has no valid speed or context, so there is nothing useful to share.")
     # Local or custom models may carry personal file or repo names; share only the content hash then.
     # A missing source counts as private.
-    public = _field(variant, "source") == "catalogue"
+    # Older saved variants default to "catalogue", so the repo must also be one of the packaged ones.
+    public = _field(variant, "source") == "catalogue" and str(_field(variant, "repo") or "").lower() in _catalogue_repos()
     layers = _number(_field(variant, "layers"), 1, 4096, integer=True)
     gpu_layers = _number(measurement.get("gpu_layers"), 0, 4096, integer=True) or 0
     quant = _field(variant, "quant")
     sha = _field(variant, "sha256") or measurement.get("sha256")
     settings = measurement.get("settings") if isinstance(measurement.get("settings"), dict) else {}
     runtime = measurement.get("runtime") if isinstance(measurement.get("runtime"), dict) else {}
+    users = _number(measurement.get("users", 1), 1, 64, integer=True)
+    if users is None:
+        raise ValueError("This result served more users at once than community results can describe.")
     record = {
         "schema": SCHEMA, "id": secrets.token_hex(8), "month": _month(measurement.get("timestamp")),
         "kind": _choice(measurement.get("kind"), KINDS),
@@ -215,9 +261,11 @@ def anonymize(measurement, hardware, variant):
                     "filename": _text(os.path.basename(str(_field(variant, "filename") or "")), _FILENAME) if public else None,
                     "sha256": _text(sha.lower() if isinstance(sha, str) else None, _SHA),
                     "quant": _text(quant.upper() if isinstance(quant, str) else None, _QUANT), "layers": layers},
-        "hardware": hardware_class(hardware, measurement.get("gpu_uuid"), gpu_layers > 0),
-        "settings": {"placement": _placement(gpu_layers, layers), "gpu_layers": gpu_layers,
-                     "users": _number(measurement.get("users"), 1, 64, integer=True) or 1,
+        "hardware": hardware_class(hardware, measurement.get("gpu_uuid"), gpu_layers > 0,
+                                   backend=_runtime_backend(runtime.get("backend"))),
+        "settings": {"placement": _placement(gpu_layers, layers, settings.get("n_cpu_moe") or measurement.get("n_cpu_moe")),
+                     "gpu_layers": gpu_layers,
+                     "users": users,
                      "threads": _number(measurement.get("threads"), 1, 1024, integer=True),
                      "flash_attn": _choice(settings.get("flash_attn"), FLASH),
                      "cache_type_k": _choice(settings.get("cache_type_k"), CACHE),
@@ -225,8 +273,8 @@ def anonymize(measurement, hardware, variant):
                      "batch": _number(settings.get("batch"), 1, 65536, integer=True),
                      "ubatch": _number(settings.get("ubatch"), 1, 65536, integer=True),
                      "n_cpu_moe": _number(settings.get("n_cpu_moe"), 0, 4096, integer=True)},
-        "runtime": {"version": _text(runtime.get("version") or measurement.get("runtime_build"), _VERSION),
-                    "backend": _choice(runtime.get("backend"), BACKENDS)},
+        "runtime": {"version": _runtime_version(runtime.get("version") or measurement.get("runtime_build")),
+                    "backend": _runtime_backend(runtime.get("backend"))},
     }
     return validate_record(record)
 
@@ -340,13 +388,19 @@ def parse(text):
     """
     if isinstance(text, bytes):
         _check(len(text) <= MAX_BYTES, "Community results are larger than 10 MB; refusing to read them.")
-        text = text.decode("utf-8", errors="strict")
+        try:
+            text = text.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            raise ValueError("Community results are not UTF-8 text. Check the file or link.") from None
     _check(isinstance(text, str), "Community results must be JSON text")
     _check(len(text.encode("utf-8")) <= MAX_BYTES, "Community results are larger than 10 MB; refusing to read them.")
+    text = text.removeprefix("\ufeff")  # a byte-order mark from Windows editors
     try:
         data = json.loads(text, parse_constant=_reject_constant)
     except (ValueError, RecursionError) as error:
         raise ValueError(f"Community results are not valid JSON ({type(error).__name__}). Check the file or link.") from None
+    if isinstance(data, dict) and type(data.get("schema")) is int and data["schema"] > SCHEMA:
+        raise ValueError("These community results use a newer format. Update LLM Configurator to read them.")
     if isinstance(data, dict) and "records" in data:
         schema = data.get("schema")
         _check(type(schema) is int, "Community results need a schema number")
@@ -414,7 +468,7 @@ def _fetch(url, progress=None, cancel=None):
             return b"".join(chunks)
     except HTTPError as error:
         raise ValueError(f"Community results returned HTTP {error.code}. Try again later; saved results stay available.") from None
-    except (URLError, TimeoutError, OSError) as error:
+    except (URLError, TimeoutError, OSError, HTTPException) as error:
         raise ValueError(f"Community results are unavailable ({type(error).__name__}). Check your connection; saved results stay available.") from None
 
 
@@ -429,6 +483,9 @@ def import_records(store, source=None, text=None, progress=None, cancel=None):
     if progress:
         progress({"stage": "validate", "done": 0, "total": None, "message": "Checking every row"})
     records, rejected = parse(raw)
+    # A page of errors or a file in another format must not wipe the results already saved.
+    _check(records or not rejected, f"None of the {rejected} community results could be read, so the saved "
+           "results were kept. Check the link, or update LLM Configurator if the format is newer.")
     result = {"source": source, "fetched_at": now(), "records": records, "rejected": rejected}
     store.put("community", {"source": source, "fetched_at": result["fetched_at"], "records": records})
     if progress:
@@ -439,22 +496,20 @@ def import_records(store, source=None, text=None, progress=None, cancel=None):
 
 # ---------- sharing ----------
 
-def _issue_body(payload, fits):
-    intro = ("These are anonymous speed results from LLM Configurator. Please read the JSON before submitting: "
-             "it contains model names, a rough hardware description (names, memory rounded to 4 GB, OS family), "
-             "settings and speeds. No file paths, user names, computer names or serial numbers.\n\n")
-    if fits:
-        return intro + "```json\n" + payload + "\n```\n"
-    return intro + "The results were too long for a link. Paste the JSON that LLM Configurator showed you below this line.\n\n"
-
-
 def issue_url(payload, count):
-    """(url, fits): a prefilled 'new issue' link; when too long for GitHub, a link that asks for a paste."""
+    """(url, fits): a prefilled 'new issue' link; when too long for GitHub, the empty form asks for a paste.
+
+    The link opens the `community-results` issue form (.github/ISSUE_TEMPLATE/community-results.yml).
+    Forms fill fields from query parameters named after the field id (`results`) and apply their
+    own label even for people without triage rights; `body` is ignored by forms, so it is not sent.
+    """
     title = f"Community results: {count} speed result{'s' if count != 1 else ''}"
 
     def build(fits):
-        query = urlencode({"title": title, "labels": LABEL, "body": _issue_body(payload, fits)}, quote_via=quote)
-        return f"https://github.com/{REPO}/issues/new?{query}"
+        fields = {"template": TEMPLATE, "title": title, "labels": LABEL}
+        if fits:
+            fields["results"] = payload
+        return f"https://github.com/{REPO}/issues/new?{urlencode(fields, quote_via=quote)}"
 
     url = build(True)
     return (url, True) if len(url) <= MAX_URL else (build(False), False)
@@ -463,7 +518,7 @@ def issue_url(payload, count):
 def share_payload(store, measurement_ids, hardware=None, variants=None):
     """Anonymised JSON plus a prefilled GitHub issue link. Never sends anything.
 
-    Returns {"json", "issue_url", "fits_in_url", "records"}. `hardware` and `variants`
+    Returns {"json", "issue_url", "fits_in_url", "records", "skipped"}. `hardware` and `variants`
     default to a fresh scan and the cached catalogue.
     """
     _check(isinstance(measurement_ids, list) and 1 <= len(measurement_ids) <= MAX_SHARE
@@ -476,17 +531,24 @@ def share_payload(store, measurement_ids, hardware=None, variants=None):
         from .hardware import scan
         hardware = scan(include_processes=False)
     variants = {_field(v, "id"): v for v in (store.get("variants", []) if variants is None else variants)}
-    records = []
+    records, skipped = [], 0
     for measurement_id in dict.fromkeys(measurement_ids):
         measurement = measurements[measurement_id]
-        # The hardware description must describe the computer that produced the number.
-        _check(measurement.get("fingerprint") == hardware.get("fingerprint"),
-               "One result was measured on different hardware than this computer, so it cannot be described honestly.")
+        # The hardware description must describe the computer that produced the number, so results from
+        # before a hardware or driver change are left out (and counted) rather than described wrongly.
+        if not hardware.get("fingerprint") or measurement.get("fingerprint") != hardware.get("fingerprint"):
+            skipped += 1
+            continue
         variant = variants.get(measurement.get("variant_id")) or {"sha256": measurement.get("sha256"), "source": "local"}
-        records.append(anonymize(measurement, hardware, variant))
+        try:
+            records.append(anonymize(measurement, hardware, variant))
+        except ValueError:
+            skipped += 1
+    _check(records, "None of the chosen results can be shared: they were measured on different hardware than "
+           "this computer has now, or have no usable speed.")
     payload = json.dumps({"schema": SCHEMA, "records": records}, indent=1, allow_nan=False)
     url, fits = issue_url(payload, len(records))
-    return {"json": payload, "issue_url": url, "fits_in_url": fits, "records": len(records)}
+    return {"json": payload, "issue_url": url, "fits_in_url": fits, "records": len(records), "skipped": skipped}
 
 
 # ---------- evidence ----------
@@ -500,8 +562,9 @@ def _same_model(record, variant):
     if sha and theirs.get("sha256"):
         return theirs["sha256"] == sha.lower()
     quant = _field(variant, "quant")
-    return bool(theirs.get("repo") and theirs.get("repo") == _field(variant, "repo")
-                and quant and theirs.get("quant") == quant.upper())
+    repo = _field(variant, "repo")
+    return bool(isinstance(theirs.get("repo"), str) and isinstance(repo, str) and theirs["repo"].lower() == repo.lower()
+                and isinstance(quant, str) and theirs.get("quant") == quant.upper())
 
 
 def evidence(records, variant, hardware, config):
@@ -514,21 +577,24 @@ def evidence(records, variant, hardware, config):
     config = config or {}
     total = config.get("total_layers") or _field(variant, "layers")
     gpu_layers = config.get("gpu_layers") or 0
-    placement = _placement(gpu_layers, total)
-    mine = hardware_class(hardware, config.get("gpu_uuid"), placement != "cpu")
+    n_cpu_moe = config.get("n_cpu_moe") or 0
+    placement = _placement(gpu_layers, total, n_cpu_moe)
+    mine = hardware_class(hardware, config.get("gpu_uuid"), placement != "cpu", backend=config.get("gpu_backend"))
     if config.get("gpu_backend") in BACKENDS and placement != "cpu":
         mine["backend"] = config["gpu_backend"]
     bucket, users = context_bucket(config.get("context") or 8192), config.get("parallel") or 1
     pool = []
     for record in records or []:
-        try:
-            settings, theirs = record["settings"], record["hardware"]
-            if (settings["placement"] == placement and (settings.get("users") or 1) == users
-                    and context_bucket(record["context"]) == bucket and _same_model(record, variant)
-                    and math.isfinite(record["tps"]) and record["tps"] > 0):
-                pool.append((record["tps"], theirs))
-        except (KeyError, TypeError, AttributeError):
+        # Saved rows were validated on import, but the store is a plain file people can edit.
+        if not isinstance(record, dict) or not all(isinstance(record.get(k), dict) for k in ("settings", "hardware", "variant")):
             continue
+        settings, theirs, tps = record["settings"], record["hardware"], record.get("tps")
+        if type(tps) not in (int, float) or not math.isfinite(tps) or tps <= 0 or type(record.get("context")) is not int:
+            continue
+        if (settings.get("placement") == placement and (settings.get("users") or 1) == users
+                and (settings.get("n_cpu_moe") or 0) == n_cpu_moe
+                and context_bucket(record["context"]) == bucket and _same_model(record, variant)):
+            pool.append((tps, theirs))
     if placement == "cpu":
         tiers = [("same_cpu", lambda h: mine["cpu"] and h.get("cpu") == mine["cpu"] and h.get("arch") == mine["arch"]),
                  ("same_class", lambda h: h.get("arch") == mine["arch"] and h.get("ram_gib") == mine["ram_gib"])]

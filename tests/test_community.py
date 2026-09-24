@@ -192,7 +192,10 @@ class PrivacyLeakTests(unittest.TestCase):
         # Parts of multi-word host and user names are removed, not just exact tokens.
         with mock.patch("socket.gethostname", return_value="johns-macbook-pro.local"), \
                 mock.patch("getpass.getuser", return_value="john.smith"):
-            self.assertEqual(community.clean_name("Apple M2 Johns MacBook Pro"), "Apple M2")
+            self.assertEqual(community.clean_name("Apple M2 Johns"), "Apple M2")
+            # ...but hardware words that also appear in a default Mac host name stay.
+            self.assertEqual(community.clean_name("Apple M3 Pro"), "Apple M3 Pro")
+            self.assertEqual(community.clean_name("AMD Ryzen 9 7950X3D 16-Core Processor"), "AMD Ryzen 9 7950X3D 16-Core")
             self.assertEqual(community.clean_name("Intel Core i7 john smith"), "Intel Core i7")
         # Serial-like tokens and domain names are dropped.
         self.assertEqual(community.clean_name("NVIDIA RTX A6000 SN12345 ZX9K2LQ7WP build01.corp.acme.com", set()), "NVIDIA RTX A6000")
@@ -391,7 +394,9 @@ class ShareTests(unittest.TestCase):
         query = parse_qs(parts.query)
         self.assertEqual(query["labels"], ["community-results"])
         self.assertIn("2 speed results", query["title"][0])
-        self.assertIn(result["json"], query["body"][0])
+        self.assertEqual(query["template"], ["community-results.yml"])
+        self.assertEqual(query["results"], [result["json"]])  # the issue form's field id
+        self.assertNotIn("body", query)  # issue forms ignore body
         self.assertNotIn(" ", result["issue_url"])
         self.assertNotIn("+", parts.query)  # spaces encoded as %20, not +
         payload = json.loads(result["json"])
@@ -406,7 +411,9 @@ class ShareTests(unittest.TestCase):
         result = community.share_payload(self.store, ids, hardware=hardware())
         self.assertFalse(result["fits_in_url"])
         self.assertLessEqual(len(result["issue_url"]), community.MAX_URL)
-        self.assertIn("Paste", parse_qs(urlsplit(result["issue_url"]).query)["body"][0])
+        query = parse_qs(urlsplit(result["issue_url"]).query)
+        self.assertNotIn("results", query)  # the form asks for a paste
+        self.assertEqual(query["template"], ["community-results.yml"])
         self.assertEqual(len(json.loads(result["json"])["records"]), 40)
 
     def test_refuses_bad_requests(self):
@@ -482,3 +489,121 @@ class EvidenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IssueTemplateTests(unittest.TestCase):
+    def test_template_matches_the_link(self):
+        path = Path(__file__).resolve().parents[1] / ".github" / "ISSUE_TEMPLATE" / community.TEMPLATE
+        text = path.read_text(encoding="utf-8")
+        self.assertIn(community.LABEL, text)
+        self.assertRegex(text, r"(?m)^\s+id: results$")  # issue_url fills this field
+        try:
+            import yaml
+        except ImportError:
+            return
+        form = yaml.safe_load(text)
+        self.assertEqual(form["labels"], [community.LABEL])
+        self.assertIn("results", [item.get("id") for item in form["body"]])
+
+
+class FixupTests(unittest.TestCase):
+    """Cases found by the v0.4 fix-up review (real shapes from hardware.py, testing.py and the engine)."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.store = Store(self.directory.name)
+
+    def test_bad_or_empty_download_keeps_saved_results(self):
+        self.store.put("community", {"source": "x", "fetched_at": "t", "records": [record()]})
+        for text in ['{"message": "Not Found"}', json.dumps({"schema": 1, "records": [{"bad": 1}]})]:
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError, "kept"):
+                community.import_records(self.store, text=text)
+        with self.assertRaisesRegex(ValueError, "newer format"):
+            community.import_records(self.store, text='{"schema": 2, "results": []}')
+        self.assertEqual(len(self.store.get("community")["records"]), 1)
+
+    def test_bom_and_non_utf8(self):
+        records, rejected = community.parse("﻿" + json.dumps({"schema": 1, "records": [record()]}))
+        self.assertEqual((len(records), rejected), (1, 0))
+        with self.assertRaisesRegex(ValueError, "UTF-8"):
+            community.parse(b"\xff\xfe{}")
+
+    def test_http_protocol_errors_are_plain(self):
+        import http.client
+
+        class Broken:
+            def open(self, request, timeout=None):
+                raise http.client.BadStatusLine("garbage")
+        with mock.patch.object(community, "_opener", return_value=Broken()), self.assertRaisesRegex(ValueError, "unavailable"):
+            community.import_records(self.store)
+
+    def test_evidence_survives_hand_edited_store(self):
+        good = [record(), record()]
+        junk = [{"settings": {}, "hardware": "x", "variant": {}, "tps": 5, "context": 8192},
+                dict(record(), tps=True), dict(record(), tps="fast"), "row", None]
+        result = community.evidence(good + junk + junk, VARIANT, hardware(), EvidenceTests.CONFIG)
+        self.assertEqual(result["n"], 2)
+
+    def test_experts_on_cpu_are_a_split_placement(self):
+        config = dict(EvidenceTests.CONFIG, n_cpu_moe=20)
+        full = [record(), record()]
+        self.assertIsNone(community.evidence(full, VARIANT, hardware(), config))
+        moe = [community.anonymize(measurement(settings={"n_cpu_moe": 20}), hardware(), VARIANT) for _ in range(2)]
+        self.assertEqual(moe[0]["settings"]["placement"], "split")
+        self.assertEqual(community.evidence(moe, VARIANT, hardware(), config)["n"], 2)
+        self.assertIsNone(community.evidence(moe, VARIANT, hardware(), EvidenceTests.CONFIG))
+
+    def test_gpu_without_uuid_is_picked_by_backend(self):
+        gpus = [{"index": 0, "name": "Intel UHD Graphics 770", "total": 2 * GIB, "backend": "vulkan"},
+                {"index": 1, "name": "NVIDIA GeForce RTX 4090", "total": 24 * GIB, "backend": "cuda"}]
+        config = {k: v for k, v in EvidenceTests.CONFIG.items() if k != "gpu_uuid"}
+        config["gpu_backend"] = "cuda"
+        result = community.evidence([record(), record()], VARIANT, hardware(gpus=gpus), config)
+        self.assertEqual(result["similar"], "same_gpu")
+
+    def test_repo_match_ignores_case(self):
+        rows = [record(variant__sha256=None), record(variant__sha256=None)]
+        lower = dict(VARIANT, repo=VARIANT["repo"].lower(), sha256=None)
+        self.assertEqual(community.evidence(rows, lower, hardware(), EvidenceTests.CONFIG)["n"], 2)
+
+    def test_old_custom_variant_marked_catalogue_stays_private(self):
+        # Pre-v0.4 user variants were saved without a source and now load as "catalogue".
+        row = community.anonymize(measurement(), hardware(), dict(VARIANT, repo="someone/private-finetune-GGUF"))
+        self.assertIsNone(row["variant"]["repo"])
+        self.assertIsNone(row["variant"]["filename"])
+        self.assertEqual(row["variant"]["sha256"], SHA)
+
+    def test_typed_words_in_hardware_names_dropped(self):
+        for name, clean in [("NVIDIA GeForce RTX 4090 zorblax-laptop", "NVIDIA GeForce RTX 4090"),
+                            ("Intel(R) Core(TM) i9-14900K qwertyuser", "Intel Core i9-14900K"),
+                            ("NVIDIA RTX A6000 ZX9K2LQ", "NVIDIA RTX A6000"),
+                            ("ARMv8 Processor rev 1 (v8l)", "ARMv8 rev 1"),
+                            ("AMD Ryzen AI 9 HX 370 w/ Radeon 890M", "AMD Ryzen AI 9 HX 370 Radeon 890M"),
+                            ("13th Gen Intel(R) Core(TM) i7-13700H", "13th Gen Intel Core i7-13700H")]:
+            with self.subTest(name=name):
+                self.assertEqual(community.clean_name(name, set()), clean)
+
+    def test_real_runtime_fields(self):
+        # testing.py stores str(build_number) and llama-bench's "backends" text.
+        cases = [({"version": "5678", "backend": "CUDA"}, ("b5678", "cuda")),
+                 ({"version": "1", "backend": "CPU"}, (None, "cpu")),  # build 1 = source copy without history
+                 ({"version": "123456", "backend": "Metal,BLAS"}, ("b123456", "metal")),
+                 ({"version": "4df29be", "backend": "BLAS"}, (None, "cpu"))]
+        for runtime, expected in cases:
+            with self.subTest(runtime=runtime):
+                row = community.anonymize(measurement(runtime=runtime, runtime_build="4df29be"), hardware(), VARIANT)
+                self.assertEqual((row["runtime"]["version"], row["runtime"]["backend"]), expected)
+                self.assertEqual(community.validate_record(row), row)
+
+    def test_month_is_utc(self):
+        row = community.anonymize(measurement(timestamp="2026-10-01T00:30:00+05:30"), hardware(), VARIANT)
+        self.assertEqual(row["month"], "2026-09")
+
+    def test_share_skips_results_from_other_hardware(self):
+        self.store.put("measurements", [measurement(), measurement(id="old", fingerprint="before-driver-update"),
+                                        measurement(id="many", users=128)])
+        result = community.share_payload(self.store, ["m1", "old", "many"], hardware=hardware(), variants=[VARIANT])
+        self.assertEqual((result["records"], result["skipped"]), (1, 2))
+        with self.assertRaisesRegex(ValueError, "different hardware"):
+            community.share_payload(self.store, ["old"], hardware=hardware(), variants=[VARIANT])

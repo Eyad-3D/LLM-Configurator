@@ -101,9 +101,20 @@ def _prepared(config, variant, uses_port=True):
         name = f" ({variant.filename})" if variant is not None else ""
         notes.append(f"The model file{name} is not downloaded yet, so {PLACEHOLDER} stands in for its path. "
                      "Replace it with the real path after downloading.")
-    for name in ["model_path", "draft_model_path"]:
-        if raw.get(name) is not None and (not isinstance(raw[name], str) or re.search(r"[\x00-\x1f\x7f]", raw[name])):
-            raise ValueError("The model path contains line breaks or control characters. Rename the file or folder and try again.")
+    for name in ["model_path", "draft_model_path", "alias", "device", "gpu_uuid"]:
+        if raw.get(name) is None:
+            continue
+        if not isinstance(raw[name], str):
+            raise ValueError(f"{name} must be text (a string), not {type(raw[name]).__name__}.")
+        if re.search(r"[\x00-\x1f\x7f]", raw[name]):
+            raise ValueError(f"The {name.replace('_', ' ')} contains line breaks or control characters. "
+                             "Rename the file or folder and try again.")
+    shard = SPLIT.search(raw["model_path"])
+    if shard and int(shard.group(1)) != 1:
+        # llama.cpp only loads a split model from its first part, and finds the others next to it.
+        raw["model_path"] = raw["model_path"][:shard.start()] + f"-00001-of-{shard.group(2)}.gguf"
+        notes.append("This model is split into parts; the command starts from the first part, "
+                     "and llama.cpp finds the others in the same folder.")
     if not raw.get("port"):
         raw["port"] = DEFAULT_PORT
         if uses_port:
@@ -118,8 +129,20 @@ def _base_url(config):
 
 
 def _is_split(config, variant):
-    return bool((variant is not None and len(getattr(variant, "files", None) or []) > 1)
-                or SPLIT.search(config["model_path"] or ""))
+    if config["model_path"] != PLACEHOLDER:  # a real file name tells; it may already be merged
+        return bool(SPLIT.search(config["model_path"]))
+    return bool(variant is not None and len(getattr(variant, "files", None) or []) > 1)
+
+
+def _tool(server_command, name):
+    """Another llama.cpp tool next to the known llama-server, else the bare name on PATH."""
+    command = [server_command] if isinstance(server_command, str) else list(server_command or [])
+    if len(command) == 1:
+        for pathlib in (posixpath, ntpath):
+            folder, base = pathlib.split(command[0])
+            if folder and base.lower() in {"llama-server", "llama-server.exe"}:
+                return pathlib.join(folder, name + (".exe" if base.lower().endswith(".exe") else ""))
+    return name
 
 
 def _extra_env(config):
@@ -135,6 +158,9 @@ def _llama_server(config, variant, platform, server_command, notes):
     env = _extra_env(config)
     title, url = _title(variant), _base_url(config)
     if platform == "windows":
+        if any('"' in token for token in command + args):
+            raise ValueError("Windows PowerShell cannot pass a setting that contains a double quote (\") to a program "
+                             "reliably. Rename the file or folder, or the model name, and try again.")
         lines = [f"# Start {title} with the settings LLM Configurator tested.",
                  f"# OpenAI-compatible address: {url}  (stop with Ctrl+C)",
                  "$ErrorActionPreference = 'Stop'"]
@@ -189,7 +215,7 @@ def _modelfile_value(text):
     return f'"{text}"' if re.search(r"[\s#]", text) else text
 
 
-def _ollama(config, variant, platform, notes):
+def _ollama(config, variant, platform, notes, server_command=None):
     pathlib = ntpath if platform == "windows" else posixpath
     name = _slug(_alias(config, variant))
     path = config["model_path"]
@@ -197,7 +223,9 @@ def _ollama(config, variant, platform, notes):
     if _is_split(config, variant):
         merged = _merged_name(path, pathlib) if path != PLACEHOLDER else "<path-to-merged-model.gguf>"
         shell_quote = ps_quote if platform == "windows" else shlex.quote
-        merge = f"llama-gguf-split --merge {shell_quote(path)} {shell_quote(merged)}"
+        tool = _tool(server_command, "llama-gguf-split")
+        merge = tool if tool == "llama-gguf-split" else f"& {ps_quote(tool)}" if platform == "windows" else shlex.quote(tool)
+        merge += f" --merge {shell_quote(path)} {shell_quote(merged)}"
         notes.append("Ollama cannot load a model split into several files. Merge the parts into one file first "
                      f"(needs free disk space equal to the model size): {merge}")
         notes.append("Recent Ollama versions can also load the parts directly (one FROM line per part), "
@@ -225,7 +253,8 @@ def _ollama(config, variant, platform, notes):
                      "and it needs flash attention on.")
         if config["cache_type_k"] != config["cache_type_v"]:
             notes.append(f"Ollama uses one type for both halves of the KV cache; the tested setup used "
-                         f"{config['cache_type_k']} and {config['cache_type_v']}, so q8_0 is the closest safe choice.")
+                         f"{config['cache_type_k']} and {config['cache_type_v']}, so q8_0 is the closest safe choice. "
+                         "Quality and memory use can differ a little from the tested run.")
     if config["parallel"] > 1:
         env["OLLAMA_NUM_PARALLEL"] = str(config["parallel"])
         notes.append(f"Serving {config['parallel']} users at once is an Ollama server setting "
@@ -276,8 +305,13 @@ def _docker(config, variant, platform, notes):
             filename = variant.filename if key == "model_path" and variant is not None else "model.gguf"
             folder = "<folder-containing-the-model>"
         else:
+            if not (path.startswith("/") or re.match(r"^([A-Za-z]:[\\/]|\\\\)", path)):
+                raise ValueError("Docker needs the full path to the model file (for example starting with / or C:\\). "
+                                 "Export again with the full path.")
             folder, filename = pathlib.split(path)
-            folder = folder or "."
+            if platform == "windows" and path.startswith("\\\\"):
+                notes.append("Docker Desktop cannot mount a network share (\\\\server\\share). Copy the model to a local drive "
+                             "and export again.")
         mounts.append((folder, target))
         inside[key] = f"{target}/{filename}"
     args = launch.server_args({**config, **inside})
@@ -455,6 +489,8 @@ def export(config, variant, fmt, platform="posix", server_command=None):
     config, notes = _prepared(config, variant, uses_port=fmt not in {"ollama", "lmstudio"})
     if fmt == "llama-server":
         filename, content, instructions = _llama_server(config, variant, platform, server_command, notes)
+    elif fmt == "ollama":
+        filename, content, instructions = _ollama(config, variant, platform, notes, server_command)
     else:
         filename, content, instructions = BUILDERS[fmt](config, variant, platform, notes)
     return {"format": fmt, "filename": filename, "content": content, "instructions": instructions, "notes": notes}
