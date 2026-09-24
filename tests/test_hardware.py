@@ -72,16 +72,17 @@ def write(path, text):
 
 def make_card(root, card, vendor, device="0x744c", pci=None, driver="amdgpu", **files):
     """A fake /sys/class/drm/cardN pointing at a fake PCI device directory, like the real symlinks."""
-    pci = pci or f"0000:0{card[-1]}:00.0"
+    # Real sysfs names look like 0000:01:00.0; Windows cannot store ":" in a folder name.
+    pci = pci or (f"0000:0{card[-1]}:00.0" if os.name != "nt" else f"0000_0{card[-1]}_00.0")
     real = os.path.join(root, "devices", pci)
     write(os.path.join(real, "vendor"), vendor + "\n")
     write(os.path.join(real, "device"), device + "\n")
     os.makedirs(os.path.join(root, "drivers", driver), exist_ok=True)
-    os.symlink(os.path.join(root, "drivers", driver), os.path.join(real, "driver"))
+    os.symlink(os.path.join(root, "drivers", driver), os.path.join(real, "driver"), target_is_directory=True)
     for name, value in files.items():
         write(os.path.join(real, name), f"{value}\n")
     os.makedirs(os.path.join(root, "drm", card), exist_ok=True)
-    os.symlink(real, os.path.join(root, "drm", card, "device"))
+    os.symlink(real, os.path.join(root, "drm", card, "device"), target_is_directory=True)
     os.makedirs(os.path.join(root, "drm", f"{card}-DP-1"), exist_ok=True)  # connectors must be ignored
 
 

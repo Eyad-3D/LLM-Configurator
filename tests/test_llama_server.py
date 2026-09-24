@@ -52,7 +52,8 @@ class Base(unittest.TestCase):
 
     def run_fake(self, mode, *args, extra_env=None):
         environment = {**os.environ, **(extra_env or {})}
-        return subprocess.run(fake_command(mode) + list(args), capture_output=True, text=True, timeout=60, env=environment)
+        return subprocess.run(fake_command(mode) + list(args), capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=60, env=environment)
 
 
 class FailureParsingTests(unittest.TestCase):

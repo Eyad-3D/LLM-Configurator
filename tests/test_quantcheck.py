@@ -126,6 +126,8 @@ Final estimate: PPL = 6.2316 +/- 0.03772
 
 FAKE_PERPLEXITY = r'''
 import os, sys, time
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
 args = sys.argv[1:]
 def value(flag):
     return args[args.index(flag) + 1] if flag in args else None
