@@ -29,7 +29,9 @@ TIMING_KEYS = ["prompt_n", "prompt_ms", "prompt_per_second", "predicted_n", "pre
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 _LIVE = weakref.WeakSet()
 
-# Ordered: the first match wins, so specific causes come before generic ones.
+# Ordered: the first match wins, so specific causes come before generic ones. Lines come from real llama.cpp
+# logs (tests/integration/samples/error-*.txt); a CPU-only build prints "no usable GPU found" on every start, so
+# that line is only a warning, never a failure reason.
 FAILURES = [
     (re.compile(r"out of memory|failed to allocate|unable to allocate|insufficient memory|cudaMalloc failed"
                 r"|ErrorOutOfDeviceMemory|OutOfMemory|std::bad_alloc", re.I),
@@ -44,18 +46,26 @@ FAILURES = [
      "The model file looks damaged or incomplete. Delete it and download it again."),
     (re.compile(r"couldn't bind|address already in use|bind\(\) failed", re.I),
      "The network port is already used by another program. Pick another port or close that program."),
-    (re.compile(r"V cache quantization requires flash.?attn", re.I),
+    (re.compile(r"V cache quantization requires flash.?attn|quantized V cache requires flash.?attn", re.I),
      "Compressed notes (the KV cache, the model's short-term notepad) need flash attention turned on."),
-    (re.compile(r"invalid device|failed to initialize CUDA|no usable GPU|No devices found|driver version is insufficient"
-                r"|failed to load backend|vk::|ggml_metal_init: error", re.I),
+    (re.compile(r"invalid device", re.I),
      "llama.cpp could not use the graphics card. Update the GPU driver, or run on the processor with 0 GPU layers."),
+    (re.compile(r"the argument has been removed", re.I),
+     "This llama.cpp version no longer accepts one of the settings the app sent. Update LLM Configurator, "
+     "or use an older llama.cpp."),
     (re.compile(r"error while handling argument|invalid argument|unknown argument|unknown value for", re.I),
      "This llama.cpp version does not understand one of the settings. Update llama.cpp."),
 ]
+# Checked after the exit code: these lines can appear next to other failures, so they are only a last guess.
+GPU_FAILURE = (re.compile(r"failed to initialize CUDA|No devices found|driver version is insufficient"
+                          r"|failed to load backend|vk::|ggml_metal_init: error", re.I),
+               "llama.cpp could not use the graphics card. Update the GPU driver, or run on the processor with 0 GPU layers.")
 WARNINGS = [
     (re.compile(r"no usable GPU found", re.I),
      "llama.cpp found no usable graphics card, so the model runs on the processor only (slower)."),
 ]
+# Settings the user's environment must not change behind the app's back (llama.cpp reads LLAMA_ARG_* as flags).
+_ENV_BLOCKED = re.compile(r"^(LLAMA_ARG_|LLAMA_API_KEY$)", re.I)
 
 
 def free_port():
@@ -63,6 +73,27 @@ def free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+def port_is_free(port, host="127.0.0.1"):
+    """True when nothing listens on host:port. SO_REUSEADDR on POSIX, like llama-server, so TIME_WAIT is not "busy"."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        if os.name != "nt":
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, port))
+        except OSError:
+            return False
+    return True
+
+
+def server_env(config):
+    """launch.server_env without the user's LLAMA_ARG_* / LLAMA_API_KEY (they would silently change flags the app
+    leaves at llama.cpp defaults, or lock the app out). CORS is limited to localhost pages; builds that don't know
+    the variable ignore it."""
+    env = {k: v for k, v in launch.server_env(config).items() if not _ENV_BLOCKED.match(k)}
+    env["LLAMA_ARG_CORS_ORIGINS"] = "localhost"
+    return env
 
 
 def failure_from_log(text, returncode=None):
@@ -73,7 +104,8 @@ def failure_from_log(text, returncode=None):
             return message.format(*(match.groups() or ("unknown",)))
     if returncode is not None and returncode in (-9, 137):
         return "The system stopped the model server, most likely because memory ran out."
-    return None
+    pattern, message = GPU_FAILURE
+    return message if pattern.search(text or "") else None
 
 
 def argv(command):
@@ -148,6 +180,9 @@ class LlamaServer:
         if self.process is not None:
             raise ValueError("This server was already started")
         attempts = 1 if self.config["port"] else 2
+        if self.config["port"] and not port_is_free(self.config["port"], self.config["host"]):
+            # Otherwise the program already on that port would answer /health and look like our model.
+            raise ValueError(FAILURES[4][1])
         for attempt in range(attempts):
             try:
                 self._spawn(self.config["port"] or free_port())
@@ -171,10 +206,14 @@ class LlamaServer:
             handle, name = tempfile.mkstemp(prefix="llama-server-", suffix=".log")
             os.close(handle)
             self.log_path = Path(name)
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        self._log = open(self.log_path, "wb")
+        try:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._log = open(self.log_path, "wb")
+        except OSError:
+            raise ValueError("Could not write the llama-server log file. Check free disk space and folder "
+                             "permissions.") from None
         options = {"stdin": subprocess.DEVNULL, "stdout": self._log, "stderr": subprocess.STDOUT,
-                   "env": launch.server_env(config)}
+                   "env": server_env(config)}
         if os.name == "nt":
             options["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
         else:
@@ -184,6 +223,7 @@ class LlamaServer:
         except OSError as error:
             self._log.close()
             raise ValueError(f"Could not run llama-server ({error.strerror or error}). Check the llama.cpp install.") from None
+        _kill_with_parent(self.process)
         self.started_at = now()
         _LIVE.add(self)
 
@@ -197,7 +237,7 @@ class LlamaServer:
                 reason = self.failure_reason() or "llama-server stopped while loading the model."
                 raise ValueError(f"{reason} (exit code {code})")
             state = self._health()
-            if state == "ok":
+            if state == "ok" and self.process.poll() is None:
                 self.load_seconds = round(elapsed, 3)
                 if progress:
                     progress({"stage": "ready", "done": 1, "total": 1, "message": "The model is loaded and ready."})
@@ -206,8 +246,10 @@ class LlamaServer:
                 raise ValueError(f"The model did not finish loading within {int(timeout)} seconds. "
                                  "It may be too large for this computer, or the disk may be slow.")
             if progress:
-                progress({"stage": "loading", "done": round(elapsed, 1), "total": timeout,
-                          "message": "Loading the model into memory…" if state == "loading" else "Starting llama-server…"})
+                # The load time is unknown in advance, so there is no total (no invented fraction).
+                message = "Loading the model into memory…" if state == "loading" else "Starting llama-server…"
+                progress({"stage": "loading", "done": round(elapsed, 1), "total": None, "elapsed_seconds": round(elapsed, 1),
+                          "message": f"{message} ({int(elapsed)} s so far)" if elapsed >= 2 else message})
             time.sleep(0.1 if elapsed < 2 else 0.25)
 
     def _health(self):
@@ -266,15 +308,19 @@ class LlamaServer:
         return f"The model server stopped. {reason}" if reason else "The model server stopped unexpectedly."
 
     def chat(self, messages, max_tokens=256, temperature=0.0, seed=1, stop=None, timeout=300,
-             cache_prompt=False, enable_thinking=None, extra=None):
+             cache_prompt=False, enable_thinking=None, extra=None, chat_template_kwargs=None):
         """OpenAI-style chat. cache_prompt=False makes every call re-read the whole prompt, so timings are honest.
-        enable_thinking=False asks reasoning models (for example Qwen3) to answer without a thinking section."""
+        enable_thinking=False asks reasoning models (for example Qwen3) to answer without a thinking section;
+        chat_template_kwargs are passed to the model's chat template as they are (enable_thinking wins)."""
         body = {"messages": messages, "max_tokens": max_tokens, "temperature": temperature, "seed": seed,
                 "cache_prompt": cache_prompt, "stream": False}
         if stop:
             body["stop"] = stop
+        template_kwargs = dict(chat_template_kwargs or {})
         if enable_thinking is not None:
-            body["chat_template_kwargs"] = {"enable_thinking": bool(enable_thinking)}
+            template_kwargs["enable_thinking"] = bool(enable_thinking)
+        if template_kwargs:
+            body["chat_template_kwargs"] = template_kwargs
         body.update(extra or {})
         begin = time.monotonic()
         raw = self.request("/v1/chat/completions", body, timeout)
@@ -368,6 +414,72 @@ class LlamaServer:
         return False
 
 
+def _kill_with_parent(process):
+    """Windows: put the server in a Job Object that closes with this app, so ending the app in Task Manager or
+    closing its console also ends llama-server. Best effort; POSIX relies on stop(), atexit and exit handlers."""
+    global _JOB
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        if _JOB is None:
+            job = kernel32.CreateJobObjectW(None, None)
+            if not job:
+                return
+
+            class _Limits(ctypes.Structure):
+                _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                            ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                            ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                            ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+                            ("SchedulingClass", wintypes.DWORD)]
+
+            class _ExtendedLimits(ctypes.Structure):
+                _fields_ = [("BasicLimitInformation", _Limits), ("IoInfo", ctypes.c_uint64 * 6),
+                            ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                            ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+            info = _ExtendedLimits()
+            info.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if not kernel32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+                kernel32.CloseHandle(job)
+                return
+            _JOB = job  # kept open for the app's lifetime; Windows closes it (and the servers) when the app ends
+        handle = kernel32.OpenProcess(0x0100 | 0x0001, False, process.pid)  # SET_QUOTA | TERMINATE
+        if handle:
+            kernel32.AssignProcessToJobObject(_JOB, handle)
+            kernel32.CloseHandle(handle)
+    except Exception:
+        pass
+
+
+_JOB = None
+
+
+def install_exit_handlers():
+    """Turn SIGTERM/SIGHUP (and SIGBREAK on Windows) into a normal exit so atexit stops every server. Call once from
+    the main thread (the CLI and the app do); elsewhere it does nothing."""
+    import signal
+    import sys
+    if threading.current_thread() is not threading.main_thread():
+        return
+
+    def handler(signum, _frame):
+        sys.exit(128 + signum)
+
+    for name in ("SIGTERM", "SIGHUP", "SIGBREAK"):
+        number = getattr(signal, name, None)
+        if number is not None and signal.getsignal(number) in (signal.SIG_DFL, None):
+            try:
+                signal.signal(number, handler)
+            except (OSError, ValueError):
+                pass
+
+
 @atexit.register
 def _stop_all():
     for server in list(_LIVE):
@@ -390,8 +502,11 @@ def _vram_by_pid(timeout=5):
     usage = {}
     for line in completed.stdout.splitlines():
         parts = [part.strip() for part in line.split(",")]
-        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-            usage[int(parts[0])] = usage.get(int(parts[0]), 0) + int(parts[1]) * 1024**2
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        if not parts[1].isdigit():
+            return None  # "[N/A]" (Windows WDDM): no per-process numbers at all
+        usage[int(parts[0])] = usage.get(int(parts[0]), 0) + int(parts[1]) * 1024**2
     return usage
 
 
@@ -436,8 +551,9 @@ class PeakMemory:
                 self._vram_ok = False
             else:
                 pids = {p.pid for p in processes}
-                total = sum(value for pid, value in usage.items() if pid in pids)
-                self.peak_vram = max(self.peak_vram or 0, total)
+                ours = [value for pid, value in usage.items() if pid in pids]
+                if ours:  # not listed (yet, or at all, e.g. inside a container): unknown, never 0
+                    self.peak_vram = max(self.peak_vram or 0, sum(ours))
 
     def _run(self):
         while not self._stop.is_set():
@@ -482,9 +598,10 @@ class ServerRegistry:
                 with self._state:
                     self._starting = None
                 raise
-            except ValueError as error:
+            except BaseException as error:  # never leave "starting" set, whatever went wrong
+                message = str(error) if isinstance(error, ValueError) else "The model server could not be started."
                 with self._state:
-                    self._starting, self._error = None, str(error)
+                    self._starting, self._error = None, message
                 raise
             with self._state:
                 self._server, self._starting = server, None

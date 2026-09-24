@@ -15,7 +15,9 @@ Environment knobs (all optional):
   FAKE_LLAMA_SLEEP=<float>          really sleep for this fraction of the reported compute time (default 0)
   FAKE_LLAMA_REPLY=<text>           reply with exactly this text (to test reply checks)
   FAKE_LLAMA_REASONING=1            emit a thinking section (reasoning_content) unless enable_thinking is false
-  FAKE_LLAMA_BUILD=<int>, FAKE_LLAMA_COMMIT=<hex>, FAKE_LLAMA_VERSION_STYLE=classic|new
+  FAKE_LLAMA_GPU=none               a CPU-only build: no GPU devices, the real "no usable GPU" warnings, CPU speeds
+  FAKE_LLAMA_BUILD=<int>, FAKE_LLAMA_COMMIT=<hex>, FAKE_LLAMA_VERSION_STYLE=new|classic (default new, as current
+  llama.cpp prints it: "version: 0.1.0-dev (build N, commit HASH)"; classic is "version: N (HASH)")
 """
 import ast
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -33,9 +35,11 @@ import time
 import zlib
 
 BUILD = int(os.environ.get("FAKE_LLAMA_BUILD", "6512"))
-COMMIT = os.environ.get("FAKE_LLAMA_COMMIT", "fa4ec0de")
-COMPILER = "cc (GCC) 13.2.0"
-TARGET = "x86_64-linux-gnu" if os.name != "nt" else "x86_64-w64-mingw32"
+COMMIT = os.environ.get("FAKE_LLAMA_COMMIT", "fa4ec0d")
+COMPILER = "GNU 13.3.0"
+# Current llama.cpp prints "<CMAKE_SYSTEM_NAME> <CMAKE_SYSTEM_PROCESSOR>" as the build target.
+TARGET = {"nt": "Windows AMD64"}.get(os.name, "Darwin arm64" if sys.platform == "darwin" else "Linux x86_64")
+_STARTED = time.monotonic()
 KNOWN_ARCHITECTURES = {"llama", "llama4", "qwen2", "qwen2moe", "qwen3", "qwen3moe", "gemma", "gemma2", "gemma3",
                        "gemma3n", "phi3", "granite", "granitemoe", "olmo2", "gpt-oss", "mistral3", "deepseek2",
                        "command-r", "starcoder2", "falcon", "glm4", "glm4moe", "smollm3"}
@@ -48,6 +52,21 @@ QUANT_KLD = [("IQ1", 0.9), ("Q2_K", 0.25), ("IQ2", 0.3), ("Q3_K", 0.09), ("IQ3",
 def log(line=""):
     sys.stderr.write(line + "\n")
     sys.stderr.flush()
+
+
+def stamp(level, line):
+    """A log line with llama.cpp's elapsed-time prefix, for example "0.00.034.765 I srv  llama_server: ..."."""
+    log(f"{elapsed()} {level} {line}")
+
+
+def elapsed():
+    """llama.cpp's log prefix: minutes.seconds.milliseconds.microseconds since start."""
+    us = int((time.monotonic() - _STARTED) * 1e6)
+    return f"{us // 60000000}.{us // 1000000 % 60:02d}.{us // 1000 % 1000:03d}.{us % 1000:03d}"
+
+
+def cpu_only_build():
+    return os.environ.get("FAKE_LLAMA_GPU", "").lower() == "none"
 
 
 def fail(lines, code=1):
@@ -158,10 +177,11 @@ def model_error(info_errors, extra=()):
     if errors:
         return errors + list(extra)
     if os.environ.get("FAKE_LLAMA_FAIL") == "corrupt":
-        return ["gguf_init_from_reader: invalid magic characters: 'GGUJ', expected 'GGUF'"] + list(extra)
+        return ["llama_model_load: error loading model: tensor 'blk.1.ffn_down.weight' data is not within the file "
+                "bounds, model is corrupted or incomplete"] + list(extra)
     arch = "made-up-arch" if os.environ.get("FAKE_LLAMA_FAIL") == "arch" else info["architecture"]
     if arch not in KNOWN_ARCHITECTURES:
-        return [f"llama_model_load: error loading model: error loading model hyperparameters: unknown model architecture: '{arch}'"] + list(extra)
+        return [f"llama_model_load: error loading model: unknown model architecture: '{arch}'"] + list(extra)
     return []
 
 
@@ -318,11 +338,23 @@ def generate(prompt_text, last_user, n_predict, stop=None, reasoning=False):
 
 # ---------------------------------------------------------------- argument parsing
 
+REMOVED = {"--draft": "use --spec-draft-n-max or --spec-ngram-mod-n-max",
+           "--draft-n": "use --spec-draft-n-max or --spec-ngram-mod-n-max",
+           "--draft-max": "use --spec-draft-n-max or --spec-ngram-mod-n-max",
+           "--draft-min": "use --spec-draft-n-min or --spec-ngram-mod-n-min",
+           "--draft-n-min": "use --spec-draft-n-min or --spec-ngram-mod-n-min",
+           "--spec-ngram-size-n": "use the respective --spec-ngram-*-size-n or --spec-ngram-mod-n-match"}
+
+
 def parse(args, value_flags, bool_flags, program):
     """{canonical: value}. Unknown flags fail the way llama.cpp's common arg parser does."""
     options, i = {}, 0
     while i < len(args):
         arg = args[i]
+        if arg in REMOVED and program != "llama-bench":
+            fail([f"error while handling argument \"{arg}\": the argument has been removed. {REMOVED[arg]}", "",
+                  "usage:", f"{arg} N    the argument has been removed. {REMOVED[arg]}", "", "",
+                  "to show complete usage, run with -h"])
         name = value_flags.get(arg) or bool_flags.get(arg)
         if name is None:
             fail([f"error: invalid argument: {arg}"])
@@ -354,21 +386,43 @@ def fa_value(text, flag="-fa"):
 
 
 def version():
-    style = os.environ.get("FAKE_LLAMA_VERSION_STYLE", "classic")
-    if style == "new":
-        log(f"version: 0.5.0 (build {BUILD}, commit {COMMIT})")
-    else:
+    if os.environ.get("FAKE_LLAMA_VERSION_STYLE", "new") == "classic":
         log(f"version: {BUILD} ({COMMIT})")
-    log(f"built with {COMPILER} for {TARGET}")
+        log(f"built with cc (GCC) 13.2.0 for {'x86_64-w64-mingw32' if os.name == 'nt' else 'x86_64-linux-gnu'}")
+    else:
+        log(f"version: 0.1.0-dev (build {BUILD}, commit {COMMIT})")
+        log(f"built with {COMPILER} for {TARGET}")
     sys.exit(0)
 
 
+def no_gpu():
+    return cpu_only_build() or os.environ.get("FAKE_LLAMA_FAIL") == "backend"
+
+
+def list_devices():
+    """`--list-devices` (llama-server, llama-perplexity, llama-cli, llama-bench): stdout, exit 0."""
+    print("Available devices:")
+    if no_gpu():
+        print("  (none)")
+    else:
+        print("  CUDA0: Fake GPU 24GB (24564 MiB, 23512 MiB free)")
+    sys.stdout.flush()
+    sys.exit(0)
+
+
+def gpu_warnings(args):
+    """Real llama.cpp prints these while parsing -ngl on a build or machine without a usable GPU, before any
+    other argument error, and whatever the -ngl value is."""
+    if no_gpu() and any(a in ("-ngl", "--gpu-layers", "--n-gpu-layers") for a in args):
+        log("warning: no usable GPU found, --gpu-layers option will be ignored")
+        log("warning: one possible reason is that llama.cpp was compiled without GPU support")
+        log("warning: consult docs/build.md for compilation instructions")
+
+
 def backend_banner(s):
-    if os.environ.get("FAKE_LLAMA_FAIL") == "backend":
-        log("ggml_cuda_init: failed to initialize CUDA: no CUDA-capable device is detected")
-        if s["ngl"] != 0:
-            log("warning: no usable GPU found, --gpu-layers option will be ignored")
-            log("warning: one possible reason is that llama.cpp was compiled without GPU support")
+    if no_gpu():
+        if os.environ.get("FAKE_LLAMA_FAIL") == "backend":
+            log("ggml_cuda_init: failed to initialize CUDA: no CUDA-capable device is detected")
         s["cpu_only"] = True
         return
     log("ggml_cuda_init: found 1 CUDA devices:")
@@ -378,7 +432,7 @@ def backend_banner(s):
 def check_device(options, s):
     device = options.get("device")
     if device and device.lower() != "none":
-        if os.environ.get("FAKE_LLAMA_FAIL") == "backend" or not re.fullmatch(r"(CUDA|Vulkan|ROCm|Metal|SYCL)\d*(,\S+)*", device):
+        if no_gpu() or not re.fullmatch(r"(CUDA|Vulkan|ROCm|Metal|SYCL)\d*(,\S+)*", device):
             fail([f"error while handling argument \"-dev\": invalid device: {device}", ""])
     if device and device.lower() == "none":
         s["cpu_only"] = True
@@ -390,7 +444,10 @@ COMMON_VALUES = {"-m": "model", "--model": "model", "-c": "ctx", "--ctx-size": "
                  "-fa": "fa", "--flash-attn": "fa", "-ctk": "ctk", "--cache-type-k": "ctk", "-ctv": "ctv",
                  "--cache-type-v": "ctv", "--n-cpu-moe": "ncmoe", "-ncmoe": "ncmoe", "-dev": "device",
                  "--device": "device", "-s": "seed", "--seed": "seed", "-md": "draft", "--model-draft": "draft",
-                 "--draft-max": "draft_max", "--draft-min": "draft_min", "-tb": "threads_batch",
+                 "--spec-draft-model": "draft", "--spec-draft-n-max": "draft_max", "--spec-draft-n-min": "draft_min",
+                 "--spec-type": "spec_type", "-lm": "load_mode", "--load-mode": "load_mode", "-fit": "fit",
+                 "--fit": "fit", "-lv": "verbosity", "--verbosity": "verbosity", "--log-verbosity": "verbosity",
+                 "-tb": "threads_batch",
                  "--threads-batch": "threads_batch", "-sm": "split_mode", "--split-mode": "split_mode",
                  "-mg": "main_gpu", "--main-gpu": "main_gpu", "-ts": "tensor_split", "--tensor-split": "tensor_split",
                  "--log-file": "log_file", "-ot": "override_tensor", "--override-tensor": "override_tensor",
@@ -416,6 +473,7 @@ def settings(options, default_threads=None):
 SERVER_VALUES = {**COMMON_VALUES, "--host": "host", "--port": "port", "-np": "parallel", "--parallel": "parallel",
                  "--alias": "alias", "-a": "alias", "-to": "timeout", "--timeout": "timeout",
                  "--api-key": "api_key", "--reasoning-format": "reasoning_format", "--chat-template": "chat_template",
+                 "--cors-origins": "cors_origins",
                  "--threads-http": "threads_http", "--slot-save-path": "slot_save_path", "-kvu": "kv_unified_value"}
 SERVER_BOOLS = {**COMMON_BOOLS, "--jinja": "jinja", "--no-jinja": "no_jinja", "--metrics": "metrics",
                 "--no-webui": "no_webui", "--slots": "slots", "--no-slots": "no_slots", "--kv-unified": "kv_unified",
@@ -433,10 +491,19 @@ class State:
         self.parallel = parallel
         self.model_path = options["model"]
         self.alias = options.get("alias") or self.model_path
+        self.cors = options.get("cors_origins") or os.environ.get("LLAMA_ARG_CORS_ORIGINS") or "*"
+        self.api_key = options.get("api_key") or os.environ.get("LLAMA_API_KEY")
+        types = [t for t in (options.get("spec_type") or "none").split(",") if t != "none"]
+        self.speculative = bool(options.get("draft")) and "draft-simple" in types
+        self.draft_max = as_int(options, "draft_max", 3, "--spec-draft-n-max")
 
 
-def server_log(func, message):
-    log(f"srv  {func[-12:]:>12}: {message}")
+def server_log(func, message, level="I"):
+    stamp(level, f"srv  {func[-12:]:>12}: {message}")
+
+
+SPEC_TYPES = {"none", "draft-simple", "draft-eagle3", "draft-mtp", "draft-dflash", "draft-dspark", "ngram-simple",
+              "ngram-map-k", "ngram-map-k4v", "ngram-mod", "ngram-cache"}
 
 
 def timings(state, prompt_ids, cache_prompt, n_predicted):
@@ -453,12 +520,16 @@ def timings(state, prompt_ids, cache_prompt, n_predicted):
     prompt_ms = prompt_n / pp * 1000
     predicted_ms = n_predicted / tg * 1000
     pause((prompt_ms + predicted_ms) / 1000)
+    extra = {}
+    if state.speculative and n_predicted:
+        drafted = min(n_predicted, state.draft_max * max(1, n_predicted // (state.draft_max + 1)))
+        extra = {"draft_n": drafted, "draft_n_accepted": drafted}
     return {"cache_n": cached, "prompt_n": prompt_n, "prompt_ms": round(prompt_ms, 3),
             "prompt_per_token_ms": round(prompt_ms / prompt_n, 6) if prompt_n else 0.0,
             "prompt_per_second": round(prompt_n / prompt_ms * 1000, 6) if prompt_ms else 0.0,
             "predicted_n": n_predicted, "predicted_ms": round(predicted_ms, 3),
             "predicted_per_token_ms": round(predicted_ms / n_predicted, 6) if n_predicted else 0.0,
-            "predicted_per_second": round(n_predicted / predicted_ms * 1000, 6) if predicted_ms else 0.0}
+            "predicted_per_second": round(n_predicted / predicted_ms * 1000, 6) if predicted_ms else 0.0, **extra}
 
 
 def error_body(code, message, kind, **extra):
@@ -478,9 +549,30 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.cors_headers()
         self.end_headers()
         self.wfile.write(data)
+
+    def cors_headers(self):
+        """--cors-origins / LLAMA_ARG_CORS_ORIGINS: '*' (default) echoes any Origin, 'localhost' only local pages."""
+        origin = self.headers.get("Origin")
+        if not origin:
+            return
+        allowed = self.state.cors if self.state else "*"
+        host = re.sub(r"^[a-z]+://", "", origin.lower()).split("/")[0].rsplit(":", 1)[0].strip("[]")
+        if allowed == "*" or (allowed == "localhost" and host in ("localhost", "127.0.0.1", "::1")) \
+                or origin in allowed.split(","):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Credentials", "true")
+
+    def authorised(self, path):
+        key = self.state.api_key if self.state else None
+        if not key or path in ("/health", "/v1/health", "/models", "/v1/models"):
+            return True
+        if self.headers.get("Authorization") == f"Bearer {key}":
+            return True
+        self.send_json(*error_body(401, "Invalid API Key", "authentication_error"))
+        return False
 
     def body(self):
         length = int(self.headers.get("Content-Length") or 0)
@@ -500,24 +592,48 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
-        if not self.gate():
+        if not self.gate() or not self.authorised(path):
             return
         state = self.state
         if path in ("/health", "/v1/health"):
             return self.send_json(200, {"status": "ok"})
         if path in ("/v1/models", "/models"):
-            return self.send_json(200, {"object": "list", "data": [
-                {"id": state.alias, "object": "model", "created": int(time.time()), "owned_by": "llamacpp",
-                 "meta": {"n_ctx_train": state.info["context_length"], "n_vocab": 151936}}]})
+            name, ftype = state.alias, quant_name(state.model_path)
+            return self.send_json(200, {
+                "models": [{"name": name, "model": name, "modified_at": "", "size": "", "digest": "", "type": "model",
+                            "description": "", "tags": [""], "capabilities": ["completion"], "parameters": "",
+                            "details": {"parent_model": "", "format": "gguf", "family": "", "families": [""],
+                                        "parameter_size": "", "quantization_level": ""}}],
+                "object": "list",
+                "data": [{"id": name, "aliases": [name], "tags": [], "object": "model", "created": int(time.time()),
+                          "owned_by": "llamacpp",
+                          "meta": {"vocab_type": 2, "n_vocab": 151936, "n_ctx": state.s["ctx"],
+                                   "n_ctx_train": state.info["context_length"], "n_embd": 4096,
+                                   "n_params": 8030261248, "size": 4920733696, "ftype": ftype}}]})
         if path == "/props":
-            return self.send_json(200, {"default_generation_settings": {"n_ctx": state.n_ctx_slot},
-                                        "total_slots": state.parallel, "model_path": state.model_path,
-                                        "build_info": f"b{BUILD}-{COMMIT}"})
+            return self.send_json(200, {
+                "default_generation_settings": {"params": {"seed": 4294967295, "temperature": 0.8, "top_k": 40,
+                                                           "top_p": 0.95, "min_p": 0.05, "n_predict": -1,
+                                                           "speculative.types": state.options.get("spec_type", "none")},
+                                                "n_ctx": state.n_ctx_slot},
+                "total_slots": state.parallel, "model_alias": state.alias, "model_ftype": quant_name(state.model_path),
+                "model_path": state.model_path, "modalities": {"vision": False, "video": False, "audio": False},
+                "endpoint_slots": True, "endpoint_props": False, "endpoint_metrics": False,
+                "chat_template_caps": {"supports_preserve_reasoning": False, "supports_reasoning_effort": False,
+                                       "supports_system_role": True, "supports_tools": False},
+                "build_info": f"b{BUILD}-{COMMIT}"})
         self.send_json(*error_body(404, "File Not Found", "not_found_error"))
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.cors_headers()
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def do_POST(self):
         path = self.path.split("?")[0]
-        if not self.gate():
+        if not self.gate() or not self.authorised(path):
             return
         body = self.body()
         if body is None:
@@ -566,7 +682,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.stream([{"choices": [{"finish_reason": None, "index": 0, "delta": {"role": "assistant", "content": None}}]},
                                 *({"choices": [{"finish_reason": None, "index": 0, "delta": {"content": piece}}]}
                                   for piece in tokenize(text)[1]),
-                                {"choices": [{"finish_reason": finish, "index": 0, "delta": {}}], "usage": usage, "timings": t}],
+                                {"choices": [{"finish_reason": finish, "index": 0, "delta": {}}]},
+                                {"choices": [], "usage": usage, "timings": t}],
                                {"created": created, "id": ident, "model": self.state.alias,
                                 "system_fingerprint": f"b{BUILD}-{COMMIT}", "object": "chat.completion.chunk"}, done=True)
         self.send_json(200, {"choices": [{"finish_reason": finish, "index": 0, "message": message}], "created": created,
@@ -626,61 +743,67 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def run_server(args):
+    gpu_warnings(args)
     options = parse(args, SERVER_VALUES, SERVER_BOOLS, "llama-server")
     if "model" not in options:
         fail(["error: --model is required (or use -hf to download a model)"])
     s = settings(options)
     check_device(options, s)
+    for kind in (options.get("spec_type") or "none").split(","):
+        if kind not in SPEC_TYPES:
+            fail([f"error while handling argument \"--spec-type\": unknown speculative decoding type: {kind}", ""])
     host, port = options.get("host", "127.0.0.1"), as_int(options, "port", 8080, "--port")
-    log(f"build: {BUILD} ({COMMIT}) with {COMPILER} for {TARGET}")
     backend_banner(s)
-    log(f"system info: n_threads = {s['threads']}, n_threads_batch = {s['threads']}, total_threads = 16")
-    log("")
-    server_log("main", "binding port with default address family")
+    stamp("I", "cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)")
     state = State(options, s, {"architecture": "llama", "layers": 32, "experts": 0, "context_length": 32768})
+    if state.cors == "*" and not state.api_key:
+        for line in ["-----------------", "CORS is set to allow all origins ('*') and no API key is set",
+                     "this can be a security risk (cross-origin attacks)",
+                     "more info: https://github.com/ggml-org/llama.cpp/pull/25655", "-----------------"]:
+            server_log("llama_server", line, "W")
     Handler.state = state
     try:
         httpd = ThreadingHTTPServer((host, port), Handler)
     except OSError:
         httpd = None
     if httpd is None or os.environ.get("FAKE_LLAMA_FAIL") == "port":
-        fail([f"srv          start: couldn't bind HTTP server socket, hostname: {host}, port: {port}",
-              "srv          main: exiting due to HTTP server error"])
+        server_log("start", f"couldn't bind HTTP server socket, hostname: {host}, port: {port}", "E")
+        server_log("operator()", "operator(): cleaning up before exit...")
+        server_log("llama_server", "exiting due to HTTP server error", "E")
+        sys.exit(1)
     httpd.daemon_threads = True
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    server_log("main", f"HTTP server is listening, hostname: {host}, port: {port}, http threads: 15")
-    server_log("main", "loading model")
-    server_log("load_model", f"loading model '{options['model']}'")
+    model = options["model"]
+    server_log("load_model", f"loading model '{model}'")
     time.sleep(max(0.0, env_float("FAKE_LLAMA_LOAD_SECONDS", 0.2)))
-    loaded = read_gguf(options["model"])
-    tail = ["llama_model_load_from_file_impl: failed to load model",
-            f"common_init_from_params: failed to load model '{options['model']}'",
-            f"srv    load_model: failed to load model, '{options['model']}'",
-            "srv    operator(): operator(): cleaning up before exit...",
-            "main: exiting due to model loading error"]
+
+    def load_failed(lines, what="load model"):
+        httpd.server_close()
+        for line in lines:
+            stamp("E", line)
+        verb = "create context with" if what == "context" else "load"
+        stamp("E", f"cmn  common_init_: failed to {verb} model '{model}'")
+        server_log("load_model", f"failed to {'create_context with model' if what == 'context' else 'load model,'} '{model}'", "E")
+        server_log("operator()", "operator(): cleaning up before exit...")
+        server_log("llama_server", "exiting due to model loading error", "E")
+        sys.exit(1)
+
+    loaded = read_gguf(model)
     errors = model_error(loaded)
+    if not errors and options.get("draft"):
+        errors = model_error(read_gguf(options["draft"]))
     if errors:
-        httpd.server_close()
-        fail(errors + tail)
+        load_failed(errors + ["llama_model_load_from_file_impl: failed to load model"])
     state.info = loaded[0]
-    log(f"llama_model_loader: loaded meta data with 30 key-value pairs and 0 tensors from {options['model']} (version GGUF V3 (latest))")
-    layers = state.info["layers"]
-    on_gpu = 0 if s.get("cpu_only") else (layers + 1 if s["ngl"] < 0 else min(s["ngl"], layers + 1))
-    log(f"load_tensors: offloaded {on_gpu}/{layers + 1} layers to GPU")
-    if gpu_oom(s, layers):
-        httpd.server_close()
-        fail(oom_lines(s) + tail)
+    if gpu_oom(s, state.info["layers"]):
+        load_failed(oom_lines(s) + ["llama_model_load_from_file_impl: failed to load model"])
     if s["ctv"] != "f16" and s["fa"] == "off":
-        httpd.server_close()
-        fail(["llama_init_from_model: V cache quantization requires flash_attn",
-              f"common_init_from_params: failed to create context with model '{options['model']}'"] + tail[2:])
-    log(f"llama_context: n_ctx         = {s['ctx']}")
-    log(f"llama_context: n_ctx_per_seq = {state.n_ctx_slot}")
-    log(f"llama_context: flash_attn    = {'enabled' if s['fa'] != 'off' else 'disabled'}")
-    server_log("init", f"initializing slots, n_slots = {state.parallel}")
-    server_log("main", "model loaded")
-    server_log("main", f"listening on http://{host}:{port}")
-    server_log("update_slots", "all slots are idle")
+        load_failed(["llama_init_from_model: quantized V cache requires flash_attn to be enabled"], "context")
+    stamp("I", f"cmn          init: llama threadpool init, n_threads = {s['threads']}")
+    server_log("load_model", f"initializing, n_slots = {state.parallel}, n_ctx_slot = {state.n_ctx_slot}, "
+                             f"kv_unified = '{'true' if options.get('kv_unified') else 'false'}'")
+    server_log("llama_server", "model loaded")
+    server_log("llama_server", f"listening on http://{host}:{port}")
     state.loading = False
     try:
         while True:
@@ -698,16 +821,17 @@ BENCH_LISTS = {"-m": "model", "--model": "model", "-p": "n_prompt", "--n-prompt"
                "--ubatch-size": "ubatch", "-fa": "fa", "--flash-attn": "fa", "-ctk": "ctk", "--cache-type-k": "ctk",
                "-ctv": "ctv", "--cache-type-v": "ctv", "-ncmoe": "ncmoe", "--n-cpu-moe": "ncmoe",
                "-sm": "split_mode", "-mg": "main_gpu", "-nkvo": "nkvo", "-dev": "device", "--device": "device",
-               "-mmp": "mmap", "--mmap": "mmap", "-ts": "tensor_split"}
+               "-mmp": "mmap", "--mmap": "mmap", "-lm": "load_mode", "--load-mode": "load_mode", "-ts": "tensor_split"}
 BENCH_SINGLE = {"-r": "reps", "--repetitions": "reps", "-o": "output", "--output": "output", "-oe": "output_err",
                 "--delay": "delay", "--prio": "prio"}
 BENCH_BOOLS = {"-v": "verbose", "--verbose": "verbose", "--progress": "progress", "--no-warmup": "no_warmup",
                "-h": "help", "--help": "help"}
-BENCH_ORDER = ["model", "ngl", "ncmoe", "split_mode", "main_gpu", "device", "batch", "ubatch", "ctk", "ctv",
-               "nkvo", "fa", "threads", "n_depth"]
+BENCH_ORDER = ["model", "ngl", "ncmoe", "split_mode", "main_gpu", "device", "load_mode", "batch", "ubatch", "ctk",
+               "ctv", "nkvo", "fa", "threads", "n_depth"]
 BENCH_DEFAULTS = {"n_prompt": "512", "n_gen": "128", "n_depth": "0", "ngl": "-1", "threads": "4", "batch": "2048",
                   "ubatch": "512", "fa": "auto", "ctk": "f16", "ctv": "f16", "ncmoe": "0", "split_mode": "layer",
-                  "main_gpu": "0", "nkvo": "0", "device": "auto", "mmap": "1", "tensor_split": "0.00"}
+                  "main_gpu": "0", "nkvo": "0", "device": "auto", "load_mode": "auto", "tensor_split": "0.00"}
+LOAD_MODES = {"auto", "none", "mmap", "mlock", "mmap+mlock", "dio"}
 RANGED = {"n_prompt", "n_gen", "n_depth", "batch", "ubatch", "threads", "ngl", "ncmoe", "main_gpu"}
 
 
@@ -729,14 +853,30 @@ def expand(name, text):
     return values
 
 
+def bench_usage():
+    print(f"usage: {sys.argv[0]} [options]\n\noptions:\n  -h, --help\n"
+          "  -r, --repetitions <n>                       number of times to repeat each test (default: 5)\n"
+          "  -o, --output <csv|json|jsonl|md|sql>        output format printed to stdout (default: md)\n"
+          "  --list-devices                              list available devices and exit\n"
+          "  -v, --verbose                               verbose output\n")
+    sys.stdout.flush()
+
+
+def bench_fail(*lines):
+    """Argument errors: real llama-bench prints its usage on stdout and the error on stderr, exit 1."""
+    bench_usage()
+    fail(list(lines))
+
+
 def run_bench(args):
-    lists, single, i = {}, {}, 0
+    lists, single, flags, i = {}, {}, set(), 0
     while i < len(args):
         arg = args[i]
         if arg in BENCH_BOOLS:
             if BENCH_BOOLS[arg] == "help":
-                print("usage: llama-bench [options]")
+                bench_usage()
                 sys.exit(0)
+            flags.add(BENCH_BOOLS[arg])
             i += 1
             continue
         if arg == "-pg" and i + 1 < len(args):
@@ -744,9 +884,22 @@ def run_bench(args):
             i += 2
             continue
         if arg not in BENCH_LISTS and arg not in BENCH_SINGLE:
-            fail([f"error: invalid parameter for argument: {arg}", "", "usage: llama-bench [options]"])
+            bench_fail(f"error: invalid parameter for argument: {arg}")
         if i + 1 >= len(args):
-            fail([f"error: invalid parameter for argument: {arg}"])
+            bench_fail(f"error: invalid parameter for argument: {arg}")
+        if arg in ("-mmp", "--mmap"):  # deprecated; real llama-bench maps it onto --load-mode
+            lists.setdefault("load_mode", []).extend("none" if v == "0" else "mmap" for v in args[i + 1].split(","))
+            i += 2
+            continue
+        if arg in ("-fa", "--flash-attn") and any(
+                v.lower() not in ("on", "off", "auto", "1", "0", "-1", "true", "false", "enabled", "disabled")
+                for v in args[i + 1].split(",")):
+            bench_fail(f"error: invalid parameter for argument: {arg}")
+        if arg in ("-dev", "--device"):
+            for device in args[i + 1].split(","):
+                if device not in ("none", "auto") and (no_gpu() or not re.fullmatch(
+                        r"(CUDA|Vulkan|ROCm|Metal|SYCL)\d*(/\S+)*", device)):
+                    bench_fail(f"error: invalid device: {device}", f"error: invalid parameter for argument: {arg}")
         if arg in BENCH_LISTS:
             lists.setdefault(BENCH_LISTS[arg], []).extend(expand(BENCH_LISTS[arg], args[i + 1]))
         else:
@@ -767,7 +920,9 @@ def run_bench(args):
         fail([f"error: invalid parameter for argument: -o {output}"])
     for ctype in lists["ctk"] + lists["ctv"]:
         if ctype not in CACHE_TYPES:
-            fail([f"error: invalid parameter for argument: {ctype}"])
+            bench_fail(f"error: invalid parameter for argument: {'-ctk' if ctype in lists['ctk'] else '-ctv'}")
+    if any(mode not in LOAD_MODES for mode in lists["load_mode"]):
+        bench_fail("error: invalid parameter for argument: -lm")
     lists.update(numbers)
     lists["fa"] = fa_values
     tests = [(p, 0) for p in lists["n_prompt"] if p] + [(0, n) for n in lists["n_gen"] if n]
@@ -779,28 +934,32 @@ def run_bench(args):
     for key in BENCH_ORDER:
         rows = [{**row, key: value} for row in rows for value in lists[key]]
     printer = Printer(output)
-    backend = "CPU" if os.environ.get("FAKE_LLAMA_FAIL") == "backend" else "CUDA"
+    backend = "CPU" if no_gpu() else "CUDA"
+    verbose = "verbose" in flags
+
+    def load_error(details, what):
+        # Without -v real llama-bench silences llama.cpp's own log, so the cause (out of memory, unknown
+        # architecture, ...) is NOT on stderr: only this one line, with the path exactly as given.
+        printer.abort()
+        fail((details if verbose else []) + [f"llama_bench: error: failed to {what} '{row['model']}'"])
+
     loaded = {}
     for row in rows:
         if row["model"] not in loaded:
             info_errors = read_gguf(row["model"])
             errors = model_error(info_errors)
             if errors:
-                fail(errors + ["llama_model_load_from_file_impl: failed to load model",
-                               f"main: error: failed to load model '{row['model']}'"])
+                load_error(errors + ["llama_model_load_from_file_impl: failed to load model"], "load model")
             loaded[row["model"]] = info_errors[0]
         info = loaded[row["model"]]
         s = {"threads": row["threads"], "ngl": row["ngl"], "batch": row["batch"], "ubatch": row["ubatch"],
              "fa": row["fa"], "ctk": row["ctk"], "ctv": row["ctv"], "ncmoe": row["ncmoe"],
              "cpu_only": backend == "CPU" or row["device"] == "none"}
         if gpu_oom(s, info["layers"]):
-            printer.abort()
-            fail(oom_lines(s) + ["llama_model_load_from_file_impl: failed to load model",
-                                 f"main: error: failed to load model '{row['model']}'"])
+            load_error(oom_lines(s) + ["llama_model_load_from_file_impl: failed to load model"], "load model")
         if s["ctv"] != "f16" and s["fa"] == "off":
-            printer.abort()
-            fail(["llama_init_from_model: V cache quantization requires flash_attn",
-                  f"main: error: failed to create context with model '{row['model']}'"])
+            load_error(["llama_init_from_model: quantized V cache requires flash_attn to be enabled"],
+                       "create context with model")
         for n_prompt, n_gen in tests:
             pp, tg = speeds(s, info, depth=row["n_depth"] + n_prompt // 2 if n_gen else row["n_depth"])
             if n_prompt and n_gen:
@@ -825,7 +984,7 @@ def run_bench(args):
                 "n_cpu_moe": row["ncmoe"], "split_mode": row["split_mode"], "main_gpu": row["main_gpu"],
                 "no_kv_offload": row["nkvo"] not in ("0", "false"), "flash_attn": {"on": 1, "off": 0, "auto": -1}[row["fa"]],
                 "devices": row["device"], "tensor_split": "0.00", "tensor_buft_overrides": "none",
-                "load_mode": "mmap" if lists["mmap"][0] != "0" else "none", "lazy_mode": "none",
+                "load_mode": row["load_mode"],
                 "embeddings": False, "no_op_offload": 0, "no_host": False, "fit_target": 0, "fit_min_ctx": 0,
                 "n_prompt": n_prompt, "n_gen": n_gen, "n_depth": row["n_depth"],
                 "test_time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "avg_ns": avg_ns,
@@ -883,6 +1042,13 @@ PPL_VALUES = {**COMMON_VALUES, "-f": "file", "--file": "file", "--chunks": "chun
 PPL_BOOLS = {**COMMON_BOOLS, "--kl-divergence": "kld", "--hellaswag": "hellaswag", "--ppl-stride": "ppl_stride"}
 
 
+def s_batch(options):
+    try:
+        return int(options.get("batch", 2048))
+    except ValueError:
+        return 2048
+
+
 def quant_name(path):
     match = re.search(r"(I?Q\d_[A-Z0-9_]+|MXFP4|BF16|F16|F32)", Path(path).name.upper())
     return match.group(1) if match else "Q4_K - Medium"
@@ -900,8 +1066,8 @@ def run_perplexity(args):
     s = settings(options)
     n_ctx = s["ctx"] if "ctx" in options else 512
     check_device(options, s)
-    log(f"build: {BUILD} ({COMMIT}) with {COMPILER} for {TARGET}")
     backend_banner(s)
+    stamp("I", f"cmn          init: llama threadpool init, n_threads = {s['threads']}")
     loaded = read_gguf(options["model"])
     errors = model_error(loaded)
     if errors:
@@ -918,7 +1084,9 @@ def run_perplexity(args):
     except OSError:
         fail([f"error: failed to open file '{options['file']}'"])
     ids, _ = tokenize(text)
-    log(f"perplexity: tokenizing the input ..")
+    if options.get("kld_base"):
+        stamp("I", f"perplexity: saving all logits to {options['kld_base']}")
+    stamp("I", "perplexity: tokenizing the input ..")
     if len(ids) < 2 * n_ctx:
         fail([f"perplexity: you need at least {2 * n_ctx} tokens to evaluate perplexity with a context of {n_ctx}",
               f"perplexity: the data file you provided tokenizes to only {len(ids)} tokens"])
@@ -927,9 +1095,10 @@ def run_perplexity(args):
         n_chunk = max(1, min(n_chunk, as_int(options, "chunks", n_chunk, "--chunks")))
     base = 6.0 + (zlib.crc32(Path(options["model"]).name.encode()) % 300) / 100
     ppl = base * (1 + quant_kld(options["model"]))
-    log(f"perplexity: calculating perplexity over {n_chunk} chunks, n_ctx={n_ctx}, batch_size={s['batch']}, n_seq=1")
+    stamp("I", f"perplexity: calculating perplexity over {n_chunk} chunks, n_ctx={n_ctx}, batch_size={min(s['batch'], n_ctx)}, n_seq=1")
+    eta_line()
     values = [ppl * (1 + 0.08 / (k + 1)) for k in range(n_chunk)]
-    sys.stdout.write(",".join(f"[{k + 1}]{v:.4f}" for k, v in enumerate(values)) + ",\n")
+    sys.stdout.write(",".join(f"[{k + 1}]{v:.4f}" for k, v in enumerate(values)) + ",\n\n")
     sys.stdout.flush()
     if options.get("kld_base"):
         payload = json.dumps({"ppl": ppl, "model": options["model"], "n_ctx": n_ctx}).encode()
@@ -938,9 +1107,16 @@ def run_perplexity(args):
             handle.write(b"_logits_" + struct.pack("<iii", n_ctx, 151936, n_chunk))
             handle.write(struct.pack(f"<{len(tokens)}i", *tokens))
             handle.write(struct.pack("<I", len(payload)) + payload)
-    log("")
-    log(f"Final estimate: PPL = {ppl:.4f} +/- {ppl * 0.012:.5f}")
+    stamp("I", f"Final estimate: PPL = {ppl:.4f} +/- {ppl * 0.012:.5f}")
     pause(n_chunk * n_ctx / speeds(s, loaded[0])[0])
+
+
+def eta_line(tool="perplexity"):
+    """Real llama-perplexity logs "... - ETA " on stderr without a newline and the minutes on stdout."""
+    sys.stderr.write(f"{elapsed()} I {tool}: 0.01 seconds per pass - ETA ")
+    sys.stderr.flush()
+    sys.stdout.write("0.00 minutes\n")
+    sys.stdout.flush()
 
 
 def kl_divergence(options, n_ctx):
@@ -969,7 +1145,9 @@ def kl_divergence(options, n_ctx):
     ln_ratio = math.log(ppl_q / ppl_base)
     same_top = 100.0 if same_model else max(50.0, 100 - 60 * math.sqrt(kld))
     rms_dp = 0.0 if same_model else 12 * math.sqrt(kld)
-    log(f"kl_divergence: {n_chunk} chunks, n_ctx={base_ctx}")
+    stamp("I", f"kl_divergence: computing over {n_chunk} chunks, n_ctx={base_ctx}, batch_size={s_batch(options)}, n_seq=1")
+    eta_line("kl_divergence")
+    print()
     print("chunk             PPL               ln(PPL(Q)/PPL(base))          KL Divergence              Δp RMS            Same top p")
     for k in range(n_chunk):
         f = 1 + 0.05 / (k + 1)
@@ -1057,7 +1235,11 @@ def main(argv):
     if mode not in MODES:
         fail([f"fake_llama: choose a mode with --as {'|'.join(MODES)}"], code=2)
     if "--version" in args:
+        if mode == "bench":  # real llama-bench has no --version: usage on stdout, error on stderr, exit 1
+            bench_fail("error: invalid parameter for argument: --version")
         version()
+    if "--list-devices" in args:
+        list_devices()
     MODES[mode](args)
 
 

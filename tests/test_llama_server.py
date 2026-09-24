@@ -20,7 +20,7 @@ from llm_configurator.llama_server import LlamaServer, PeakMemory, ServerRegistr
 FIELDS = ["build_commit", "build_number", "cpu_info", "gpu_info", "backends", "model_filename", "model_type", "model_size",
           "model_n_params", "n_batch", "n_ubatch", "n_threads", "cpu_mask", "cpu_strict", "poll", "type_k", "type_v",
           "n_gpu_layers", "n_cpu_moe", "split_mode", "main_gpu", "no_kv_offload", "flash_attn", "devices",
-          "tensor_split", "tensor_buft_overrides", "load_mode", "lazy_mode", "embeddings", "no_op_offload", "no_host",
+          "tensor_split", "tensor_buft_overrides", "load_mode", "embeddings", "no_op_offload", "no_host",
           "fit_target", "fit_min_ctx", "n_prompt", "n_gen", "n_depth", "test_time", "avg_ns", "stddev_ns", "avg_ts",
           "stddev_ts", "samples_ns", "samples_ts"]
 
@@ -66,9 +66,12 @@ class FailureParsingTests(unittest.TestCase):
             "gguf_init_from_reader: invalid magic characters: 'abcd', expected 'GGUF'": "damaged",
             "gguf_init_from_reader: failed to read magic": "damaged",
             "srv          start: couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 8080": "port",
-            "warning: no usable GPU found, --gpu-layers option will be ignored": "graphics card",
             "error while handling argument \"-dev\": invalid device: CUDA3": "graphics card",
+            "ggml_cuda_init: failed to initialize CUDA: no CUDA-capable device is detected": "graphics card",
             "llama_init_from_model: V cache quantization requires flash_attn": "flash attention",
+            "0.00.018.104 E llama_init_from_model: quantized V cache requires flash_attn to be enabled": "flash attention",
+            "error while handling argument \"--draft-max\": the argument has been removed. use --spec-draft-n-max":
+                "no longer accepts",
             "error: invalid argument: --made-up": "does not understand",
         }
         for text, expected in cases.items():
@@ -145,7 +148,12 @@ class PeakMemoryTests(unittest.TestCase):
         # WDDM drivers print [N/A] instead of numbers.
         na = subprocess.CompletedProcess([], 0, stdout=f"{os.getpid()}, [N/A]\n", stderr="")
         with mock.patch.object(llama_server.subprocess, "run", return_value=na):
-            self.assertEqual(PeakMemory(os.getpid(), gpu_backend="cuda").start().stop()["peak_vram_bytes"], 0)
+            self.assertIsNone(PeakMemory(os.getpid(), gpu_backend="cuda").start().stop()["peak_vram_bytes"])
+        # Our process not listed (e.g. inside a container) or no GPU work at all: unknown, not 0 bytes.
+        for output in ["", "99999999, 5000\n"]:
+            done = subprocess.CompletedProcess([], 0, stdout=output, stderr="")
+            with mock.patch.object(llama_server.subprocess, "run", return_value=done):
+                self.assertIsNone(PeakMemory(os.getpid(), gpu_backend="cuda").start().stop()["peak_vram_bytes"])
 
     def test_gone_process_reports_no_ram(self):
         self.assertIsNone(PeakMemory(99999999).start().stop()["peak_ram_bytes"])
@@ -296,7 +304,7 @@ class ServerTests(Base):
         self.servers.append(server)
         server.start()
         server.stop()
-        self.assertIn("main: model loaded", log.read_text())
+        self.assertRegex(log.read_text(), r"(?m)^\d+\.\d\d\.\d{3}\.\d{3} I srv  llama_server: model loaded$")
         temp = self.server().start()
         path = temp.log_path
         temp.stop()
@@ -511,8 +519,12 @@ class FakeBenchTests(Base):
         result = self.run_fake("bench", "-m", self.model, "-o", "json", "-ngl", "10,40", "-p", "0", "-n", "8", "-r", "1",
                                extra_env={"FAKE_LLAMA_MAX_GPU_LAYERS": "20"})
         self.assertEqual(result.returncode, 1)
-        self.assertIn("cudaMalloc failed: out of memory", result.stderr)
+        # Like real llama-bench without -v: the cause is not on stderr, just one line with the path as given.
+        self.assertEqual(result.stderr, f"llama_bench: error: failed to load model '{self.model}'\n")
         self.assertTrue(result.stdout.startswith("[\n"))
+        verbose = self.run_fake("bench", "-m", self.model, "-o", "json", "-ngl", "40", "-p", "0", "-n", "8", "-r", "1",
+                                "-v", extra_env={"FAKE_LLAMA_MAX_GPU_LAYERS": "20"})
+        self.assertIn("cudaMalloc failed: out of memory", verbose.stderr)
         self.assertNotIn("]", result.stdout.rstrip()[-1:])
         self.assertIn('"n_gpu_layers": 10', result.stdout)
 
@@ -520,7 +532,8 @@ class FakeBenchTests(Base):
         self.assertEqual(self.run_fake("bench", "--made-up", "1").returncode, 1)
         missing = self.run_fake("bench", "-m", str(self.dir / "nope.gguf"), "-o", "json")
         self.assertEqual(missing.returncode, 1)
-        self.assertIn("No such file or directory", missing.stderr)
+        self.assertEqual(missing.stderr, f"llama_bench: error: failed to load model '{self.dir / 'nope.gguf'}'\n")
+        self.assertEqual(missing.stdout, "[\n")
         self.assertEqual(self.run_fake("server", "-m", self.model, "--made-up").returncode, 1)
         self.assertIn("error: invalid argument: --made-up",
                       self.run_fake("server", "-m", self.model, "--made-up").stderr)
@@ -528,13 +541,18 @@ class FakeBenchTests(Base):
 
 class FakeToolTests(Base):
     def test_version_output_is_realistic_and_on_stderr(self):
-        for mode in ["server", "bench", "perplexity", "cli"]:
+        for mode in ["server", "perplexity", "cli"]:
             result = self.run_fake(mode, "--version")
             self.assertEqual(result.returncode, 0)
             self.assertEqual(result.stdout, "")
-            self.assertRegex(result.stderr, r"^version: 6512 \(fa4ec0de\)\nbuilt with .+ for .+\n$")
-        new = self.run_fake("server", "--version", extra_env={"FAKE_LLAMA_VERSION_STYLE": "new"})
-        self.assertRegex(new.stderr, r"^version: \d+\.\d+\.\d+ \(build 6512, commit fa4ec0de\)\n")
+            self.assertRegex(result.stderr, r"^version: 0\.1\.0-dev \(build 6512, commit fa4ec0d\)\n"
+                                            r"built with GNU 13\.3\.0 for (Linux x86_64|Darwin arm64|Windows AMD64)\n$")
+        classic = self.run_fake("server", "--version", extra_env={"FAKE_LLAMA_VERSION_STYLE": "classic"})
+        self.assertRegex(classic.stderr, r"^version: 6512 \(fa4ec0d\)\nbuilt with .+ for .+\n$")
+        bench = self.run_fake("bench", "--version")  # real llama-bench has no --version
+        self.assertEqual(bench.returncode, 1)
+        self.assertTrue(bench.stdout.startswith("usage: "))
+        self.assertEqual(bench.stderr, "error: invalid parameter for argument: --version\n")
 
     def test_mode_can_come_from_the_program_name(self):
         link = self.dir / "llama-bench.py"
@@ -551,7 +569,7 @@ class FakeToolTests(Base):
         reference = str(write_fake_gguf(self.dir / "m-F16.gguf", "qwen3", 36))
         first = self.run_fake("perplexity", "-m", reference, "-f", str(corpus), "-c", "512", "--kl-divergence-base", str(base))
         self.assertEqual(first.returncode, 0, first.stderr)
-        self.assertRegex(first.stdout, r"^\[1\]\d+\.\d{4},\[2\]")
+        self.assertRegex(first.stdout, r"^0\.00 minutes\n\[1\]\d+\.\d{4},\[2\]")
         self.assertRegex(first.stderr, r"Final estimate: PPL = \d+\.\d{4} \+/- \d+\.\d{5}")
         self.assertEqual(base.read_bytes()[:8], b"_logits_")
         results = {}
