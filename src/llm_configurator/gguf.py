@@ -24,6 +24,7 @@ MAX_NESTING = 4
 # GGUF value types -> struct format (None: variable size)
 _SCALARS = {0: "B", 1: "b", 2: "H", 3: "h", 4: "I", 5: "i", 6: "f", 7: "?", 10: "Q", 11: "q", 12: "d"}
 _STRING, _ARRAY = 8, 9
+_U64 = struct.Struct("<Q")
 
 # llama_ftype (include/llama.h) -> quant name; MXFP4_MOE maps to the MXFP4 name the catalogue uses.
 FILE_TYPES = {
@@ -87,6 +88,28 @@ class _Reader:
         self._claim(count)
         self.handle.seek(self.pos)
 
+    def skip_strings(self, count):
+        """Steps over `count` strings, parsing lengths from 1 MiB read-ahead chunks (token lists hold 100k+)."""
+        remaining = count
+        while remaining:
+            self.check(8)
+            data = self.handle.read(min(1024 * 1024, self.limit - self.pos))
+            offset = 0
+            while remaining and offset + 8 <= len(data):
+                length = _U64.unpack_from(data, offset)[0]
+                if length > MAX_STRING:
+                    raise _bad("a text field claims an impossible length")
+                if offset + 8 + length > len(data):
+                    break
+                offset += 8 + length
+                remaining -= 1
+            self.handle.seek(self.pos)
+            if offset:
+                self.skip(offset)
+            else:  # one string longer than the chunk, or the end of the file: the careful path reports it
+                self.string(keep=False)
+                remaining -= 1
+
     def unpack(self, fmt):
         return struct.unpack("<" + fmt, self.read(struct.calcsize(fmt)))[0]
 
@@ -120,8 +143,7 @@ def _value(reader, kind, depth=0):
     smallest = 8 if item_kind == _STRING else 12  # a length prefix, or a nested list's type + count
     reader.check(count * smallest, "a list claims more items than the file could hold")
     if item_kind == _STRING:
-        for _ in range(count):  # e.g. the token list: step over each entry without keeping it
-            reader.string(keep=False)
+        reader.skip_strings(count)  # e.g. the token list: stepped over, never kept
         return None
     if item_kind == _ARRAY:
         for _ in range(count):

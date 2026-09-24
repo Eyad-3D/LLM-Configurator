@@ -236,6 +236,16 @@ class GGUFTest(unittest.TestCase):
         finally:
             gguf.MAX_HEADER_BYTES = original
 
+    def test_string_lists_crossing_read_chunks(self):
+        items = ["a"] * 1000 + ["b" * (1536 * 1024)] + [f"t{i}" for i in range(200_000)]
+        kvs = llama_kvs(extra=[("tokenizer.ggml.merges", ARR, (STR, items)), ("after.value", U32, 42)])
+        data = build_gguf(kvs)
+        result = gguf.read_metadata(self.write("chunks.gguf", data))
+        self.assertEqual(result["metadata"]["after.value"], 42)
+        cut = data.index(b"after.value") - 100  # inside the long list
+        with self.assertRaisesRegex(ValueError, "cut off"):
+            gguf.read_metadata(self.write("cut.gguf", data[:cut]))
+
     def test_long_strings_are_skipped_not_stored(self):
         kvs = llama_kvs(extra=[("tokenizer.chat_template", STR, "x" * (gguf.MAX_KEPT_STRING + 1))])
         result = gguf.read_metadata(self.write("t.gguf", build_gguf(kvs)))
