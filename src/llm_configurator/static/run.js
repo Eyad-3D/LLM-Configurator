@@ -753,7 +753,7 @@
     const smoke = result.smoke;
     const speed = result.speed;
     const summaryData = speed?.summary || {};
-    const mem = speed?.memory || {};
+    const usage = speed?.memory || {};
     const nodes = [
       el(
         "div",
@@ -786,14 +786,14 @@
       );
     if (speed) {
       const used = [
-        mem.peak_ram_bytes != null && `${bytes(mem.peak_ram_bytes)} RAM`,
-        mem.peak_vram_bytes != null && `${bytes(mem.peak_vram_bytes)} graphics`,
+        usage.peak_ram_bytes != null && `${bytes(usage.peak_ram_bytes)} RAM`,
+        usage.peak_vram_bytes != null && `${bytes(usage.peak_vram_bytes)} graphics`,
       ].filter(Boolean);
       const estimated = [
-        mem.estimated_ram_bytes != null && `${bytes(mem.estimated_ram_bytes)} RAM`,
-        mem.peak_vram_bytes != null &&
-          mem.estimated_vram_bytes != null &&
-          `${bytes(mem.estimated_vram_bytes)} graphics`,
+        usage.estimated_ram_bytes != null && `${bytes(usage.estimated_ram_bytes)} RAM`,
+        usage.peak_vram_bytes != null &&
+          usage.estimated_vram_bytes != null &&
+          `${bytes(usage.estimated_vram_bytes)} graphics`,
       ].filter(Boolean);
       nodes.push(
         el(
@@ -819,9 +819,9 @@
             used.length ? used.join(" + ") : null,
             [
               estimated.length && `We estimated ${estimated.join(" + ")}`,
-              mem.within_estimate === true
+              usage.within_estimate === true
                 ? "within our estimate"
-                : mem.within_estimate === false
+                : usage.within_estimate === false
                   ? "more than we estimated"
                   : null,
             ]
@@ -829,7 +829,7 @@
               .join(" · ") || null,
           ),
         ),
-        mem.note ? hint(mem.note) : null,
+        usage.note ? hint(usage.note) : null,
         summaryData.depth
           ? hint(
               `Speeds measured with ${Number(summaryData.depth).toLocaleString()} tokens already in the chat, close to your chosen size.`,
