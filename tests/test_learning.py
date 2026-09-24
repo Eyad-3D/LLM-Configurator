@@ -44,8 +44,10 @@ class LearningTests(unittest.TestCase):
     def test_only_this_machines_recent_single_user_results_count(self):
         bad = [self.record(4096, 2, fingerprint="other"), self.record(4096, 2, users=2), self.record(4096, 2, tps=0),
                self.record(4096, 2, timestamp="2000-01-01T00:00:00+00:00"), self.record(4096, 2, sha256="other"),
-               self.record(4096, 2, tps=float("nan")), {"variant_id": self.model.id}]
+               self.record(4096, 2, tps=float("nan")), {"variant_id": self.model.id},
+               self.record(8192, 2, kind="tune", depth=1024)]  # a shallow tune trial is not an 8k measurement
         self.assertEqual(ratios(bad, self.hw, self.cal, [self.model]), [])
+        self.assertEqual(len(ratios([self.record(8192, 2, kind="speed_test", depth=7552)], self.hw, self.cal, [self.model])), 1)
 
     def test_recommend_uses_the_fit_but_keeps_it_an_estimate(self):
         records = [self.record(2048, 3), self.record(4096, 3)]
