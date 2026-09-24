@@ -262,20 +262,28 @@ def matching_tuned(tuned, variant, hardware, context, layers, kv_cache_type="f16
     return None
 
 
-def _community_for(records, variant):
-    """Community rows that can describe this model file (community._same_model), found once per variant."""
-    sha, repo, quant = (variant.sha256 or "").lower(), variant.repo, (variant.quant or "").upper()
-    found = []
+def _community_index(records):
+    """Community rows by model file (sha256, or repo + quant), built once per report."""
+    index = defaultdict(list)
     for record in records:
         theirs = record.get("variant") if isinstance(record, dict) else None
         if not isinstance(theirs, dict):
-            found.append(record)  # not a community row; let community.evidence decide
-        elif sha and theirs.get("sha256"):
-            if theirs["sha256"] == sha:
-                found.append(record)
-        elif theirs.get("repo") and theirs.get("repo") == repo and theirs.get("quant") == quant:
-            found.append(record)
-    return found
+            index[None].append(record)  # not a community row; let community.evidence decide
+        elif theirs.get("sha256"):
+            index[("sha", theirs["sha256"])].append(record)
+        elif theirs.get("repo"):
+            index[("repo", theirs["repo"], theirs.get("quant"))].append(record)
+    return index
+
+
+def _community_for(index, variant):
+    """Rows that can describe this model file, mirroring community._same_model: sha256 when both sides have one."""
+    sha = (variant.sha256 or "").lower()
+    by_repo = [r for r in index.get(("repo", variant.repo, (variant.quant or "").upper()), [])]
+    if not sha:
+        by_repo += [r for key, rows in index.items() if key and key[0] == "sha" for r in rows
+                    if r["variant"].get("repo") == variant.repo and r["variant"].get("quant") == (variant.quant or "").upper()]
+    return index.get(None, []) + (index.get(("sha", sha), []) if sha else []) + by_repo
 
 
 def _community_settings_match(record, kv_cache_type, n_cpu_moe):
@@ -445,6 +453,7 @@ def recommend(variants, hardware, requirements, measurements=(), calibration=Non
         if isinstance(record, dict):
             tunes_by_variant[record.get("variant_id")].append(record)
     use_default_community = community_evidence is None
+    community_index = _community_index(community)
     results, rejected = [], {"context": 0, "memory": 0, "speed": 0}
     compressible, max_context_cache = [], {}
     metric = req.workload if req.workload != "documents" else "general"
@@ -454,7 +463,7 @@ def recommend(variants, hardware, requirements, measurements=(), calibration=Non
             continue
         records = by_variant.get(variant.id, [])
         tunes = tunes_by_variant.get(variant.id, [])
-        crowd_rows = _community_for(community, variant) if community else []
+        crowd_rows = _community_for(community_index, variant) if community else []
         evidence_cache = {}  # the two memory scenarios share the same speed evidence
         score = variant.scores.get(metric) if req.include_rankings else None
         quality = "Base-model reference; this quantisation has not been evaluated" if score is not None else "No mapped workload benchmark"
