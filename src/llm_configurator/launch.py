@@ -104,7 +104,8 @@ def server_args(config):
     if not c["mmap"]:
         args.append("--no-mmap")
     if c["draft_model_path"]:
-        args += ["-md", c["draft_model_path"]]
+        # -md alone only loads the draft model; --spec-type turns speculative decoding on.
+        args += ["-md", c["draft_model_path"], "--spec-type", "draft-simple"]
         if c["draft_max"]:
             # Current llama.cpp removed --draft-max; --spec-draft-n-max replaced it.
             args += ["--spec-draft-n-max", str(c["draft_max"])]

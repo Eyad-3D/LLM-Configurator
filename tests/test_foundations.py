@@ -119,7 +119,7 @@ class LaunchTests(unittest.TestCase):
         self.assertNotIn("-dev", args)
         self.assertIn("-dev none", " ".join(server_args({"model_path": "a", "gpu_backend": "cuda"})))
         draft = server_args({"model_path": "a", "draft_model_path": "d.gguf", "draft_max": 8})
-        self.assertIn("-md d.gguf --spec-draft-n-max 8", " ".join(draft))
+        self.assertIn("-md d.gguf --spec-type draft-simple --spec-draft-n-max 8", " ".join(draft))
         self.assertNotIn("--draft-max", draft)
 
     def test_rejects_unsafe_or_invalid(self):
