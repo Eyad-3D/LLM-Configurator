@@ -489,12 +489,13 @@ class FullDepthTests(unittest.TestCase):
         self.assertEqual(result["best"]["flash_attn"], "auto")
         self.assertEqual(result["best"]["threads"], None)
         self.assertEqual(result["improvement"], 1.0)
-        self.assertTrue(any("were not faster, so your starting settings are kept" in n for n in result["notes"]))
+        self.assertTrue(any("were not clearly faster, so your starting settings are kept" in n for n in result["notes"]))
         self.assertEqual(result["settings"]["depth"], 3456)
 
     def test_winner_that_does_not_fit_at_full_length_keeps_the_start(self):
         clock = Clock()
-        base = config(gpu_layers=20, total_layers=32, gpu_backend="cuda")
+        # Threads and flash attention already at their best, so the winner differs from the start only in layers.
+        base = config(gpu_layers=20, total_layers=32, gpu_backend="cuda", threads=7, flash_attn="on")
         bench = self.depth_bench(clock, long_fail=lambda row: row["n_gpu_layers"] >= 23)
         result, _, _ = run(clock=clock, bench=bench, base=base)
         self.assertEqual(result["best"]["gpu_layers"], 20)
@@ -502,6 +503,98 @@ class FullDepthTests(unittest.TestCase):
         # llama-bench named no cause, but the lighter start loaded in the same run: memory is the likely reason.
         self.assertIn("Probably not enough memory", note)
         self.assertEqual(result["depth"], 3456)
+
+    def long_bench(self, clock, on_long):
+        """FakeBench whose full-length runs (-d > 1024) are answered by on_long(argv, out) instead."""
+        bench = FakeBench(clock)
+
+        def run_it(argv, env, timeout, cancel):
+            out = bench(argv, env, timeout, cancel)
+            return on_long(argv, out, timeout) if int(argv[argv.index("-d") + 1]) > 1024 else out
+        run_it.calls = bench.calls
+        return run_it
+
+    def test_running_out_of_time_at_full_length_keeps_the_winner(self):
+        clock = Clock()
+        seen = []
+
+        def out_of_time(argv, out, timeout):
+            seen.append(timeout)
+            return {"returncode": -9, "stdout": "[", "stderr": "", "seconds": timeout, "timed_out": True}
+        result, _, _ = run(clock=clock, bench=self.long_bench(clock, out_of_time))
+        self.assertEqual((result["best"]["threads"], result["best"]["flash_attn"]), (7, "on"))
+        self.assertTrue(result["confirmed"])
+        self.assertEqual(result["depth"], 1024)
+        self.assertEqual(result["best_result"], result["search"]["best_result"])
+        self.assertTrue(any("ran out of time" in n for n in result["notes"]))
+        self.assertFalse(any("failed to run" in n for n in result["notes"]))
+        self.assertFalse(any("already the fastest" in n for n in result["notes"]))
+        self.assertEqual(len(seen), 1)  # the start timed out; the winner was never run (not blamed)
+
+    def test_start_fails_at_full_length_but_the_winner_runs(self):
+        clock = Clock()
+
+        def start_fails(argv, out, timeout):
+            if "-t" not in argv:  # the start leaves threads to llama.cpp
+                return {**out, "returncode": 1, "stdout": "[\n",
+                        "stderr": "llama_bench: error: failed to create context with model '/models/m.gguf'\n"}
+            return out
+        result, _, _ = run(clock=clock, bench=self.long_bench(clock, start_fails))
+        self.assertEqual(result["best"]["threads"], 7)
+        self.assertEqual(result["depth"], 1024)
+        note = next(n for n in result["notes"] if "your starting settings did not run" in n)
+        self.assertIn("but the tuned settings did", note)
+
+    def test_nothing_runs_at_full_length_says_the_context_may_not_fit(self):
+        clock = Clock()
+
+        def all_fail(argv, out, timeout):
+            return {**out, "returncode": 1, "stdout": "[\n",
+                    "stderr": "llama_bench: error: failed to create context with model '/models/m.gguf'\n"}
+        result, _, _ = run(clock=clock, bench=self.long_bench(clock, all_fail))
+        self.assertTrue(any("may not fit in memory" in n for n in result["notes"]))
+        self.assertEqual(result["depth"], 1024)
+        self.assertEqual(result["best"]["threads"], 7)
+
+    def test_winner_within_noise_at_full_length_keeps_the_start(self):
+        clock = Clock()
+
+        def same_speed(argv, out, timeout):
+            rows = json.loads(out["stdout"])
+            for row in rows:
+                row["avg_ts"] = 50.05 if "-t" in argv else 50.0
+            return {**out, "stdout": json.dumps(rows)}
+        result, _, _ = run(clock=clock, bench=self.long_bench(clock, same_speed))
+        self.assertEqual(result["best"]["threads"], None)
+        self.assertEqual(result["improvement"], 1.0)
+        self.assertTrue(any("not clearly faster" in n for n in result["notes"]))
+        self.assertIn("Your starting settings are kept", result["notes"][0])
+        self.assertFalse(any("already the fastest" in n for n in result["notes"]))
+
+    def test_step_notes_are_labelled_as_the_short_test(self):
+        result, _, _ = run()
+        self.assertTrue(any(n.startswith("In the shorter search test: using 7 CPU threads") for n in result["notes"]))
+
+    def test_cancel_during_full_length_keeps_the_short_results(self):
+        clock = Clock()
+
+        def cancel_now(argv, out, timeout):
+            raise Cancelled()
+        result, _, _ = run(clock=clock, bench=self.long_bench(clock, cancel_now))
+        self.assertEqual(result["stopped"], "cancelled")
+        self.assertEqual(result["depth"], 1024)
+        self.assertEqual(result["best"]["threads"], 7)
+
+    def test_each_full_length_run_gets_its_share_of_the_time(self):
+        clock = Clock()
+        seen = []
+
+        def spy(argv, out, timeout):
+            seen.append(timeout)
+            return out
+        run(clock=clock, bench=self.long_bench(clock, spy), budget=200)
+        self.assertEqual(len(seen), 2)
+        self.assertLess(seen[0], seen[1] + 60)  # the first run did not get everything that was left
 
     def test_no_time_left_keeps_the_short_depth_and_says_so(self):
         clock = Clock()
@@ -593,6 +686,25 @@ class FailureTextTests(unittest.TestCase):
         errors = {t["changes"].get("gpu_layers"): t.get("error") for t in result["trials"] if t["step"] == "gpu_layers"}
         self.assertEqual(errors[24], tuner.PROBABLY_MEMORY)
         self.assertNotIn("/models", errors[24])
+
+    def test_lighter_means_only_less_offload_or_smaller_chunks(self):
+        from llm_configurator import launch
+        base = launch.normalize(config(gpu_layers=20, total_layers=32, gpu_backend="cuda"))
+        more = {**base, "gpu_layers": 22}
+        self.assertTrue(tuner._lighter(base, more))
+        self.assertFalse(tuner._lighter(more, base))
+        # A compressed cache with flash attention on can fail for reasons other than memory.
+        q8 = {**base, "cache_type_k": "q8_0", "cache_type_v": "q8_0", "flash_attn": "on"}
+        self.assertFalse(tuner._lighter(base, q8))
+        self.assertFalse(tuner._lighter({**base, "threads": 4}, {**more, "threads": 8}))
+        self.assertTrue(tuner._lighter({**base, "batch": 512, "ubatch": 512}, base))  # unset = 2048/512
+
+    def test_killed_and_bad_alloc_are_worded_honestly(self):
+        self.assertIn("possibly because memory ran out", tuner.bench_failure("", "[", -9))
+        text = "terminate called after throwing an instance of 'std::bad_alloc'\n  what():  std::bad_alloc\n"
+        self.assertEqual(tuner.bench_failure(text, "", -6), "Ran out of memory with these settings.")
+        glued = "some error happened\nDEPRECATED: --x is deprecated. Please use --y instead.\n"
+        self.assertIn("some error happened", tuner.bench_failure(glued, "", 2))
 
     def test_first_failure_in_a_run_gets_no_memory_guess(self):
         clock = Clock()

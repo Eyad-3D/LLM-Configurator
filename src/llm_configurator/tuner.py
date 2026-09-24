@@ -29,7 +29,8 @@ BATCH_PAIRS = [(512, 512), (1024, 256), (2048, 512)]
 MAX_BENCH_DEPTH = 32768  # same cap as testing.MAX_BENCH_DEPTH: deeper costs hours on a CPU
 SETTINGS_KEYS = ["flash_attn", "cache_type_k", "cache_type_v", "batch", "ubatch", "n_cpu_moe"]  # as in speed tests
 OOM_TEXT = re.compile(r"out of memory|failed to allocate|cudaMalloc failed|ErrorOutOfDeviceMemory|"
-                      r"unable to allocate|not enough memory|insufficient memory", re.IGNORECASE)
+                      r"unable to allocate|not enough memory|insufficient memory|std::bad_alloc|OutOfMemory",
+                      re.IGNORECASE)
 
 # launch-config name -> (llama-bench flag, llama-bench JSON field)
 FLAGS = {"gpu_layers": ("-ngl", "n_gpu_layers"), "n_cpu_moe": ("-ncmoe", "n_cpu_moe"), "threads": ("-t", "n_threads"),
@@ -239,7 +240,9 @@ def bench_failure(stderr, stdout="", returncode=None, timed_out=False):
         return "A compressed notepad (KV cache) needs flash attention turned on."
     if "failed to load model" in text or "failed to create context" in text:
         return NO_CAUSE
-    tail = next((line for line in reversed(lines) if "error" in line.lower()), lines[-1] if lines else "no error output")
+    if returncode in (-9, 137):
+        return "The system stopped llama-bench, possibly because memory ran out (llama.cpp gave no reason)."
+    tail = next((line for line in reversed(fatal) if "error" in line.lower()), fatal[-1] if fatal else "no error output")
     return f"llama-bench stopped with an error ({returncode}): {_PATH.sub('<file>', tail)[:200]}"
 
 
@@ -364,7 +367,7 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
         `at_depth`/`deadline` are for the final full-length check, whose cost says nothing about a search trial."""
         at_depth = depth if at_depth is None else at_depth
         results = [None] * len(configs)
-        runnable, worked = [], []  # worked: risk keys of the settings that ran in this step
+        runnable, worked = [], []  # worked: the settings that ran in this step
         for i, config in enumerate(configs):
             if safe(config):
                 runnable.append(i)
@@ -374,7 +377,14 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
                 trials.append({"changes": changes_of(config), "tps": None, "pp_tps": None, "seconds": 0.0,
                                "status": "skipped_memory", "step": step,
                                "error": "Skipped: the memory check says this might not fit."})
-        for group in _groups([configs[i] for i in runnable]):
+        groups = _groups([configs[i] for i in runnable])
+        out_of_time = False
+        for number, group in enumerate(groups):
+            if out_of_time:  # a budgeted check that already ran out of time does not start another run
+                for g in group:
+                    results[runnable[g]] = {"status": "failed", "tps": None, "pp_tps": None, "noise": 0.0, "row": None,
+                                            "timed_out": True, "error": "Not tested: no time was left."}
+                continue
             # llama-bench stops at the first setting that fails to load, so the riskiest values go last.
             indexes = sorted((runnable[g] for g in group), key=lambda i: _risk(configs[i]))
             check_cancel(cancel)
@@ -384,13 +394,14 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
             head = group_configs[0]
             argv = prefix + bench_args(head, n_prompt, n_gen, at_depth, reps, sweep or None)
             # Nothing is known about the model's speed before the baseline, so it gets the full timeout.
-            limit = deadline() if deadline else (timeout if step == "baseline" else min(timeout, max(remaining() + per_combo(reps), 5)))
+            limit = deadline(len(groups) - number) if deadline else (timeout if step == "baseline" else min(timeout, max(remaining() + per_combo(reps), 5)))
             outcome = run_bench(argv, launch.server_env(head), limit, cancel)
             rows = parse_rows(outcome.get("stdout") or "")
             seconds = float(outcome.get("seconds") or 0) / len(indexes)
             if deadline is None:
                 costs.append(seconds * (repetitions + 1) / (reps + 1))
             failure = _plain_failure(outcome) if outcome.get("returncode") or outcome.get("timed_out") else None
+            out_of_time = bool(deadline and outcome.get("timed_out"))
             blamed = False
             for i in indexes:
                 config = configs[i]
@@ -406,14 +417,14 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
                           "timed_out": bool(outcome.get("timed_out")) and not ok}
                 if not ok:
                     reason = failure
-                    if reason == NO_CAUSE and any(risk < _risk(config) for risk in worked):
+                    if reason == NO_CAUSE and any(_lighter(other, config) for other in worked):
                         # A lighter setting just loaded the same file (a run goes from least to most memory-hungry).
                         reason = PROBABLY_MEMORY
                     result["error"] = ("Not tested: an earlier setting in the same run stopped llama-bench."
                                        if blamed else reason or "llama-bench gave no usable result for these settings.")
                     blamed = blamed or bool(failure)
                 if ok:
-                    worked.append(_risk(config))
+                    worked.append(config)
                 results[i] = result
                 trials.append({"changes": changes_of(config), "tps": result["tps"], "pp_tps": result["pp_tps"],
                                "seconds": round(seconds, 2), "status": result["status"], "step": step,
@@ -491,6 +502,7 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
     except Cancelled:
         stopped = "cancelled"
 
+    found = best != base  # the search found something faster than the start
     # Confirm the winner with more repetitions so a lucky run cannot crown it.
     confirmed = None
     if best != base and stopped != "cancelled":
@@ -519,49 +531,69 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
                                    score(baseline["tps"], baseline["pp_tps"], goal), 4)}
     measured_depth, depth_notes = depth, []
     full = min(max(0, base["context"] - n_prompt - n_gen), MAX_BENCH_DEPTH)
+    shorter = f"so the speeds come from a shorter test with {depth:,} tokens in memory"
     if verify_full_depth and stopped != "cancelled" and full > depth:
         # The search ran with a short conversation in memory to save time. The start and the winner are measured
         # once more at the user's own length (-d context-640, like the speed test), so the saved speed is real there.
         configs = [base] if best == base else [base, best]
-        pp_speeds = [r["pp_tps"] for r in (baseline, best_result) if r.get("pp_tps")]
-        # llama-bench re-reads the whole depth, untimed, before every repetition (plus a warm-up) of both tests.
-        # Reading slows down as the conversation grows; 1.5x is a rough allowance for that.
-        cost = (len(configs) * ((repetitions + 1) * 2 * full / min(pp_speeds) * 1.5 + (per_combo(repetitions) or 0))
-                if pp_speeds else None)
-        if cost is not None and cost <= max(remaining(), 0) + (per_combo(repetitions) or 0):
+        pp = min((r["pp_tps"] for r in (baseline, best_result) if r.get("pp_tps")), default=None)
+        tg = min((r["tps"] for r in (baseline, best_result) if r.get("tps")), default=None)
+        # llama-bench re-reads the whole depth, untimed, before every repetition (plus a warm-up) of both tests, and
+        # reading and writing both slow down as the conversation grows; 1.5x is a rough allowance for that.
+        cost = (len(configs) * (repetitions + 1) * 1.5 * ((2 * full + n_prompt) / pp + (n_gen / tg if n_gen else 0))
+                if pp and (tg or not n_gen) else None)
+        if cost is None:
+            depth_notes.append("Reading speed was not measured, so the cost of a test with your full conversation "
+                               f"length could not be estimated and it was not run; {shorter}.")
+        elif cost <= max(remaining(), 0) + (per_combo(repetitions) or 0):
             report(f"Measuring again with {full:,} tokens of conversation in memory")
             try:
+                # Each llama-bench run gets its share of what is left, so the first cannot starve the second.
                 long = measure(configs, "full_depth", repetitions, at_depth=full,
-                               deadline=lambda: min(timeout, max(remaining() + (per_combo(repetitions) or 0), 5)))
+                               deadline=lambda runs_left: min(timeout, max(remaining() / runs_left +
+                                                                           (per_combo(repetitions) or 0), 5)))
             except Cancelled:
                 stopped, long = "cancelled", None
             if long is not None:
                 long_base, long_best = long[0], long[-1]
                 base_ok = long_base["status"] == "ok" and score(long_base["tps"], long_base["pp_tps"], goal)
                 best_ok = long_best["status"] == "ok" and score(long_best["tps"], long_best["pp_tps"], goal)
-                if not base_ok:
-                    depth_notes.append("The check with your full conversation length did not work for your starting "
-                                       f"settings ({long_base.get('error') or 'no speed was measured'}), so the speeds "
-                                       f"come from a shorter test with {depth:,} tokens in memory.")
+                why = lambda r: r.get("error") or "no speed was measured"
+                if any(r.get("timed_out") for r in long):
+                    # Out of time is not a verdict on the settings: keep what the search found.
+                    depth_notes.append(f"The test with your full conversation length ran out of time, {shorter}.")
+                elif not base_ok and not best_ok:
+                    depth_notes.append(f"With your full conversation length ({full:,} tokens in memory) llama.cpp did "
+                                       f"not run ({why(long_base)}). This context may not fit in memory with these "
+                                       f"settings; {shorter}.")
+                elif not base_ok:
+                    depth_notes.append(f"With your full conversation length your starting settings did not run "
+                                       f"({why(long_base)}), but the tuned settings did: writing "
+                                       f"{long_best['tps'] or 0:.1f} and reading {long_best['pp_tps'] or 0:.1f} tokens "
+                                       f"per second. The speeds above come from a shorter test with {depth:,} tokens "
+                                       "in memory.")
                 else:
                     if best != base and not best_ok:
                         depth_notes.append("The tuned settings did not work with your full conversation length "
-                                           f"({long_best.get('error') or 'no speed was measured'}), so your starting "
-                                           "settings are kept.")
+                                           f"({why(long_best)}), so your starting settings are kept.")
                         best, long_best = base, long_base
-                    elif best != base and best_ok <= base_ok:
+                    elif best != base and best_ok <= base_ok * (1 + max(min_gain, long_best["noise"] +
+                                                                       long_base["noise"], drift)):
                         depth_notes.append("With your full conversation length in memory the tuned settings were not "
-                                           "faster, so your starting settings are kept.")
+                                           "clearly faster, so your starting settings are kept.")
                         best, long_best = base, long_base
                     baseline = {"tps": long_base["tps"], "pp_tps": long_base["pp_tps"]}
                     best_result = {"tps": long_best["tps"], "pp_tps": long_best["pp_tps"]}
                     best_row, measured_depth = long_best["row"] or best_row, full
-        elif stopped != "cancelled":
-            depth_notes.append(f"There was no time left to measure with your full conversation length, so the speeds "
-                               f"come from a shorter test with {depth:,} tokens in memory.")
-    if best == base:
+        else:
+            depth_notes.append(f"There was no time left to measure with your full conversation length, {shorter}.")
+    if best == base and not found:
         notes.insert(0, "Your starting settings were already the fastest we found.")
+    elif best == base:
+        notes.insert(0, "Your starting settings are kept (see below why the faster settings found were not used).")
     else:
+        if measured_depth != depth:  # the per-step gains are from the short search test
+            step_notes = [f"In the shorter search test: {n[0].lower()}{n[1:]}" for n in step_notes]
         notes[:0] = [f"Overall, the tuned settings made {_gain_text(best_result, baseline, goal)} than where we started."] + \
             step_notes
     if measured_depth == full and full > depth:
@@ -569,7 +601,8 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
                      "as in a long chat at your chosen length.")
     notes += depth_notes
     improvement = score(best_result["tps"], best_result["pp_tps"], goal) / score(baseline["tps"], baseline["pp_tps"], goal)
-    failed = sum(t["status"] == "failed" for t in trials)
+    # Confirm and full-length runs are checks of settings already counted, and their outcome has its own note.
+    failed = sum(t["status"] == "failed" for t in trials if t["step"] not in {"confirm", "full_depth"})
     skipped = sum(t["status"] == "skipped_memory" for t in trials)
     if skipped:
         notes.append(f"Skipped {skipped} setting{'s' * (skipped != 1)} that might not fit in memory.")
@@ -676,6 +709,20 @@ def _risk(config):
     """Sort key from least to most memory-hungry, for the order inside one llama-bench run."""
     return (config["gpu_layers"], -config["n_cpu_moe"], config["batch"] or 0, config["ubatch"] or 0,
             config["cache_type_v"] != "f16")
+
+
+_WEIGHT_DEFAULTS = {"batch": 2048, "ubatch": 512}  # llama.cpp's defaults when unset
+
+
+def _lighter(light, heavy):
+    """True when `light` needs no more memory than `heavy` for certain: they differ only in how much sits on the
+    graphics card or in the prompt chunk sizes, and `light` is smaller (or equal) in each. Flash attention and the
+    cache format change more than memory (a backend may not support them), so a difference there proves nothing."""
+    size = lambda c, k: c[k] if c[k] is not None else _WEIGHT_DEFAULTS.get(k)
+    if any(light[k] != heavy[k] for k in light if k not in {"gpu_layers", "n_cpu_moe", "batch", "ubatch"}):
+        return False
+    return light != heavy and light["gpu_layers"] <= heavy["gpu_layers"] and light["n_cpu_moe"] >= heavy["n_cpu_moe"] \
+        and all(size(light, k) <= size(heavy, k) for k in ("batch", "ubatch"))
 
 
 def _groups(configs):

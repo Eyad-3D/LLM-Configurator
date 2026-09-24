@@ -27,13 +27,21 @@ setting, else two. Then:
 - `result["depth"]` and `result["settings"]["depth"]` say the depth `best_result` was measured at. `result["settings"]` also
   carries `flash_attn, cache_type_k, cache_type_v, batch, ubatch, n_cpu_moe` of `best` (the same keys the speed test stores).
   `result["bench"]` still describes the search runs.
-- If the winner fails at full length, or is not faster than the start there, **the start is kept** and a note says why
-  (with "Probably not enough memory…" when llama-bench gave no cause but the lighter start just ran).
-- If the start itself fails at full length, the short-depth numbers are kept and a note says so.
+- If the winner fails at full length, or is not faster than the start there by more than the noise margin (the same
+  `max(min_gain, noise, drift)` rule as every other comparison), **the start is kept** and a note says why (with "Probably
+  not enough memory…" only when the winner differs from the start just by more offload or bigger chunks, see `_lighter`).
+- If the start fails at full length but the winner runs, the winner is kept, the short-test numbers stay, and the note gives
+  the winner's full-length speed. If both fail, the note says the chosen context may not fit in memory.
+- **Running out of time is not a verdict**: a timed-out full-length run keeps what the search found (short depth) with a
+  "ran out of time" note, and no further full-length run is started. Each run gets its share of the time left.
+- When the numbers are full-length, the per-step notes are labelled "In the shorter search test: …", since they are
+  short-depth gains. "Your starting settings were already the fastest" appears only when the search found nothing;
+  when a winner was later dropped, the first note says the start is kept and why.
 - It runs only when the estimated cost fits the remaining budget (plus the usual one-trial allowance). Otherwise
   `settings.depth` stays the short depth and a note says "There was no time left to measure with your full conversation length…".
-  The estimate is `(repetitions+1) × 2 × depth ÷ reading speed × 1.5` per setting. On the real build it was on the safe side:
-  by hand from the formula it comes to roughly 15–18 s for that run (I did not log the value), and the runs took 7.2 s (context 4096). A slower-than-estimated run is still bounded by the usual deadline.
+  The estimate is `(repetitions+1) × 1.5 × ((2 × depth + n_prompt) ÷ reading speed + n_gen ÷ writing speed)` per setting.
+  On the real build it errs on the safe side (the check itself took 7.2 s at context 4096). With no reading speed
+  (`n_prompt=0`) the check is skipped with its own note.
 - `tune(..., verify_full_depth=False)` switches it off (used by a few tests).
 
 The existing test that asserted `"settings" not in result` was pinned to the old reading; it now checks the new shape.
@@ -53,15 +61,33 @@ The existing test that asserted `"settings" not in result` was pinned to the old
 | `tune`, tiny llama, context 4096, 60 s | 21.7 s, converged; search at 1024: 241 → 649 t/s writing; full length 3456: 83 → 352 t/s (4.22×), threads 4, flash attention off |
 | `tune`, tiny llama, context 8192, 12 s budget | 10.5 s, stopped on budget, depth 1024 with the "no time left" note |
 | `tune`, tiny qwen3moe, context 2048, 40 s | 13.5 s, full length 1408: 205 → 667 t/s |
-| `python3 -m unittest discover -s tests` | 838 tests OK (32 skipped: real-runtime tests without the env vars) |
+| `python3 -m unittest discover -s tests` | 847 tests OK (32 skipped: real-runtime tests without the env vars) |
 | `LLM_CONFIG_REAL_RUNTIME=… LLM_CONFIG_TINY_MODELS=… python3 -m unittest tests.integration.test_real_runtime tests.integration.test_fake_matches_real` | 52 tests OK |
 
-New tests: `tests/test_tuner.py` `FullDepthTests` (7) and `FailureTextTests` (9); `tests/test_testing.py` (3: lumpy
+New tests: `tests/test_tuner.py` `FullDepthTests` (14) and `FailureTextTests` (11); `tests/test_testing.py` (3: lumpy
 tokenizer, target per context, start-failure wording); `tests/test_llama_server.py` `test_slots_monitoring_page_is_off`;
 `tests/integration/test_fake_matches_real.py` `FakeMemoryAndSlotsTests` (3, normal suite, pinned to the captured real
 text), `RealAndFakeSideBySideTests` (4, runs the real binary and the fake on the same command) and `RealRoundThreeTests`
 (2: speed test at 1024/2048/4096, tuner full-length check). The fake gained `FAKE_LLAMA_MAX_CONTEXT` (context
 out-of-memory with the real lines; llama-bench only with `-v`, llama-server always).
+
+## Independent review
+
+A separate reviewer read the diff and reproduced two real problems with scratch scripts. All are fixed, with tests:
+
+1. A full-length run that ran out of time counted as "the winner failed", and good tuned settings were dropped. It is now
+   treated as "not measured".
+2. A failing start at full length hid the winner's result. Both cases are now reported.
+3. The full-length comparison had no noise margin, so a winner 0.1 % faster was kept, next to notes saying "about the same".
+4. "Your starting settings were already the fastest" appeared after a winner had been dropped.
+5. `PROBABLY_MEMORY` could be claimed in the cache step, where the heavier f16 setting had run. `_risk` puts a
+   compressed cache last, but that is the lighter one.
+6. Full-length and confirm runs were counted in "N settings failed to run and were ignored".
+7. The "no time left" note appeared when the real reason was a missing reading speed.
+8. `std::bad_alloc` is now read as out of memory. A killed run (-9/137) now says "possibly because memory ran out".
+   The last-line fallback skips warning and deprecation lines.
+
+Outside my files (see Requests): `run.js` counting `full_depth` trials as tried settings, and a stale comment in `app.py`.
 
 ## Rejected
 
@@ -76,13 +102,16 @@ out-of-memory with the real lines; llama-bench only with `-v`, llama-server alwa
   With `{**result, …}` they reach the tuned record, so `engine.matching_tuned` sees `settings.depth = context − 640` and
   marks the tune verified. The comment "No §2.3 tune measurement: the tuner measures at a shallow depth" no longer holds
   when `result["depth"] == result["settings"]["depth"]` is the full length; the optional `kind="tune"` measurement can use
-  `best_result`, `result["settings"]`, `result["depth"]`, `threads`, `runtime`, `runtime_build`. When the check was
+  `best_result`, `result["settings"]`, `result["depth"]`, `threads`, `runtime`, `runtime_build`. Please update that
+  comment in `app.py` (around line 306). When the check was
   skipped (`depth` is the short search depth) it should stay out of `measurements`, as today.
 - **r3-engine-community**: nothing required. `best_result.tps` is now measured at `settings.depth` (full length when the
   budget allowed). Contexts above 33,408 are capped at depth 32,768 (like speed tests), so with `FULL_DEPTH_SLACK = 1024`
   they never count as verified; consider the same exception you make for speed tests, if any.
-- **r3-ui**: `baseline` and `best_result` are both full-length numbers now (like-for-like); the notes carry the depth sentence.
-  The short-search numbers are in `result.search` if you want to show them.
+- **r3-ui (`run.js` ~line 1001)**: `tried` excludes `baseline` and `confirm` trials. Please also exclude
+  `t.step === "full_depth"`: those one or two runs re-measure the start and the winner and are not settings tried.
+  `baseline` and `best_result` are both full-length numbers now when `depth === settings.depth > search.depth`
+  (like-for-like). The short-search numbers are in `result.search` if you want to show them.
 - **lead (`launch.server_env`, `tests/integration/test_real_runtime.py`)**: export scripts could also set
   `LLAMA_ARG_ENDPOINT_SLOTS=0` like `llama_server.server_env`. `test_real_runtime.test_speed_test` still uses context 8192
   as a workaround for the old filler bug; 2048 works now (see `RealRoundThreeTests.test_speed_test_fits_short_contexts`).
