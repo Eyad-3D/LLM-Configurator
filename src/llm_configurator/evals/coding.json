@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "workload": "coding",
   "description": "Short code-reading questions: predict program output, find the buggy line, and basic concepts.",
   "items": [
@@ -282,7 +282,7 @@
       "code": "console.log([10, 9, 1].sort());",
       "language": "javascript",
       "accept": [
-        "(\\(3\\) ?)?\\[ ?1, ?10, ?9 ?\\]"
+        "((\\(3\\)|Array\\(3\\)) ?)?\\[ ?1, ?10, ?9 ?\\]"
       ]
     },
     {
@@ -457,7 +457,7 @@
       "prompt": "Which data structure removes items in last-in, first-out (LIFO) order? Reply with one word.",
       "answer": "stack",
       "accept": [
-        "(a )?stacks?"
+        "((a|the) )?stacks?( data structure)?"
       ]
     },
     {
@@ -467,9 +467,8 @@
       "prompt": "What is the worst-case time complexity of binary search on a sorted array of n elements? Answer in big-O notation.",
       "answer": "O(log n)",
       "accept": [
-        "o\\(\\s?log\\s?\\(?n\\)?\\s?\\)",
-        "o\\(\\s?lg\\s?n\\s?\\)",
-        "o\\(\\s?log2\\s?n\\s?\\)"
+        "\\$?o\\(\\s?\\\\?(log|lg)(_?\\{?2\\}?|₂|2)?\\s?\\(?n\\)?\\s?\\)\\$?( time)?",
+        "\\$?(θ|\\\\theta)\\(\\s?\\\\?log\\s?\\(?n\\)?\\s?\\)\\$?"
       ]
     },
     {
