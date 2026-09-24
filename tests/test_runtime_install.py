@@ -228,6 +228,18 @@ class ChooseTests(unittest.TestCase):
         self.assertIn("no usable graphics card", cpu["reason"])
         self.assertEqual(self.choose(NONE, "Windows", "ARM64")["name"], "llama-b11158-bin-win-cpu-arm64.zip")
 
+    def test_gpus_with_unreadable_memory_keep_the_cpu_build(self):
+        # Windows lists AMD/Intel adapters in other_gpus (free memory unknown); the engine never offloads to
+        # them, so a GPU build would only add risk. The reason says why.
+        radeon = {"name": "AMD Radeon RX 7900 XTX", "vendor": "amd", "backend": "vulkan", "available": None}
+        choice = self.choose({"gpus": [], "other_gpus": [radeon]}, "Windows", "AMD64")
+        self.assertEqual(choice["backend"], "cpu")
+        self.assertIn("AMD Radeon RX 7900 XTX was found, but its free memory cannot be read", choice["reason"])
+        # A readable card still decides; the unreadable one adds no note then.
+        both = self.choose(dict(AMD, other_gpus=[radeon]), "Windows", "AMD64")
+        self.assertEqual(both["backend"], "vulkan")
+        self.assertNotIn("cannot be read", both["reason"])
+
     def test_windows_cuda_without_runtime_companion_falls_back(self):
         names = [n for n in REAL_NAMES if not n.startswith("cudart-llama-bin-win")]
         choice = self.choose(nvidia("581.57"), "Windows", "AMD64", names=names)

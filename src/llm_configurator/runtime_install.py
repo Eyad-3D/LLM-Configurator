@@ -99,6 +99,16 @@ def _normal_system(system, machine):
 
 
 def _gpu_kinds(hardware):
+    """(NVIDIA cards, other cards) among the scan's `gpus`, the ones whose free memory can be read.
+
+    `other_gpus` (Windows AMD/Intel adapters, NVIDIA without nvidia-smi) are deliberately left out: the engine
+    never places layers on a GPU whose free memory is unknown, so a GPU build would only add a larger download
+    and a driver that can fail to start. Once hardware.py can read such a card, it moves to `gpus` and the
+    Vulkan (or CUDA) build is chosen here.
+
+    Rule for callers: whenever the installed build has a GPU backend, a CPU-only run must pass `-dev none`
+    (launch config `gpu_layers=0` with `gpu_backend` set; engine sets it from any GPU it sees, `other_gpus`
+    included). Otherwise llama.cpp still uses the GPU for its work buffers, outside the memory budget."""
     gpus = [g for g in (hardware or {}).get("gpus") or [] if isinstance(g, dict)]
     nvidia = [g for g in gpus if (g.get("vendor") or "").lower() == "nvidia" or g.get("backend") == "cuda"
               or "nvidia" in (g.get("name") or "").lower()]
@@ -162,6 +172,10 @@ def choose_asset(release, hardware, system=None, machine=None, allow_unverified=
         by_backend.setdefault(info["backend"], []).append(info)
     nvidia, others = _gpu_kinds(hardware)
     notes, order = [], []
+    unread = [g for g in (hardware or {}).get("other_gpus") or [] if isinstance(g, dict) and g.get("backend") != "metal"]
+    if unread and not (nvidia or others) and system != "macos":
+        notes.append(f"{unread[0].get('name') or 'a graphics card'} was found, but its free memory cannot be read, so "
+                     "the app would never place a model on it")
     if system == "macos":
         order = ["metal", "cpu"] if machine == "arm64" else ["cpu", "metal"]
     elif nvidia:
