@@ -402,6 +402,9 @@ class RegistryTests(Base):
         self.assertIn("listening on", status["log_tail"])
         self.assertIsNotNone(status["started_at"])
         first_pid = status["pid"]
+        with self.assertRaises(ValueError):
+            registry.start(fake_command("server"), {"model_path": self.model, "context": 1})
+        self.assertEqual(registry.status()["pid"], first_pid)
         again = registry.start(fake_command("server"), {"model_path": self.model})
         self.assertNotEqual(again["pid"], first_pid)
         self.assertEqual(again["model"], "Qwen3-8B-Q4_K_M.gguf")

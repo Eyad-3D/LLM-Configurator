@@ -471,9 +471,9 @@ class ServerRegistry:
 
     def start(self, command, config, progress=None, cancel=None, timeout=300):
         with self._lock:
-            self._stop_current()
             log_path = self.log_dir / "llama-server.log" if self.log_dir else None
-            server = LlamaServer(command, config, log_path=log_path)
+            server = LlamaServer(command, config, log_path=log_path)  # validate before stopping the old one
+            self._stop_current()
             with self._state:
                 self._starting, self._error = server, None
             try:
