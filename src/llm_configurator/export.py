@@ -357,6 +357,9 @@ def _docker(config, variant, platform, notes):
     elif backend == "vulkan":
         notes.append("Vulkan in Docker works on Linux by passing /dev/dri; Docker Desktop on Windows and macOS "
                      "cannot pass the graphics card this way, so use the llama-server script there.")
+        notes.append("This uses the Vulkan image because the settings were tested with a Vulkan build of llama.cpp. "
+                     "On an NVIDIA card, Vulkan inside Docker also needs the NVIDIA Container Toolkit; the CUDA image "
+                     "(server-cuda) is the usual choice there, and its speed may differ from the tested run.")
     elif backend == "rocm":
         notes.append("AMD ROCm in Docker works on Linux only and needs /dev/kfd and /dev/dri.")
     elif config["gpu_backend"] == "metal":

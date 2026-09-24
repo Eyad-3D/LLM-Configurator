@@ -622,7 +622,7 @@ class Round3Tests(unittest.TestCase):
                 "best": {"gpu_layers": 0, "threads": 6, "cache_type_k": "f16"}, "best_result": {"tps": 40}}
         self.assertEqual(self.pick(recommend([self.local], self.hw, Requirements(), tuned=[tune]))["evidence"], "tuned")
 
-    def tune(self, depth_key="settings", depth=1024, **changes):
+    def tune(self, depth_key="settings", depth=2048, **changes):
         model = real(demo_variants()[0])
         base = {"variant_id": model.id, "sha256": model.sha256, "fingerprint": "test-machine", "timestamp": now(),
                 "context": 8192, "gpu_layers": 0, "n_cpu_moe": 0, "kv_cache_type": "f16",
@@ -634,9 +634,9 @@ class Round3Tests(unittest.TestCase):
         model, short = self.tune()
         c = self.pick(recommend([model], self.hw, Requirements(min_tps=10), tuned=[short]))
         scaled = c["tuned"]["scaled_tps"]
-        self.assertLess(scaled, 40 * 0.9 + 1e-9)  # more notepad to read at 8k than at 1k, shaded 10%
+        self.assertLess(scaled, 40 * 0.9 + 1e-9)  # more notepad to read at 8k than at 2k, shaded 10%
         self.assertGreater(scaled, 0)
-        self.assertEqual((c["evidence"], c["tps"], c["verdict"], c["tuned"]["depth"]), ("tuned", None, "unknown", 1024))
+        self.assertEqual((c["evidence"], c["tps"], c["verdict"], c["tuned"]["depth"]), ("tuned", None, "unknown", 2048))
         self.assertIn("near the start of a conversation", c["verdict_text"])
         self.assertIn(f"Scaled to this length that is roughly {scaled:.0f}", c["verdict_text"])
         self.assertIn("Run a speed test", c["verdict_text"])
@@ -648,6 +648,10 @@ class Round3Tests(unittest.TestCase):
         self.assertIsNone(matching_tuned([full], model, self.hw, 8192, 0)["scaled_tps"])
         model, unknown = self.tune(depth_key="nothing")
         self.assertIsNone(matching_tuned([unknown], model, self.hw, 8192, 0)["scaled_tps"])
+        # Never stretched more than 4x (bytes-per-token scaling ignores attention compute), and never from depth 0.
+        for depth in [1024, 0]:
+            model, far = self.tune(depth=depth)
+            self.assertIsNone(matching_tuned([far], model, self.hw, 8192, 0)["scaled_tps"])
         # A tune that moved the placement measured another candidate: no number for this one.
         model, moved = self.tune(best={"gpu_layers": 0, "threads": 6, "cache_type_k": "q8_0"})
         self.assertIsNone(matching_tuned([moved], model, self.hw, 8192, 0)["scaled_tps"])
@@ -691,3 +695,16 @@ class Round3Tests(unittest.TestCase):
         def broken(*args):
             raise AttributeError("'str' object has no attribute 'get'")
         self.assertIsNone(community_speed([{"x": 1}], real(demo_variants()[0]), self.hw, {}, broken))
+
+    def test_long_tests_capped_at_32k_tokens_still_count_as_labelled_estimates(self):
+        # testing.bench_plan stops at MAX_BENCH_DEPTH: a 65,536-token test runs with 32,768 tokens in memory.
+        model = real(demo_variants()[0], max_context=131072)
+        capped = record(model, context=65536, depth=32768, tps=12, kind="speed_test", id="long")
+        self.assertIsNone(matching_speed([capped], model, self.hw, 65536, 0, None, 8))  # not verified at 64k
+        found = interpolated_speed([capped], model, self.hw, 65536, 0, None, 8)
+        self.assertLess(found["tps"], 12 * 0.9 + 1e-9)
+        self.assertEqual((found["contexts"], found["measurement_ids"]), ([32768], ["long"]))
+        # It also says something about a 32k conversation (the length it really measured), unscaled.
+        self.assertEqual(interpolated_speed([capped], model, self.hw, 16384, 0, None, 8)["tps"], 12)
+        # Short tune trials (1k tokens) cannot stand in for 8k.
+        self.assertIsNone(interpolated_speed([record(model, depth=1024, kind="tune")], model, self.hw, 8192, 0, None, 8))

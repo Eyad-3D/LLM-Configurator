@@ -201,18 +201,31 @@ def matching_speed(records, variant, hardware, context, layers, gpu_uuid, thread
     return found
 
 
-def interpolated_speed(records, variant, hardware, context, layers, gpu_uuid, threads, kv_cache_type="f16", n_cpu_moe=0, launch=None):
-    """Speed at `context` from tests of the same variant, machine and placement at other contexts.
+def _tested_length(record):
+    """Tokens in memory when the speed was measured: the context for a full-depth test, else its depth.
+    Speed tests of very long contexts stop at testing.MAX_BENCH_DEPTH (32,768 tokens), so a 64k test
+    describes a 32k conversation; it can still be scaled from there, labelled as not verified."""
+    context = record.get("context")
+    if type(context) is not int or context <= 0:
+        return None
+    if _full_depth(record, context):
+        return context
+    depth = record.get("depth")
+    return depth if type(depth) is int and depth > 0 else None
 
-    Between two tests: linear in context. Only shorter tests: scale by the bytes read per token
-    (weights + conversation memory) and shade down 10%, up to 4x the tested length. Only longer
-    tests: the nearest one, because a shorter conversation is not slower. Never "measured".
+
+def interpolated_speed(records, variant, hardware, context, layers, gpu_uuid, threads, kv_cache_type="f16", n_cpu_moe=0, launch=None):
+    """Speed at `context` from tests of the same variant, machine and placement at other lengths.
+
+    A test's length is the number of tokens it had in memory (_tested_length). Between two tests:
+    linear. Only shorter tests: scale by the bytes read per token (weights + conversation memory)
+    and shade down 10%, up to 4x the tested length. Only longer tests: the nearest one, because a
+    shorter conversation is not slower. Never "measured".
     """
     points = {}
     for record in records:
-        other = record.get("context")
-        if (type(other) is int and other > 0 and other != context and _recent(record) and _speed(record.get("tps"))
-                and _full_depth(record, other)
+        other = _tested_length(record)
+        if (other is not None and other != context and _recent(record) and _speed(record.get("tps"))
                 and _same_placement(record, variant, hardware, layers, gpu_uuid, threads, kv_cache_type, n_cpu_moe, launch)):
             points[other] = record  # later records win
     below = max((c for c in points if c < context), default=None)
@@ -274,9 +287,9 @@ def matching_tuned(tuned, variant, hardware, context, layers, kv_cache_type="f16
                 "timestamp": record["timestamp"], "stopped": record.get("stopped"), "depth": depth,
                 "verified": verified,
                 # A short tune measured `tps` with only `depth` tokens in memory: scale it to this length like
-                # interpolated_speed does (an estimate, never "verified"); None when the depth is unknown.
+                # interpolated_speed does (an estimate, never "verified", at most 4x); else None.
                 "scaled_tps": (_scaled(variant, result["tps"], depth, context, kv_cache_type)
-                               if same and not verified and depth is not None else None),
+                               if same and not verified and depth and context <= depth * EXTRAPOLATE_LIMIT else None),
                 "same_placement": same,
                 "best_placement": best_placement,
                 "settings": {k: best[k] for k in ["threads", "batch", "ubatch", "flash_attn"] if best.get(k) is not None}}
@@ -459,8 +472,9 @@ def recommend(variants, hardware, requirements, measurements=(), calibration=Non
     hide = runtime_gpu or next((g.get("backend") for g in [gpu, *hardware["gpus"], *(hardware.get("other_gpus") or [])]
                                 if isinstance(g, dict) and g.get("backend") in GPU_BACKENDS), None)
     if runtime_backend == "cpu" and gpu is not None:
-        notes_extra.append("The installed llama.cpp build looks like a processor-only build, so options that use the "
-                           "graphics chip need a GPU build of llama.cpp to run as described.")
+        notes_extra.append("The installed llama.cpp cannot use the graphics chip right now (a processor-only build, or a "
+                           "GPU build that found no usable device), so options that use the graphics chip will not run as "
+                           "described until that is fixed.")
     if gpu is not None and not _speed(gpu.get("available")):
         # Free memory unknown (not zero): never guess, fall back to CPU-only placements.
         notes_extra.append(f"{gpu.get('name') or 'The selected graphics chip'} does not report its free memory, so only CPU options are shown.")

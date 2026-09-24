@@ -92,3 +92,25 @@ class SpeedModelTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SlidingWindowRealLogTests(unittest.TestCase):
+    def test_kv_bytes_match_real_llama_server_logs(self):
+        """Round 3: a random gemma3 model (6 layers, 5 sliding, 4 KV heads × 64) on real llama-server (llama.cpp
+        from llama-cpp-python 0.3.35, `-lv 4`). Logged `llama_kv_cache: size = … MiB` lines, both caches summed.
+        Sliding layers hold pad256(min(ctx, window + ubatch)) cells per user (llama-kv-cache-iswa.cpp)."""
+        from dataclasses import replace
+        from llm_configurator.catalogue import demo_variants
+        from llm_configurator.speed import kv_bytes
+        logged = {  # (window, context, users, ubatch, cache type): MiB
+            (128, 512, 1, None, "f16"): 3.00, (128, 2048, 1, None, "f16"): 5.75, (128, 8192, 2, None, "f16"): 23.50,
+            (128, 8192, 4, None, "f16"): 47.00, (128, 5000, 1, None, "f16"): 8.75, (128, 8192, 2, 1024, "f16"): 28.50,
+            (128, 4096, 3, None, "q8_0"): 12.36, (128, 1000, 2, None, "f16"): 9.50, (128, 300, 1, None, "f16"): 3.00,
+            (1024, 2048, 1, None, "f16"): 9.50, (1024, 8192, 2, None, "f16"): 31.00, (1024, 8192, 4, None, "f16"): 62.00,
+            (1024, 5000, 1, None, "f16"): 12.50, (1024, 8192, 2, 1024, "f16"): 36.00, (1024, 4096, 3, None, "q8_0"): 18.33,
+            (1024, 1000, 2, None, "f16"): 12.00}
+        base = dict(layers=6, kv_heads=4, head_dim=64, sliding_layers=5)
+        for (window, context, users, ubatch, kind), mib in logged.items():
+            with self.subTest(window=window, context=context, users=users, ubatch=ubatch, kind=kind):
+                ours = kv_bytes(replace(demo_variants()[0], sliding_window=window, **base), context, users, kind, ubatch) / 2**20
+                self.assertAlmostEqual(ours, mib, delta=0.01)
