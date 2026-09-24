@@ -185,6 +185,35 @@ function speedPresentation(c) {
     tag: "Speed unverified",
   };
 }
+// Plain verdicts from the engine; older reports fall back to measured speed only.
+const VERDICTS = {
+  runs_well: ["good", "Runs well"],
+  runs_slowly: ["slow", "Runs slowly"],
+  too_slow: ["bad", "Too slow"],
+  unknown: ["unknown", "Not tested yet"],
+};
+const EVIDENCE = {
+  measured: "measured on this computer",
+  tuned: "measured after tuning",
+  interpolated: "estimated from nearby tests",
+  community: "based on other people’s results",
+  estimated: "estimate",
+};
+function verdictOf(c) {
+  if (c.verdict && VERDICTS[c.verdict]) return c.verdict;
+  if (c.tps != null) return c.speed_meets_target ? "runs_well" : "runs_slowly";
+  return "unknown";
+}
+function verdictBadge(c) {
+  const verdict = verdictOf(c);
+  const [tone, label] = VERDICTS[verdict];
+  // Anything not measured on this computer is labelled, so estimates never read as tests.
+  const source = verdict === "unknown" ? null : c.verdict ? c.evidence : "measured";
+  const origin = source ? EVIDENCE[source] || EVIDENCE.estimated : null;
+  const qualifier = origin && !["measured", "tuned"].includes(source) ? origin : null;
+  const title = c.verdict_text || (origin ? `${label} (${origin})` : label);
+  return `<span class="verdict verdict-${tone}" title="${esc(title)}">${esc(label)}${qualifier ? `<small> · ${esc(qualifier)}</small>` : ""}</span>`;
+}
 function renderResults() {
   if (!report) return;
   const all = $("show_all").checked;
@@ -208,10 +237,10 @@ function renderResults() {
             c.quality_score == null
               ? "No quality score"
               : `Base-model ${c.quality_metric} index: ${c.quality_score.toFixed(1)}`;
-          return `<article class="card"><div class="card-top"><div class="card-title"><h3>${esc(c.name)}</h3><span class="quant">${esc(c.quant)}</span></div><span class="tag ${c.speed_meets_target ? "" : "unknown"}">${esc(speed.tag)}</span></div>
+          return `<article class="card"><div class="card-top"><div class="card-title"><h3>${esc(c.name)}</h3><span class="quant">${esc(c.quant)}</span></div><div class="card-tags">${verdictBadge(c)}<span class="tag ${c.speed_meets_target ? "" : "unknown"}">${esc(speed.tag)}</span></div></div>${c.verdict_text ? `<p class="verdict-text">${esc(c.verdict_text)}</p>` : ""}
       ${qualityPanel(c)}
       <div class="card-metrics concise"><div><strong>${c.context.toLocaleString()}</strong><span>context tokens per session</span></div><div><strong>${esc(speed.value)}</strong><span>${esc(speed.label)}</span></div><div><strong>${esc({ cpu: "CPU", gpu: "GPU", split: "GPU + CPU" }[c.mode])}</strong><span>${c.scenario === "now" ? "Fits current resources (estimated)" : "May fit after closing apps"}</span></div></div>
-      <div class="card-bottom"><p>${esc(c.explanation)}</p><button class="text-button" data-detail="${esc(c.id)}">View details & setup ↗</button></div></article>`;
+      <div class="card-bottom"><p>${esc(c.explanation)}</p><div class="card-actions"><button class="text-button" data-detail="${esc(c.id)}">View details ↗</button><button type="button" data-run="${esc(c.id)}">Get it running →</button></div></div></article>`;
         })
         .join("")
     : `<div class="empty"><h3>No qualifying configurations yet.</h3><p>${report.demo ? "Try reducing context or active users, or include unverified speed options." : "Refresh model metadata first. If models are cached, try a shorter context, fewer active users, or include unverified speed options."}</p><p class="hint">Rejections: ${report.rejected.context} context · ${report.rejected.memory} memory · ${report.rejected.speed} speed</p></div>`;
@@ -225,10 +254,27 @@ function renderResults() {
         detail(report.candidates.find((c) => c.id === button.dataset.detail)),
       ),
     );
+  document.querySelectorAll("[data-run]").forEach((button) =>
+    button.addEventListener("click", () =>
+      openRunPanel(report.candidates.find((c) => c.id === button.dataset.run)),
+    ),
+  );
   document
     .querySelectorAll("[data-open-rank]")
     .forEach((button) => button.addEventListener("click", () => openRanking()));
   $("export").disabled = false;
+}
+function openRunPanel(c) {
+  if (!c) return;
+  if (!window.RunPanel) {
+    message("The setup panel did not load. Reload the page and try again.", true);
+    return;
+  }
+  window.RunPanel.open(c, {
+    candidates: report.candidates,
+    workload: report.requirements?.workload,
+    demo: !!(report.demo || appState?.demo || c.demo),
+  });
 }
 function detail(c) {
   const settings = {

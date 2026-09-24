@@ -6,9 +6,13 @@
     <meta name="session-token" content="__SESSION_TOKEN__" />
     <title>LLM Configurator · Find your local fit</title>
     <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="/quality.css" />
     <script defer src="/app.js"></script>
     <script defer src="/wizard.js"></script>
     <script defer src="/selects.js"></script>
+    <script defer src="/jobs.js"></script>
+    <script defer src="/quality.js"></script>
+    <script defer src="/run.js"></script>
   </head>
   <body>
     <header>
@@ -380,9 +384,30 @@
         </details>
       </section>
       <footer>
-        Local models. Clear trade-offs.<span>LLM Configurator / v0.2</span>
+        Local models. Clear trade-offs.<span>LLM Configurator / v0.4</span>
       </footer>
     </main>
+    <aside id="jobs-tray" aria-label="Background tasks" hidden>
+      <button
+        id="jobs-toggle"
+        type="button"
+        class="jobs-toggle"
+        aria-expanded="true"
+        aria-controls="jobs-list"
+      >
+        <span>Background tasks<span class="visually-hidden">: </span></span
+        ><span id="jobs-count"></span>
+      </button>
+      <ul id="jobs-list"></ul>
+      <p id="jobs-live" class="visually-hidden" aria-live="polite"></p>
+    </aside>
+    <dialog id="run-panel" class="run-panel" aria-labelledby="run-title">
+      <button id="run-close" class="secondary close" type="button">
+        Close
+      </button>
+      <div id="run-content"></div>
+      <p id="run-live" class="visually-hidden" aria-live="polite"></p>
+    </dialog>
     <dialog id="detail">
       <button id="close_detail" class="secondary close">Close</button>
       <div id="detail_content"></div>
