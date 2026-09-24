@@ -64,7 +64,7 @@ More detail: [Getting started](https://github.com/Eyad-3D/LLM-Configurator/blob/
 ## What happens on your computer
 
 > - **Runs locally.** The app and any model server it starts listen on `127.0.0.1` only (your own computer). Other devices on your network cannot reach them.
-> - **Nothing is downloaded without you asking.** Model files and the llama.cpp engine are only fetched when you click Download / Install or run the matching command. Downloads are checked against their published fingerprint (a unique code that changes if even one byte is different) before use.
+> - **Nothing is downloaded without you asking.** Model files and the llama.cpp engine are only fetched when you click **Download** / **Install the engine** or run the matching command. Downloads are checked against their published fingerprint (a unique code that changes if even one byte is different) before use.
 > - **No tracking.** The app sends no usage data. It only contacts Hugging Face (model info and files), GitHub (the llama.cpp engine, community results you choose to import) and, if you add a key, Artificial Analysis (quality rankings).
 > - **Your key stays in your system's password store** (Windows Credential Manager, macOS Keychain, or a Linux keyring). Never in a plain file.
 > - **Sharing is manual.** Community sharing only opens a pre-filled GitHub page. You review it and press submit yourself.
