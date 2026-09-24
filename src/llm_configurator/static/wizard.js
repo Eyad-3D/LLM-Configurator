@@ -172,7 +172,11 @@ function answerRows() {
     ["Priority", text("priority") + ` · minimum ${$("min_tps").value} tok/s`],
     [
       "Context",
-      Number($("context").value).toLocaleString() + " tokens per session",
+      Number($("context").value).toLocaleString() +
+        " tokens per session" +
+        ($("kv_cache_type") && $("kv_cache_type").value !== "f16"
+          ? ` · memory ${text("kv_cache_type").split(" (")[0].toLowerCase()}`
+          : ""),
     ],
     ["Concurrent sessions / agents", $("users").value],
     ["Resources", text("resource-mode")],

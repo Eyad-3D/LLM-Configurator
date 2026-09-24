@@ -364,7 +364,7 @@ test("compression check defaults to the biggest file and shows plain results", a
     reference: "alpha-q8",
     results: {
       "alpha-q4": { mean_kld: 0.0123, median_kld: 0.004, kld_99: 0.2, same_top_p: 95.9, ppl_base: 7.1, ppl: 7.3, mean_delta_p: -0.5, plain: "Picks a different top word about 4% of the time." },
-      "alpha-q2": { mean_kld: 0.21, same_top_p: 0.82, ppl_base: 7.1, ppl: 9.9, mean_delta_p: null },
+      "alpha-q2": { mean_kld: 0.21, same_top_p: 82, ppl_base: 7.1, ppl: 9.9, mean_delta_p: null },
     },
     notes: ["The temporary file used 1.2 GiB and was deleted."],
   };
@@ -395,7 +395,7 @@ test("compression check defaults to the biggest file and shows plain results", a
   assert.deepEqual(posted, { reference_variant_id: "alpha-q8", variant_ids: ["alpha-q4", "alpha-q2"] });
   const text = panel.textContent;
   assert.match(text, /Picks a different top word about 4% of the time\./);
-  assert.match(text, /Picks a different top word about 18% of the time\./, "fraction converted and phrased");
+  assert.match(text, /Picks a different top word about 18% of the time\./, "percentage (as llama.cpp prints it) phrased");
   assert.match(text, /95\.9%/);
   assert.match(text, /0\.0123/);
   assert.match(text, /7\.10 → 7\.30/);

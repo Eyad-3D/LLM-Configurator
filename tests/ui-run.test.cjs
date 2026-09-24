@@ -451,7 +451,7 @@ test("a failed quick check explains what went wrong and hides unmeasured speed",
           result: {
             verdict: "failed",
             verdict_text: "The model did not answer.",
-            smoke: { ok: false, stage_failed: "start", checks: [{ name: "Model loads", ok: false, detail: "Out of memory" }], message: "Not enough memory to load the model." },
+            smoke: { ok: false, stage_failed: "start", checks: [{ name: "model_loads", ok: false, detail: "Out of memory" }], message: "Not enough memory to load the model." },
             speed: null,
           },
         }),
@@ -462,7 +462,8 @@ test("a failed quick check explains what went wrong and hides unmeasured speed",
   s.buttonIn("test", "Quick check only").click();
   await until(() => /It didn’t work/.test(s.stepText("test")), "failure");
   assert.equal(s.calls.find((c) => c.path === "/api/test").body.kind, "smoke");
-  assert.match(s.stepText("test"), /Failed: Model loads — Out of memory/);
+  assert.match(s.stepText("test"), /Failed: Out of memory/);
+  assert.doesNotMatch(s.stepText("test"), /model_loads/, "machine check ids stay off the page");
   assert.match(s.stepText("test"), /Not enough memory to load the model/);
   assert.doesNotMatch(s.stepText("test"), /Reading speed/);
   await s.close();

@@ -1409,6 +1409,30 @@ pre.export-content:focus-visible {
 .base-url {
   user-select: all;
 }
+.share-box {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.share-box h4 {
+  margin: 0 0 4px;
+}
+a.button-link {
+  display: inline-block;
+  padding: 9px 14px;
+  border-radius: 8px;
+  background: var(--green);
+  color: #fff;
+  font-weight: 650;
+  text-decoration: none;
+}
+a.button-link:hover,
+a.button-link:focus-visible {
+  text-decoration: underline;
+}
+.community-box .step-actions {
+  margin-top: 8px;
+}
 .copy-buffer {
   position: fixed;
   top: -1000px;
@@ -1651,5 +1675,9 @@ body.has-jobs main {
   }
   #jobs-tray {
     box-shadow: 0 10px 30px #0008;
+  }
+  a.button-link {
+    background: #2f7d55;
+    color: #fff;
   }
 }

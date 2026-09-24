@@ -62,6 +62,14 @@
     context: "Context size",
     parallel: "Chats at once",
   };
+  // Fallback wording for smoke-test checks when the server sends no sentence.
+  const CHECK_LABELS = {
+    not_empty: "The model wrote an answer.",
+    valid_utf8: "The text is readable.",
+    not_repeating: "No stuck repetition.",
+    no_template_leak: "No raw chat-format markers.",
+    correct_answer: "Answered a simple sum correctly.",
+  };
   const STATE_LABELS = {
     checking: "Checking…",
     ready: "Ready",
@@ -765,7 +773,7 @@
               { class: check.ok ? "ok" : "bad" },
               el("span", { "aria-hidden": "true", text: check.ok ? "✓" : "✗" }),
               el("span", { class: "visually-hidden", text: check.ok ? "Passed: " : "Failed: " }),
-              `${check.name}${check.detail ? ` — ${check.detail}` : ""}`,
+              check.detail || CHECK_LABELS[check.name] || String(check.name ?? "Check"),
             ),
           ),
         ),
@@ -829,8 +837,70 @@
           : null,
         hint("A token is a piece of a word — roughly ¾ of a word on average."),
       );
+      const id = speed.measurement?.id;
+      if (id && !ctx.demo) nodes.push(shareView(mem.test, [id]));
     }
     return nodes;
+  }
+
+  // ---- sharing a speed result (community) ----
+  // Nothing leaves the computer here: the app prepares the text, the person reads it,
+  // and only then chooses to post it on GitHub themselves.
+  const prepareShare = once("share", async function (holder, ids) {
+    holder.share = { loading: true };
+    render("test");
+    try {
+      holder.share = await call("/api/community/share", { measurement_ids: ids });
+    } catch (error) {
+      holder.share = { error: problem(error).reason };
+    }
+    render("test");
+  });
+  const safeIssueUrl = (url) =>
+    typeof url === "string" && /^https:\/\/github\.com\//.test(url) ? url : null;
+  function shareView(holder, ids) {
+    const share = holder.share;
+    const box = el("div", { class: "share-box" }, el("h4", { text: "Share this result (optional)" }));
+    if (!share) {
+      box.append(
+        hint("Help other people with similar computers: you can post this speed result publicly on GitHub. You’ll see exactly what is shared first. Nothing is sent until you post it yourself."),
+        el("div", { class: "step-actions" }, button("Show what would be shared", () => prepareShare(holder, ids), "secondary")),
+      );
+      return box;
+    }
+    if (share.loading) {
+      box.append(hint("Preparing…"));
+      return box;
+    }
+    if (share.error) {
+      box.append(el("p", { class: "step-note", text: share.error }));
+      return box;
+    }
+    const text = typeof share.json === "string" ? share.json : "";
+    const url = safeIssueUrl(share.issue_url);
+    const copyStatus = el("span", { class: "copy-status", role: "status" });
+    box.append(
+      hint("This is everything that would be shared: model names, a rough description of your computer (memory rounded, no names or serial numbers), the settings and the speeds. No file paths or user names."),
+      el(
+        "div",
+        { class: "code-head" },
+        el("span", { text: "What would be shared" }),
+        el("span", {}, copyStatus, button("Copy", () => copy(text, copyStatus), "secondary small", { "data-copy": "share" })),
+      ),
+      el("pre", { class: "export-content share-json", tabindex: "0" }, el("code", { text })),
+      share.fits_in_url === false
+        ? el("p", { class: "step-note", text: "This is too long to fit in a link. Press Copy first, then paste it into the GitHub page that opens." })
+        : null,
+      url
+        ? el(
+            "p",
+            {},
+            el("a", { href: url, target: "_blank", rel: "noopener noreferrer", class: "button-link" }, "Open GitHub to post it ↗"),
+          )
+        : null,
+      hint("GitHub is a public website. You need a free GitHub account to post."),
+    );
+    return box;
   }
   function testView(reason) {
     const s = mem.test;
@@ -912,19 +982,26 @@
     const base = ctx.candidate.launch || {};
     const best = result.best || {};
     const changes = Object.keys(SETTING_LABELS).filter(
-      (key) => key in best && base[key] !== undefined && best[key] !== base[key],
+      (key) => key in best && (base[key] ?? null) !== (best[key] ?? null),
     );
     const ratio = Number(result.improvement);
     const headline =
       Number.isFinite(ratio) && ratio > 1.02
         ? `Found settings about ${Math.round((ratio - 1) * 100)}% faster.`
         : "Your starting settings were already about as fast as it gets.";
-    const tried = (result.trials || []).filter((t) => t.status === "ok").length;
-    const stopped = {
-      budget: "Stopped when the time ran out.",
-      converged: "Stopped early: nothing faster left to try.",
-      cancelled: "Stopped because you cancelled.",
-    }[result.stopped];
+    // The starting point and the final double-check are re-runs, not new settings.
+    const tried = (result.trials || []).filter(
+      (t) => t.status === "ok" && t.step !== "baseline" && t.step !== "confirm",
+    ).length;
+    const notes = (result.notes || []).map(plain);
+    // Newer results already say why tuning stopped in notes; add ours only for older ones.
+    const stopped = notes.some((n) => /^Stopped\b/.test(n))
+      ? null
+      : {
+          budget: "Stopped when the time ran out.",
+          converged: "Stopped early: nothing faster left to try.",
+          cancelled: "Stopped because you cancelled.",
+        }[result.stopped];
     return [
       el("p", { class: "step-done", text: headline }),
       el(
@@ -945,7 +1022,10 @@
           )
         : null,
       hint([`Tried ${tried} setting${tried === 1 ? "" : "s"}.`, stopped].filter(Boolean).join(" ")),
-      (result.notes || []).map((note) => hint(note)),
+      // The headline already says when nothing got faster.
+      notes
+        .filter((note) => !/^Your starting settings were already/.test(note))
+        .map((note) => hint(note)),
       hint("The best settings are saved on this computer for this model."),
     ];
   }
@@ -1246,7 +1326,7 @@
           shared.serve = {
             status: "ready",
             info: state.info,
-            reason: done.state === "cancelled" ? null : done.error || "The server did not start.",
+            reason: done.state === "cancelled" ? null : plain(done.error) || "The server did not start.",
           };
         }
       });
@@ -1294,7 +1374,12 @@
         ),
         hint("Paste this address into any app that works with OpenAI. If it asks for a key, type anything. Only apps on this computer can reach it."),
       );
-    } else nodes.push(hint("Starts the model in the background with the settings above. Other apps on this computer can then chat with it."));
+    } else if (info.starting) nodes.push(hint("A model is starting. This can take a minute."));
+    else {
+      nodes.push(hint("Starts the model in the background with the settings above. Other apps on this computer can then chat with it."));
+      // The last server stopped by itself: say why, without file paths.
+      if (info.error) nodes.push(reasonView(`The last server stopped: ${plain(info.error)}`));
+    }
     if (s.reason) nodes.push(reasonView(s.reason));
     if (reason) nodes.push(reasonView(reason));
     else
