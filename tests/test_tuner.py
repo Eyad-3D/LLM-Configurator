@@ -50,7 +50,7 @@ class FakeBench:
         self.calls.append(argv)
         reps = int(argv[argv.index("-r") + 1])
         combos = list(itertools.product(
-            [int(x) for x in flag_values(argv, "-t", "16")], [int(x) for x in flag_values(argv, "-fa", "-1")],
+            [int(x) for x in flag_values(argv, "-t", "16")], [{"on": 1, "off": 0, "auto": -1}[x] for x in flag_values(argv, "-fa", "auto")],
             [int(x) for x in flag_values(argv, "-ngl", "99")], [int(x) for x in flag_values(argv, "-ncmoe", "0")],
             [int(x) for x in flag_values(argv, "-b", "2048")], [int(x) for x in flag_values(argv, "-ub", "512")],
             flag_values(argv, "-ctk", "f16"), flag_values(argv, "-ctv", "f16")))
@@ -101,21 +101,21 @@ class BenchArgsTests(unittest.TestCase):
                                        flash_attn="on", cache_type_k="q8_0", cache_type_v="q8_0", n_cpu_moe=4,
                                        mmap=False, device="CUDA0"), n_prompt=256, n_gen=64, depth=2048, repetitions=3)
         self.assertEqual(args, ["-m", "/models/m.gguf", "-p", "256", "-n", "64", "-d", "2048", "-ngl", "33",
-                                "-ncmoe", "4", "-t", "6", "-b", "1024", "-ub", "256", "-fa", "1", "-ctk", "q8_0",
-                                "-ctv", "q8_0", "-dev", "CUDA0", "-mmp", "0", "-r", "3", "-o", "json"])
+                                "-ncmoe", "4", "-t", "6", "-b", "1024", "-ub", "256", "-fa", "on", "-ctk", "q8_0",
+                                "-ctv", "q8_0", "-dev", "CUDA0", "-lm", "none", "-r", "3", "-o", "json"])
 
     def test_sweep_uses_comma_lists(self):
         args = tuner.bench_args(config(gpu_layers=20, total_layers=32), sweep={
             "threads": [8, 7, 4], "flash_attn": ["on", "off"], "gpu_layers": [20, 32], "cache_type_k": ["f16", "q8_0"]})
         self.assertEqual(args, ["-m", "/models/m.gguf", "-p", "512", "-n", "128", "-ngl", "20,33", "-t", "8,7,4",
-                                "-fa", "1,0", "-ctk", "f16,q8_0", "-r", "2", "-o", "json"])
+                                "-fa", "on,off", "-ctk", "f16,q8_0", "-r", "2", "-o", "json"])
 
     def test_flash_attn_auto_is_not_passed_and_cpu_only_hides_gpu(self):
         args = tuner.bench_args(config(flash_attn="auto", gpu_backend="cuda"))
         self.assertNotIn("-fa", args)
         self.assertEqual(args[args.index("-dev") + 1], "none")
         args = tuner.bench_args(config(flash_attn="off"))
-        self.assertEqual(args[args.index("-fa") + 1], "0")
+        self.assertEqual(args[args.index("-fa") + 1], "off")
 
     def test_rejects_bad_sweeps(self):
         with self.assertRaisesRegex(ValueError, "cannot be swept"):
@@ -166,8 +166,9 @@ class TuneTests(unittest.TestCase):
         self.assertFalse(any(t["step"] == "batch" for t in result["trials"]))
         # A thread sweep is one llama-bench process with a comma list.
         self.assertIn("8,7,4,16", [c[c.index("-t") + 1] for c in bench.calls if "-t" in c])
-        # The unset thread count is not re-run on its own; its baseline number is reused.
-        self.assertEqual(sum("-t" not in c for c in bench.calls), 1)
+        # The unset thread count is re-measured in its own run during the thread step (baseline + that one), so the
+        # sweep is compared with a fresh number, not the first cold run.
+        self.assertEqual(sum("-t" not in c for c in bench.calls), 2)
 
     def test_auto_flash_attention_never_goes_in_a_comma_list(self):
         _, bench, _ = run()
