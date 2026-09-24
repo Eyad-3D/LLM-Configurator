@@ -48,6 +48,8 @@ def parser():
     add = model_actions.add_parser("add", help="Add a Hugging Face model and its GGUF repo to your catalogue")
     add.add_argument("base_repo", help="Original model repo, for example Qwen/Qwen3-8B")
     add.add_argument("gguf_repo", help="Repo holding the GGUF files, for example Qwen/Qwen3-8B-GGUF")
+    add.add_argument("--config-repo", help="Repo to read the model's config.json from, when the original repo asks you "
+                                           "to log in or accept its terms first (for example a public copy of it)")
     remove = model_actions.add_parser("remove", help="Remove a model you added")
     remove.add_argument("base_repo")
     commands.add_parser("benchmarks", help="List AA names/slugs to explicitly map to local models")
@@ -133,6 +135,7 @@ def parser():
     export.add_argument("--platform", choices=["posix", "windows"], default="windows" if sys.platform == "win32" else "posix")
     export.add_argument("--tuned", action="store_true", help="Use the best saved tune")
     export.add_argument("--output", type=Path, help="Write the file here instead of printing it")
+    export.add_argument("--port", type=int, help="Port the server should listen on (default 8080)")
     run_server = commands.add_parser("run", help="Run a model as an OpenAI-compatible server on this computer until Ctrl+C")
     model_options(run_server)
     run_server.add_argument("--port", type=int, help="Port to listen on (default: a free one)")
@@ -246,9 +249,10 @@ def run_job(fn, title):
             bar.update(job["progress"])
             if job["state"] in {"done", "failed", "cancelled"}:
                 break
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit) as stop:  # Ctrl+C, or a closed terminal / kill (exit handlers)
         bar.close()
-        print("Stopping… (press Ctrl+C again to quit immediately)", file=sys.stderr, flush=True)
+        if isinstance(stop, KeyboardInterrupt):
+            print("Stopping… (press Ctrl+C again to quit immediately)", file=sys.stderr, flush=True)
         jobs.cancel(job["id"])
         # Poll the state: a Thread.join() interrupted by Ctrl+C can return at once while the job still runs,
         # and exiting then would leave llama-bench or llama-server running on its own.
@@ -326,13 +330,13 @@ def show_tune(result):
         print("Use them with --tuned on test, export or run.")
 
 
-def _refresh_progress(progress):
-    """catalogue.refresh reports model counts, not the usual stage/done/total keys."""
-    def report(value):
-        done, total = value.get("models_done"), value.get("models_total")
-        progress({"stage": "refresh", "done": done or 0, "total": total or None,
-                  "message": f"Model {done} of {total}" if total else "Fetching benchmark scores", **value})
-    return report
+def shown(path):
+    """A path as the terminal can print it: a file name that is not valid text shows '?' instead of crashing."""
+    text, encoding = str(path), getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        return text.encode(encoding, "replace").decode(encoding, "replace")
+    except LookupError:
+        return text.encode("utf-8", "replace").decode("utf-8")
 
 
 def _safe_streams():
@@ -347,6 +351,9 @@ def _safe_streams():
 def main(argv=None):
     _safe_streams()
     args = parser().parse_args(argv)
+    from . import llama_server
+    # A closed terminal or `kill` (SIGTERM/SIGHUP) then still stops every llama-server this command started.
+    getattr(llama_server, "install_exit_handlers", lambda: None)()
     try:
         store = Store(args.data_dir)
         command = args.command
@@ -357,14 +364,14 @@ def main(argv=None):
             store.put("calibration", result)
             print_json(result)
         elif command == "refresh":
-            print_json(run_job(lambda progress, cancel: refresh(store, progress=_refresh_progress(progress), cancel=cancel),
+            print_json(run_job(lambda progress, cancel: refresh(store, progress=progress, cancel=cancel),
                                "Fetching model metadata"))
         elif command == "models":
             from . import catalogue
             if args.models_action == "add":
-                catalogue.add_entry(store, args.base_repo, args.gguf_repo)
+                catalogue.add_entry(store, args.base_repo, args.gguf_repo, config_repo=args.config_repo)
                 try:
-                    fetched = run_job(lambda progress, cancel: catalogue.refresh_entry(store, args.base_repo),
+                    fetched = run_job(lambda progress, cancel: catalogue.refresh_entry(store, args.base_repo, cancel=cancel),
                                       f"Fetching the file list for {args.base_repo}")
                     print(f"Added {args.base_repo}: {fetched.get('variants', 0)} downloadable versions. "
                           "See their IDs with: llm-config models")
@@ -498,11 +505,11 @@ def download_command(store, args):
     existing = run_job(lambda progress, cancel: app.local_model(store, variant, progress=progress, cancel=cancel),
                        "Looking for a copy already on this computer")
     if existing:
-        print(f"Already on this computer: {existing}")
+        print(f"Already on this computer: {shown(existing)}")
         return 0
     plan = downloads.plan(variant, directory)
     print(f"Download {variant.name} {variant.quant}: {size(plan['total_bytes'])} "
-          f"({size(plan['remaining_bytes'])} still to fetch) into {directory}", file=sys.stderr, flush=True)
+          f"({size(plan['remaining_bytes'])} still to fetch) into {shown(directory)}", file=sys.stderr, flush=True)
     if not plan.get("enough_space"):
         raise ValueError(f"Not enough disk space: {size(plan['remaining_bytes'])} needed plus 1 GiB spare, "
                          f"{size(plan.get('disk_free'))} free. Free some space or choose --directory.")
@@ -521,12 +528,13 @@ def download_command(store, args):
     except KeyboardInterrupt:
         print(PAUSED, file=sys.stderr)
         return 130
+    app.remember_download(store, variant, directory)
     if args.directory:
         try:  # outside the models folder, other commands only find it once it is registered
             discover.add_file(store, path)
         except ValueError as error:
-            print(f"Note: {error} Run: llm-config local --scan --dir \"{directory}\"", file=sys.stderr)
-    print(path)
+            print(f"Note: {error} Run: llm-config local --scan --dir \"{shown(directory)}\"", file=sys.stderr)
+    print(shown(path))
     return 0
 
 
@@ -542,7 +550,7 @@ def local_command(store, args):
             print_json(record)
         else:
             label = "Matches a catalogue model" if record.get("variant_id") else "Registered as your own model"
-            print(f"{label}: {record.get('filename')}. Model ID: {record.get('model_id') or _model_id(record)}")
+            print(f"{label}: {shown(record.get('filename'))}. Model ID: {record.get('model_id') or _model_id(record)}")
             print("Use that ID with recommend, test, tune, quiz, export or run.")
         return 0
     dirs = [d.expanduser().resolve() for d in args.dirs]  # saved paths must work from any folder
@@ -555,7 +563,7 @@ def local_command(store, args):
         print_json({"files": files, "locations": locations, "registered": store.get("local_variants", [])})
         return 0
     for location in locations:
-        print(f"{'[x]' if location.get('exists') else '[ ]'} {location.get('source')}: {location.get('path')}")
+        print(f"{'[x]' if location.get('exists') else '[ ]'} {location.get('source')}: {shown(location.get('path'))}")
     if not files:
         print("No model files found yet. Run: llm-config local --scan")
     for record in files:
@@ -565,9 +573,9 @@ def local_command(store, args):
             match = f"not in the catalogue; your own Model ID: {record['local_variant_id']}"
         else:
             match = f"cannot be used: {record.get('gguf_error') or record.get('local_error') or 'incomplete'}"
-        print(f"{record.get('path')} ({size(record.get('size_bytes'))}) - {match}")
+        print(f"{shown(record.get('path'))} ({size(record.get('size_bytes'))}) - {match}")
     for record in store.get("local_variants", []):
-        print(f"Registered: {record['path']} - Model ID: {record['variant']['id']}")
+        print(f"Registered: {shown(record['path'])} - Model ID: {record['variant']['id']}")
     return 0
 
 
@@ -580,8 +588,15 @@ def community_command(store, args):
     elif args.community_action == "share":
         payload = community.share_payload(store, args.measurement_ids)
         print(payload["json"])
+        if payload.get("skipped"):
+            count = payload["skipped"]
+            print(f"\n{count} result{'s' if count != 1 else ''} could not be shared (measured on different hardware, "
+                  "or incomplete) and {} left out.".format("were" if count != 1 else "was"), file=sys.stderr)
         print("\nNothing has been sent. Review the data above, then open this link to post it yourself:", file=sys.stderr)
         print(payload["issue_url"])
+        if payload.get("fits_in_url") is False:
+            print("The data is too long to fit in the link, so the form opens empty: copy the text above and paste it "
+                  "into the form.", file=sys.stderr)
     else:
         saved = store.get("community") or {}
         print(f"{len(saved.get('records') or [])} community results from {saved.get('source') or 'nowhere yet'}"
@@ -618,7 +633,7 @@ def model_command(store, args):
                     print(f"  {needle['note']}")
         return 0
     if args.command == "export":
-        result = app.export_config(store, variant, candidate, hardware, args.format, args.platform, args.tuned)
+        result = app.export_config(store, variant, candidate, hardware, args.format, args.platform, args.tuned, port=args.port)
         if args.json:
             print_json(result)
             return 0
@@ -629,7 +644,7 @@ def model_command(store, args):
             notes = [n for n in notes if "UTF-8 with BOM" not in n]
             instructions = [line.replace(result.get("filename") or "\0", args.output.name) for line in instructions
                             if not line.startswith("Save this as") and not (executable and "chmod +x" in line)]
-            print(f"Saved {args.output}", file=sys.stderr)
+            print(f"Saved {shown(args.output)}", file=sys.stderr)
         else:
             print(result["content"])
         for line in instructions + notes:
