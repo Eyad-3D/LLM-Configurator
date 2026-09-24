@@ -7,6 +7,7 @@ numbers: anything the header does not say stays None.
 from hashlib import sha256 as _sha256
 from pathlib import Path
 import re
+import stat
 import struct
 
 from .domain import ARCHITECTURES, Variant
@@ -183,38 +184,48 @@ def _tensor_infos(reader, count):
 def _parse(path, tensors=False):
     path = Path(path)
     try:
-        size = path.stat().st_size
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode):  # a pipe or device would block or never end
+            raise ValueError(f"{path.name} is not a regular file. Pick the .gguf model file itself.")
+        size = info.st_size
         handle = path.open("rb")
     except OSError as exc:
         raise ValueError(f"Could not open {path.name}: {exc.strerror or exc}. Check the file still exists and is readable.") from None
-    with handle:
-        reader = _Reader(handle, size, MAX_HEADER_BYTES)
-        if size < 4 or reader.read(4) != MAGIC:
-            raise _bad("it does not start with the GGUF marker")
-        version = reader.unpack("I")
-        if version == 1:
-            raise _bad("it uses GGUF version 1, which llama.cpp no longer loads")
-        if version not in (2, 3):
-            if version & 0xFFFF == 0 and version >> 16:
-                raise _bad("it is a big-endian GGUF, which only runs on big-endian machines")
-            raise _bad(f"it uses GGUF version {version}, which this app does not know yet")
-        tensor_count, kv_count = reader.unpack("Q"), reader.unpack("Q")
-        if kv_count > MAX_KV or tensor_count > MAX_TENSORS:
-            raise _bad("the header claims an impossible number of entries")
-        values, skipped, lengths = {}, [], {}
-        for _ in range(kv_count):
-            key = reader.string()
-            if key is None:
-                raise _bad("a setting name is impossibly long")
-            kind = reader.unpack("I")
-            value = _value(reader, kind)
-            if kind == _ARRAY:
-                lengths[key] = reader.last_count
-            if value is None:
-                skipped.append(key)
-            else:
-                values[key] = value
-        table = _tensor_infos(reader, tensor_count) if tensors else None
+    try:
+        with handle:
+            return _parse_open(handle, size, tensors)
+    except OSError as exc:
+        raise ValueError(f"Could not read {path.name}: {exc.strerror or exc}. Check the disk and try again.") from None
+
+
+def _parse_open(handle, size, tensors):
+    reader = _Reader(handle, size, MAX_HEADER_BYTES)
+    if size < 4 or reader.read(4) != MAGIC:
+        raise _bad("it does not start with the GGUF marker")
+    version = reader.unpack("I")
+    if version == 1:
+        raise _bad("it uses GGUF version 1, which llama.cpp no longer loads")
+    if version not in (2, 3):
+        if version & 0xFFFF == 0 and version >> 16:
+            raise _bad("it is a big-endian GGUF, which only runs on big-endian machines")
+        raise _bad(f"it uses GGUF version {version}, which this app does not know yet")
+    tensor_count, kv_count = reader.unpack("Q"), reader.unpack("Q")
+    if kv_count > MAX_KV or tensor_count > MAX_TENSORS:
+        raise _bad("the header claims an impossible number of entries")
+    values, skipped, lengths = {}, [], {}
+    for _ in range(kv_count):
+        key = reader.string()
+        if key is None:
+            raise _bad("a setting name is impossibly long")
+        kind = reader.unpack("I")
+        value = _value(reader, kind)
+        if kind == _ARRAY:
+            lengths[key] = reader.last_count
+        if value is None:
+            skipped.append(key)
+        else:
+            values[key] = value
+    table = _tensor_infos(reader, tensor_count) if tensors else None
     return version, tensor_count, values, skipped, table, lengths
 
 
@@ -319,8 +330,10 @@ def shard_paths(path):
     return parts
 
 
-def local_id(path, sha256=None):
-    key = sha256.lower() if sha256 else _sha256(str(Path(path).resolve()).encode("utf-8", "surrogateescape")).hexdigest()
+def local_id(path):
+    """Stable id for a local file, from where it really lives (links resolved). It does not depend on whether the
+    file has been fingerprinted yet, so a scan and a manual `local --add` of the same file agree on it."""
+    key = _sha256(str(Path(path).resolve()).encode("utf-8", "surrogateescape")).hexdigest()
     return f"local:{key[:16]}:{Path(path).name}"
 
 
@@ -351,15 +364,19 @@ def variant_from_file(path, sha256=None):
         raise ValueError(f"The file's header does not say its {', '.join(missing)}, so its memory needs cannot be worked out. "
                          "Try a GGUF from another publisher.")
     table = dict(first["tensors"])
+    try:
+        sizes = [p.stat().st_size for p in parts]
+    except OSError as exc:
+        raise ValueError(f"Could not read {parts[0].name}: {exc.strerror or exc}. Check every part is still there.") from None
     files = []
     if len(parts) > 1:
         for part in parts[1:]:
             extra = read_metadata(part, tensors=True)["tensors"]
             for key in table:
                 table[key] += extra[key]
-        files = [{"filename": p.name, "size_bytes": p.stat().st_size, "sha256": sha256 if i == 0 else None}
+        files = [{"filename": p.name, "size_bytes": sizes[i], "sha256": sha256 if i == 0 else None}
                  for i, p in enumerate(parts)]
-    size = sum(p.stat().st_size for p in parts)
+    size = sum(sizes)
     if size <= 0:
         raise ValueError(f"{parts[0].name} is empty. Re-download it.")
     experts, active = summary["experts"], min(summary["active_experts"], summary["experts"])
@@ -375,7 +392,7 @@ def variant_from_file(path, sha256=None):
             active_parameters = round(parameters - table["expert_parameters"] * (1 - active / experts))
     name = summary["name"] or parts[0].name.removesuffix(".gguf")
     return Variant(
-        id=local_id(parts[0], sha256), name=name, base_repo=f"local/{name}", repo="local", revision="", base_revision="",
+        id=local_id(parts[0]), name=name, base_repo=f"local/{name}", repo="local", revision="", base_revision="",
         filename=parts[0].name, sha256=sha256.lower() if sha256 else None, quant=summary["quant"] or "unknown",
         size_bytes=size, layers=summary["layers"], kv_heads=summary["kv_heads"], head_dim=summary["head_dim"],
         max_context=summary["context_length"], architecture=arch, files=files, parameters=parameters,
