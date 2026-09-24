@@ -603,6 +603,18 @@ class SeamTests(Base):
         self.assertNotIn("LLAMA_API_KEY", env_used)
         self.assertEqual(env_used["LLAMA_ARG_CORS_ORIGINS"], "localhost")
 
+    def test_slots_monitoring_page_is_off(self):
+        import urllib.error
+        import urllib.request
+        server = self.server().start()
+        self.assertEqual(llama_server.server_env(server.config)["LLAMA_ARG_ENDPOINT_SLOTS"], "0")
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            opener.open(f"{server.base_url}/slots", timeout=10)
+        self.assertEqual(caught.exception.code, 501)  # what real llama-server answers with the variable set
+        caught.exception.close()
+        self.assertEqual(server.chat([{"role": "user", "content": "What is 5+5?"}])["text"], "10")
+
     def test_other_web_pages_cannot_read_the_server(self):
         import urllib.request
         server = self.server().start()

@@ -100,10 +100,12 @@ def port_is_free(port, host="127.0.0.1"):
 
 def server_env(config):
     """launch.server_env without the user's LLAMA_ARG_* / LLAMA_API_KEY (they would silently change flags the app
-    leaves at llama.cpp defaults, or lock the app out). CORS is limited to localhost pages; builds that don't know
-    the variable ignore it."""
+    leaves at llama.cpp defaults, or lock the app out). CORS is limited to localhost pages, and the /slots monitoring
+    page (sampler settings and token counts of each user's request; the app never reads it) is switched off, which
+    llama-server answers with 501. Builds that don't know a variable ignore it."""
     env = {k: v for k, v in launch.server_env(config).items() if not _ENV_BLOCKED.match(k)}
     env["LLAMA_ARG_CORS_ORIGINS"] = "localhost"
+    env["LLAMA_ARG_ENDPOINT_SLOTS"] = "0"
     return env
 
 

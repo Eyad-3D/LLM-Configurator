@@ -341,6 +341,28 @@ class SpeedTests(TestingBase):
         self.assertLessEqual(len(prompt.split()) * 3, 1024 - 256)
         self.assertGreater(len(prompt.split()) * 3, (1024 - 256) * 0.7)
 
+    def test_first_word_prompt_fits_even_with_lumpy_token_counts(self):
+        # A fixed overhead per request makes the proportional guess undershoot; the loop still ends with a fit.
+        class Lumpy:
+            def tokenize(self, text):
+                return list(range(2 * len(text.split()) + 300))
+        prompt, count = testing.fitted_prompt(Lumpy(), 400)
+        self.assertLessEqual(count, 400)
+        self.assertEqual(count, 2 * len(prompt.split()) + 300)
+
+    def test_first_word_target_leaves_room_in_every_context(self):
+        for context, parallel, expected in [(8192, 1, 1500), (2048, 1, 1500), (1024, 1, 768), (1024, 4, 768),
+                                            (384, 1, 192), (64, 1, 32)]:
+            self.assertEqual(testing.ttft_target({"context": context, "parallel": parallel}), expected, context)
+
+    def test_start_failure_says_memory_only_when_llama_cpp_did(self):
+        oom = "Not enough memory to load this model with these settings. Try a smaller download."
+        self.assertIn("ran out of memory", testing._start_message(oom))
+        killed = "The system stopped the model server, most likely because memory ran out."
+        self.assertEqual(testing._start_message(killed), f"The model did not start: {killed}")
+        other = "Compressed notes (the KV cache, the model's short-term notepad) need flash attention turned on."
+        self.assertNotIn("ran out of memory", testing._start_message(other))
+
     def test_first_word_prompt_without_tokenizer_falls_back_to_the_estimate(self):
         FakeServer.tokens_per_word = None
         self.assertIsNotNone(self.run_speed()["summary"]["ttft_s"])

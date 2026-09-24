@@ -223,6 +223,10 @@ def bench_failure(stderr, stdout="", returncode=None, timed_out=False):
     fatal = [line for line in lines if not _NOT_FATAL.search(line)]
     if re.search(r"unknown argument|invalid parameter|error: invalid|invalid device", text, re.I):
         return "This llama.cpp version does not support one of these settings."
+    missing = next((m.group(1) for line in fatal if (m := re.search(r"failed to open GGUF file '([^']*)'", line))), None)
+    if missing:
+        name = re.split(r"[\\/]", missing)[-1]
+        return f"The model file is missing or cannot be read ({name})."
     cause = next((m.group(1).strip() for line in reversed(fatal)
                   if (m := re.search(r"error loading model: (.+)", line))), None)
     if cause and OOM_TEXT.search(cause):

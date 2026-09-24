@@ -564,6 +564,14 @@ class FailureTextTests(unittest.TestCase):
                 "the file bounds, model is corrupted or incomplete\nllama_bench: error: failed to load model 'x'\n")
         self.assertIn("not within the file bounds", tuner.bench_failure(text, "[", 1))
 
+    def test_missing_file_names_only_the_file(self):
+        # Real llama-bench -v for a missing file (the cause line itself only says "failed to load model from").
+        text = ("gguf_init_from_file: failed to open GGUF file '/home/me/models/nope.gguf' (No such file or directory)\n"
+                "llama_model_load: error loading model: llama_model_loader: failed to load model from /home/me/models/nope.gguf\n"
+                "llama_model_load_from_file_impl: failed to load model\n"
+                "llama_bench: error: failed to load model '/home/me/models/nope.gguf'\n")
+        self.assertEqual(tuner.bench_failure(text, "[\n", 1), "The model file is missing or cannot be read (nope.gguf).")
+
     def test_quantized_v_cache_needs_flash_attention(self):
         text = ("llama_init_from_model: quantized V cache requires flash_attn to be enabled\n"
                 "llama_bench: error: failed to create context with model 'x'\n")

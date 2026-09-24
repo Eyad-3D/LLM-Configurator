@@ -53,7 +53,9 @@ def free_port():
         return s.getsockname()[1]
 
 
-class FakeMatchesRealTests(unittest.TestCase):
+class FakeLlamaCase(unittest.TestCase):
+    """A fake tiny model plus helpers to run the fake llama.cpp tools."""
+
     @classmethod
     def setUpClass(cls):
         cls.fx = fixtures()
@@ -87,6 +89,9 @@ class FakeMatchesRealTests(unittest.TestCase):
                 pass
             time.sleep(0.05)
         self.fail("fake llama-server did not start")
+
+
+class FakeMatchesRealTests(FakeLlamaCase):
 
     def test_version_line_format(self):
         for mode in ["server", "perplexity", "cli"]:
@@ -382,6 +387,194 @@ class FakeMatchesRealTests(unittest.TestCase):
             process.terminate()
             process.wait(20)
 
+
+# Captured from the real llama-bench / llama-server 4df29be (CPU, tiny llama F16) under `ulimit -v 3000000`, with a
+# context of 2,000,000 tokens (bench: -p 8 -n 4 -d 2000000 -v; server: -c 2000000). llama.cpp pads the context to
+# 256 cells (2,000,128 x 4 KiB). Without -v llama-bench printed only the last line; llama-server always prints all.
+REAL_CONTEXT_OOM = [
+    "ggml_aligned_malloc: insufficient memory (attempted to allocate 7813.00 MB)",
+    "ggml_backend_cpu_buffer_type_alloc_buffer: failed to allocate buffer of size 8192524288",
+    "alloc_tensor_range: failed to allocate CPU buffer of size 8192524288",
+    "llama_init_from_model: failed to initialize the context: failed to allocate buffer for kv cache",
+]
+REAL_SLOTS_OFF = {"error": {"code": 501, "message": "This server does not support slots endpoint. Start it with `--slots`",
+                            "type": "not_supported_error"}}
+
+
+class FakeMemoryAndSlotsTests(FakeLlamaCase):
+    """Round 3: the out-of-memory text llama-bench hides without -v, and the /slots switch (fake side)."""
+
+    def test_bench_context_out_of_memory_like_real(self):
+        args = ["-m", self.model, "-p", "8", "-n", "4", "-d", "0,2000000", "-r", "1", "-o", "json"]
+        quiet = self.run_fake("bench", args, MAX_CONTEXT="100000")
+        self.assertEqual(quiet.returncode, 1)
+        self.assertEqual(quiet.stderr, f"llama_bench: error: failed to create context with model '{self.model}'\n")
+        self.assertEqual(len(json.loads(quiet.stdout.rstrip().rstrip(",") + "]")), 2)  # the d=0 rows came first
+        loud = self.run_fake("bench", args + ["-v"], MAX_CONTEXT="100000")
+        lines = [line for line in loud.stderr.splitlines() if "alloc" in line or "fail" in line]
+        self.assertEqual(lines, REAL_CONTEXT_OOM + [f"llama_bench: error: failed to create context with model '{self.model}'"])
+        from llm_configurator import tuner
+        self.assertEqual(tuner.bench_failure(quiet.stderr, quiet.stdout, 1), tuner.NO_CAUSE)
+        self.assertEqual(tuner.bench_failure(loud.stderr, loud.stdout, 1), "Ran out of memory with these settings.")
+
+    def test_server_context_out_of_memory_like_real(self):
+        done = self.run_fake("server", ["-m", self.model, "-c", "2000000", "--port", str(free_port())],
+                             MAX_CONTEXT="100000", LOAD_SECONDS="0")
+        self.assertEqual(done.returncode, 1)
+        for line in REAL_CONTEXT_OOM + ["exiting due to model loading error"]:
+            self.assertIn(line, done.stderr)
+        from llm_configurator import llama_server
+        self.assertIn("Not enough memory", llama_server.failure_from_log(done.stderr, 1))
+
+    def test_slots_page_switch_like_real(self):
+        process, base = self.start_server([])
+        self.assertEqual(http("GET", base + "/slots")[0], 200)
+        os.environ["LLAMA_ARG_ENDPOINT_SLOTS"] = "0"
+        try:
+            process, base = self.start_server([])
+        finally:
+            del os.environ["LLAMA_ARG_ENDPOINT_SLOTS"]
+        self.assertEqual(http("GET", base + "/slots"), (501, REAL_SLOTS_OFF))
+
+
+REAL_BIN = os.environ.get("LLM_CONFIG_REAL_RUNTIME")
+REAL_MODELS = os.environ.get("LLM_CONFIG_TINY_MODELS")
+
+
+def _same_arch(text):
+    """The fake's unknown architecture is called made-up-arch, the real sample's notarealarch."""
+    return re.sub(r"'(notarealarch|made-up-arch)'", "'<arch>'", text)
+
+
+def _limit_memory():
+    import resource
+    resource.setrlimit(resource.RLIMIT_AS, (3_000_000 * 1024, 3_000_000 * 1024))
+
+
+@unittest.skipUnless(REAL_BIN and REAL_MODELS, "set LLM_CONFIG_REAL_RUNTIME and LLM_CONFIG_TINY_MODELS")
+class RealAndFakeSideBySideTests(FakeLlamaCase):
+    """Runs the same command on the real build and the fake and compares what the app reads."""
+
+    def real(self, name):
+        exe = Path(REAL_BIN) / name
+        return [str(exe.with_suffix(".exe") if os.name == "nt" and not exe.exists() else exe)]
+
+    @staticmethod
+    def failure_lines(text, *paths):
+        for path in paths:
+            text = text.replace(path, "<model>")
+        return [line for line in _same_arch(text).splitlines() if re.search(r"error|fail", line, re.I)]
+
+    def test_bench_load_failures_read_the_same(self):
+        from llm_configurator import tuner
+        missing = str(Path(REAL_MODELS) / "does-not-exist.gguf")
+        cases = [(str(Path(REAL_MODELS) / "corrupt.gguf"), {"FAIL": "corrupt"}),
+                 (str(Path(REAL_MODELS) / "unknown-arch.gguf"), {"FAIL": "arch"}), (missing, None)]
+        for real_model, knobs in cases:
+            for verbose in ([], ["-v"]):
+                tail = ["-p", "8", "-n", "4", "-r", "1", "-o", "json"] + verbose
+                real = subprocess.run(self.real("llama-bench") + ["-m", real_model] + tail, capture_output=True,
+                                      text=True, timeout=120)
+                fake_model = self.model if knobs else str(Path(self.tmp.name) / "does-not-exist.gguf")
+                fake = self.run_fake("bench", ["-m", fake_model] + tail, **(knobs or {}))
+                self.assertEqual((real.returncode, real.stdout), (1, "[\n"), real.stderr[-500:])
+                self.assertEqual(fake.returncode, 1)
+                self.assertEqual(self.failure_lines(fake.stderr, fake_model), self.failure_lines(real.stderr, real_model),
+                                 (real_model, verbose))
+                self.assertEqual(_same_arch(tuner.bench_failure(real.stderr, real.stdout, 1)),
+                                 _same_arch(tuner.bench_failure(fake.stderr, fake.stdout, 1)))
+
+    @unittest.skipIf(os.name == "nt", "needs a POSIX memory limit")
+    def test_context_out_of_memory_reads_the_same(self):
+        path = str(Path(REAL_MODELS) / "tiny-llama-F16.gguf")
+        tail = ["-p", "8", "-n", "4", "-d", "2000000", "-r", "1", "-o", "json"]
+        for verbose in ([], ["-v"]):
+            real = subprocess.run(self.real("llama-bench") + ["-m", path] + tail + verbose, capture_output=True,
+                                  text=True, timeout=120, preexec_fn=_limit_memory)
+            fake = self.run_fake("bench", ["-m", self.model] + tail + verbose, MAX_CONTEXT="100000")
+            self.assertEqual(real.returncode, 1)
+            real_lines = [l for l in real.stderr.replace(path, "<model>").splitlines()
+                          if re.search(r"alloc|fail", l) and not l.startswith("print_info")]
+            fake_lines = [l for l in fake.stderr.replace(self.model, "<model>").splitlines()
+                          if re.search(r"alloc|fail", l) and not l.startswith("print_info")]
+            self.assertEqual(fake_lines, real_lines)
+            self.assertEqual(real_lines[:-1], REAL_CONTEXT_OOM if verbose else [])
+
+    def test_bench_load_mode_none_like_real(self):
+        path = str(Path(REAL_MODELS) / "tiny-llama-F16.gguf")
+        tail = ["-p", "8", "-n", "0", "-r", "1", "-o", "jsonl", "-lm", "none"]
+        real = subprocess.run(self.real("llama-bench") + ["-m", path] + tail, capture_output=True, text=True, timeout=120)
+        fake = self.run_fake("bench", ["-m", self.model] + tail)
+        self.assertEqual(real.returncode, 0, real.stderr[-500:])
+        self.assertEqual(json.loads(real.stdout.splitlines()[0])["load_mode"], "none")
+        self.assertEqual(json.loads(fake.stdout.splitlines()[0])["load_mode"], "none")
+        self.assertNotIn("DEPRECATED", real.stderr + fake.stderr)
+
+    def test_slots_switch_like_real(self):
+        port = free_port()
+        env = {**os.environ, "LLAMA_ARG_ENDPOINT_SLOTS": "0"}
+        process = subprocess.Popen(self.real("llama-server") + ["-m", str(Path(REAL_MODELS) / "tiny-llama-F16.gguf"),
+                                                                "-c", "512", "-np", "1", "--port", str(port)],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+        self.addCleanup(lambda: (process.kill(), process.wait()))
+        base = f"http://127.0.0.1:{port}"
+        for _ in range(400):
+            try:
+                if http("GET", base + "/health")[0] == 200:
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+        self.assertEqual(http("GET", base + "/slots"), (501, REAL_SLOTS_OFF))
+
+
+
+@unittest.skipUnless(REAL_BIN and REAL_MODELS, "set LLM_CONFIG_REAL_RUNTIME and LLM_CONFIG_TINY_MODELS")
+class RealRoundThreeTests(unittest.TestCase):
+    """Round-3 fixes proven on the real build (testing and tuner against real llama.cpp and the tiny models)."""
+
+    def setUp(self):
+        from llm_configurator import hardware
+        self.hardware = hardware.scan(False)
+        self.path = str(Path(REAL_MODELS) / "tiny-llama-F16.gguf")
+        self.bin = Path(REAL_BIN)
+
+    def variant(self):
+        from llm_configurator.domain import Variant
+        return Variant(id="local/tiny-llama-F16.gguf", name="tiny", base_repo="local/tiny", repo="local/tiny",
+                       revision="local", base_revision="local", filename="tiny-llama-F16.gguf", sha256=None,
+                       quant="F16", size_bytes=Path(self.path).stat().st_size, layers=4, kv_heads=4, head_dim=64,
+                       max_context=16384, architecture="llama")
+
+    def config(self, context):
+        return {"model_path": self.path, "context": context, "parallel": 1, "gpu_layers": 0, "total_layers": 4,
+                "threads": 2}
+
+    def test_speed_test_fits_short_contexts(self):
+        # Before round 2 the first-word prompt overflowed 2048 and 4096 on this tiny vocabulary (~1.3 characters
+        # per token): "The text is longer than the model's context window".
+        from llm_configurator import testing
+        for context in (1024, 2048, 4096):
+            result = testing.speed_test([str(self.bin / "llama-bench")], [str(self.bin / "llama-server")], self.variant(),
+                                        self.config(context), self.hardware)
+            summary = result["summary"]
+            self.assertLessEqual(summary["ttft_prompt_tokens"], context - 200, context)
+            self.assertGreater(summary["ttft_s"], 0)
+            self.assertEqual(summary["depth"], context - 640)
+
+    def test_tune_measures_the_winner_at_full_length(self):
+        from llm_configurator import tuner
+        result = tuner.tune([str(self.bin / "llama-bench")], self.variant(), self.config(4096), self.hardware,
+                            budget_seconds=60, memory_check=lambda c: True)
+        self.assertEqual(result["search"]["depth"], 1024)
+        if result["depth"] == 1024:  # a very slow machine: it must say so
+            self.assertTrue(any("no time left to measure with your full conversation length" in n for n in result["notes"]))
+        else:
+            self.assertEqual(result["depth"], 4096 - 640)
+            full = [t for t in result["trials"] if t["step"] == "full_depth"]
+            self.assertTrue(full and all(t["status"] == "ok" for t in full), full)
+        self.assertEqual(result["settings"]["depth"], result["depth"])
+        self.assertGreater(result["best_result"]["tps"], 0)
 
 if __name__ == "__main__":
     unittest.main()

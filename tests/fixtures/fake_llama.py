@@ -11,6 +11,8 @@ Environment knobs (all optional):
   FAKE_LLAMA_TPS=<float>            generation speed at the best settings (default 40)
   FAKE_LLAMA_LOAD_SECONDS=<float>   server loading time with /health returning 503 (default 0.2)
   FAKE_LLAMA_MAX_GPU_LAYERS=<int>   more GPU layers than this runs out of GPU memory
+  FAKE_LLAMA_MAX_CONTEXT=<int>      a context (server -c; bench n_prompt+n_gen+n_depth) above this many tokens runs
+                                    out of memory for the KV cache, with the real CPU lines (llama-bench only with -v)
   FAKE_LLAMA_BEST_THREADS=<int>     thread count with the best speed (default 8)
   FAKE_LLAMA_SLEEP=<float>          really sleep for this fraction of the reported compute time (default 0)
   FAKE_LLAMA_REPLY=<text>           reply with exactly this text (to test reply checks)
@@ -227,6 +229,20 @@ def gpu_oom(s, layers=32):
     limit = os.environ.get("FAKE_LLAMA_MAX_GPU_LAYERS")
     offloaded = layers + 1 if s["ngl"] < 0 else s["ngl"]
     return limit is not None and not s.get("cpu_only") and offloaded > int(limit)
+
+
+def context_oom(n_ctx):
+    limit = os.environ.get("FAKE_LLAMA_MAX_CONTEXT")
+    return limit is not None and n_ctx > int(limit)
+
+
+def context_oom_lines(n_ctx):
+    """Real CPU text (ulimit -v, tiny llama, -c 2000000): the KV cache allocation fails when the context is made."""
+    size = (n_ctx + 255) // 256 * 256 * 4096  # llama.cpp pads the context to 256 cells; 4 KiB per cell here
+    return [f"ggml_aligned_malloc: insufficient memory (attempted to allocate {size / 1048576:.2f} MB)",
+            f"ggml_backend_cpu_buffer_type_alloc_buffer: failed to allocate buffer of size {size}",
+            f"alloc_tensor_range: failed to allocate CPU buffer of size {size}",
+            "llama_init_from_model: failed to initialize the context: failed to allocate buffer for kv cache"]
 
 
 def oom_lines(s):
@@ -499,6 +515,10 @@ class State:
         self.model_path = options["model"]
         self.alias = options.get("alias") or self.model_path
         self.cors = options.get("cors_origins") or os.environ.get("LLAMA_ARG_CORS_ORIGINS") or "*"
+        # --slots/--no-slots (default on); llama.cpp reads booleans from env as true/1/on/enabled or false/0/off/disabled.
+        env_slots = os.environ.get("LLAMA_ARG_ENDPOINT_SLOTS", "").strip().lower()
+        self.slots = not options.get("no_slots") and (bool(options.get("slots")) or
+                                                      env_slots not in ("0", "false", "off", "disabled"))
         self.api_key = options.get("api_key") or os.environ.get("LLAMA_API_KEY")
         types = [t for t in (options.get("spec_type") or "none").split(",") if t != "none"]
         self.speculative = bool(options.get("draft")) and "draft-simple" in types
@@ -617,6 +637,15 @@ class Handler(BaseHTTPRequestHandler):
                           "meta": {"vocab_type": 2, "n_vocab": 151936, "n_ctx": state.s["ctx"],
                                    "n_ctx_train": state.info["context_length"], "n_embd": 4096,
                                    "n_params": 8030261248, "size": 4920733696, "ftype": ftype}}]})
+        if path == "/slots":
+            if not state.slots:  # real text, llama-server with LLAMA_ARG_ENDPOINT_SLOTS=0
+                return self.send_json(*error_body(501, "This server does not support slots endpoint. Start it with "
+                                                       "`--slots`", "not_supported_error"))
+            return self.send_json(200, [{"id": i, "n_ctx": state.n_ctx_slot, "speculative": False, "is_processing": False,
+                                         "id_task": -1, "params": {"seed": 4294967295, "temperature": 0.8},
+                                         "next_token": [{"has_next_token": False, "has_new_line": False,
+                                                         "n_remain": -1, "n_decoded": 0}]}
+                                        for i in range(state.parallel)])
         if path == "/props":
             return self.send_json(200, {
                 "default_generation_settings": {"params": {"seed": 4294967295, "temperature": 0.8, "top_k": 40,
@@ -625,7 +654,7 @@ class Handler(BaseHTTPRequestHandler):
                                                 "n_ctx": state.n_ctx_slot},
                 "total_slots": state.parallel, "model_alias": state.alias, "model_ftype": quant_name(state.model_path),
                 "model_path": state.model_path, "modalities": {"vision": False, "video": False, "audio": False},
-                "endpoint_slots": True, "endpoint_props": False, "endpoint_metrics": False,
+                "endpoint_slots": state.slots, "endpoint_props": False, "endpoint_metrics": False,
                 "chat_template_caps": {"supports_preserve_reasoning": False, "supports_reasoning_effort": False,
                                        "supports_system_role": True, "supports_tools": False},
                 "build_info": f"b{BUILD}-{COMMIT}"})
@@ -814,6 +843,8 @@ def run_server(args):
         load_failed(oom_lines(s) + ["llama_model_load_from_file_impl: failed to load model"])
     if s["ctv"] != "f16" and s["fa"] == "off":
         load_failed(["llama_init_from_model: quantized V cache requires flash_attn to be enabled"], "context")
+    if context_oom(s["ctx"]):
+        load_failed(context_oom_lines(s["ctx"]), "context")
     stamp("I", f"cmn          init: llama threadpool init, n_threads = {s['threads']}")
     server_log("load_model", f"initializing, n_slots = {state.parallel}, n_ctx_slot = {state.n_ctx_slot}, "
                              f"kv_unified = '{'true' if options.get('kv_unified') else 'false'}'")
@@ -980,6 +1011,9 @@ def run_bench(args):
             load_error(["llama_init_from_model: quantized V cache requires flash_attn to be enabled"],
                        "create context with model")
         for n_prompt, n_gen in tests:
+            # llama-bench makes one context per test, sized n_prompt + n_gen + n_depth.
+            if context_oom(n_prompt + n_gen + row["n_depth"]):
+                load_error(context_oom_lines(n_prompt + n_gen + row["n_depth"]), "create context with model")
             pp, tg = speeds(s, info, depth=row["n_depth"] + n_prompt // 2 if n_gen else row["n_depth"])
             if n_prompt and n_gen:
                 seconds = n_prompt / pp + n_gen / tg
