@@ -806,6 +806,11 @@ dialog dd {
 :focus:not(:focus-visible) {
   outline: none;
 }
+/* Screen titles get focus only so screen readers announce the new screen. They are not
+   controls, so never draw a focus ring (browsers show one on page load, before any input). */
+:is(h1, h2, h3, h4, .qp-empty)[tabindex="-1"]:focus {
+  outline: none;
+}
 @media (max-width: 600px) {
   .welcome {
     padding: 45px 0 70px;
