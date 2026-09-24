@@ -152,6 +152,13 @@ button:disabled {
   background: #fafbf8;
   min-width: 0;
 }
+/* Notes under the four numbers (graphics chips we can't read, scan warnings) use the full width. */
+.hardware > .hint {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 10px 20px;
+  background: #fafbf8;
+}
 .metric .label {
   font-size: 10px;
   text-transform: uppercase;
@@ -1570,6 +1577,7 @@ body.has-jobs main {
   }
   header,
   .metric,
+  .hardware > .hint,
   .panel,
   .secondary,
   #resource-choices,
