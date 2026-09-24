@@ -555,7 +555,7 @@ def _command(commands, *names):
     for name in names:
         if commands.get(name):
             return commands[name]
-    raise ValueError("llama.cpp is not installed yet. Click Install runtime or run: llm-config runtime install")
+    raise ValueError("llama.cpp is not installed yet. Click Install the engine, or run: llm-config runtime install")
 
 
 def verdict(smoke, speed, speed_error=None, min_tps=None):

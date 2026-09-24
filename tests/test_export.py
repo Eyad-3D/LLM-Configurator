@@ -306,6 +306,8 @@ services:
         source: "/models"
         target: /models
         read_only: true
+    environment:
+      LLAMA_ARG_CORS_ORIGINS: "localhost"
     command:
       - "-m"
       - "/models/demo.gguf"

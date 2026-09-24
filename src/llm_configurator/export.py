@@ -335,6 +335,8 @@ def _docker(config, variant, platform, notes):
     for folder, target in mounts:
         lines += ["      - type: bind", f"        source: {_yaml(folder)}", f"        target: {target}",
                   "        read_only: true"]
+    # Same protection as the start script: websites you visit cannot read the model's answers.
+    lines += ["    environment:", f"      LLAMA_ARG_CORS_ORIGINS: {_yaml('localhost')}"]
     lines.append("    command:")
     lines += [f"      - {_yaml(token)}" for token in args]
     if backend == "cuda":

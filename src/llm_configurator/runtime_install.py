@@ -27,7 +27,7 @@ from .storage import runtime_dir
 RELEASE_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases"
 DOWNLOAD_PREFIX = "https://github.com/ggml-org/llama.cpp/releases/download/"
 BINARIES = ("llama-server", "llama-bench", "llama-perplexity", "llama-cli")
-NOT_INSTALLED = "llama.cpp is not installed yet. Click Install runtime or run: llm-config runtime install"
+NOT_INSTALLED = "llama.cpp is not installed yet. Click Install the engine, or run: llm-config runtime install"
 MAX_ASSET_BYTES = 4 * GIB          # the biggest real asset (CUDA runtime) is ~0.6 GiB
 MAX_EXTRACTED_BYTES = 8 * GIB      # stops "zip bombs" (tiny archives that unpack to huge sizes)
 MAX_MEMBERS = 20000

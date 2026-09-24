@@ -84,7 +84,7 @@ The last line (`... serve`) starts the app and opens **http://127.0.0.1:8765** i
 Handy extras. Add them to the **end of your start line** (shown in the macOS / Linux form; on Windows write `.\.venv\Scripts\llm-config.exe` instead of `.venv/bin/llm-config`):
 
 - **Just exploring?** Stop the app with Ctrl+C, then start it again with `--demo`: `.venv/bin/llm-config serve --demo`. Demo mode uses **made-up models on your real hardware**. It is clearly marked, needs no internet, and never downloads, tests or starts anything.
-- **"Address already in use"?** Another program is using that door. Pick another: `.venv/bin/llm-config serve --port 8766` (see [Troubleshooting: Ports](troubleshooting.md#ports)).
+- **An error saying the address is already in use?** Another program is using that door. Pick another: `.venv/bin/llm-config serve --port 8766` (see [Troubleshooting: Ports](troubleshooting.md#ports)).
 - **Don't want a browser tab to open?** `.venv/bin/llm-config serve --no-browser`
 
 ## The guided questions
@@ -94,7 +94,7 @@ Handy extras. Add them to the **end of your start line** (shown in the macOS / L
 3. Answer one question per screen:
    - what you'll mainly use it for (general chat, coding, agents, long documents). **Agents** are AI helpers that take actions for you, such as calling tools.
    - whether you care more about quality or speed
-   - how much text it needs to keep in view at once (the **context**, like the size of its desk, measured in **tokens**: pieces of words, about ¾ of a word each)
+   - how much text it needs to keep in view at once (the **context**, like the size of its desk, measured in **tokens**: pieces of words, about ¾ of a word each). An option on this screen shrinks the model's notes about the conversation so longer chats fit; answers can get slightly worse.
    - how many chats or agents run **at the same time** (one person running three agents counts as three)
    - whether other apps will stay open
    Exact numbers (tokens, speed target, memory to keep free) can be set on those screens and under **Advanced hardware settings**.
@@ -113,9 +113,9 @@ While you answer, the app fetches model information from [Hugging Face](https://
 
 Each card has a **Get it running** button. It opens six steps:
 
-1. **Get the engine** – installs [llama.cpp](https://github.com/ggml-org/llama.cpp), the engine that actually runs the model. One click (**Install the engine**). If it fails, see [Troubleshooting](troubleshooting.md#installing-llamacpp). Antivirus programs (such as Windows Defender) sometimes block the engine; see [Antivirus and quarantine](troubleshooting.md#antivirus-and-quarantine).
-2. **Download the model** – shows the size and your free disk space, then downloads with a progress bar. You can pause and resume. The file is checked against its published fingerprint (a unique code that changes if even one byte is different). A copy already in the app's models folder is reused. To reuse files you already have from LM Studio, Ollama or a Hugging Face download, run `.venv/bin/llm-config local --scan` once first: it looks in those apps' usual folders (see [Command line](cli.md)).
-3. **Test it** – loads the model, asks it a simple question, and measures speed and memory. See [Testing and tuning](testing-and-tuning.md).
+1. **Get the engine** – installs [llama.cpp](https://github.com/ggml-org/llama.cpp), the engine that actually runs the model. One click (**Install the engine**). If it fails, see [Troubleshooting](troubleshooting.md#installing-llamacpp). Antivirus programs (such as Windows Defender) sometimes block the engine; see [Antivirus and quarantine](troubleshooting.md#antivirus-and-quarantine). If llama.cpp is already on your computer (for example from Homebrew), the app finds and uses it. Either way, the step shows what the engine will use, such as *Uses your NVIDIA graphics card* or *Uses your processor only*: the installed engine, not just your hardware, decides whether the graphics card is used.
+2. **Download the model** – shows the size and your free disk space, then downloads with a progress bar. You can pause and resume. The file is checked against its published fingerprint (a unique code that changes if even one byte is different). If the app already knows a copy on your computer, the button says **Use the copy on my disk**: it checks that copy's fingerprint and uses it instead of downloading. It always knows about its own models folder. To let it find files you got with LM Studio, Ollama or a Hugging Face download, first open **Model files already on this computer** (below your recommendations) and click **Scan my disk**. It looks in those apps' usual folders. The [command line](cli.md) can do the same.
+3. **Test it** – loads the model, asks it a simple question, and measures speed and memory. If it writes more slowly than the speed target from your answers (15 tokens per second unless you changed it), it says *It works, but slowly*. See [Testing and tuning](testing-and-tuning.md).
 4. **Tune it** – spends 1, 5 or 15 minutes trying settings and keeps the fastest safe ones. **Pick 5 minutes if unsure** (the default).
 5. **Check quality** – optional quizzes and blind comparisons. See [Quality checks](quality-checks.md).
 6. **Use it** – start a local server, or copy settings for Ollama, LM Studio, Docker and others. See [Using your model](using-your-model.md).
@@ -137,6 +137,8 @@ Some model makers (for example Meta, for Llama) "gate" their models on Hugging F
    - macOS / Linux: `export HF_TOKEN=hf_...`
 
 The token is only sent to Hugging Face.
+
+**Adding a model whose original page is gated, but whose GGUF files are open?** You may not need a token. The app only reads the model's shape (its `config.json` settings file) from the original page, so it can read that from a public copy instead: add the model with `llm-config models add BASE_REPO GGUF_REPO --config-repo PUBLIC_COPY` (the capitals are placeholders for Hugging Face names such as `owner/model`). If you already added it without `--config-repo`, remove it first with `llm-config models remove BASE_REPO`. See [Command line](cli.md).
 
 ## Where your data lives
 

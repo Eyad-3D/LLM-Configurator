@@ -5,12 +5,12 @@ Run an AI chat model on **your own computer**, with less guesswork.
 LLM Configurator looks at your hardware and walks you through one loop:
 
 1. **Pick** – it suggests models that should fit your memory and speed needs.
-2. **Download** – it fetches the model file and checks it is not damaged.
+2. **Download** – it fetches the model file and checks it is not damaged. If it finds that file already on your computer, it uses your copy instead.
 3. **Test** – it starts the model and measures how fast it really is.
 4. **Tune** – it tries different settings and keeps the fastest safe ones.
 5. **Use** – it gives the model an address that chat apps and code on your computer can connect to (the same way they'd connect to ChatGPT), or ready-made settings for Ollama, LM Studio and more.
 
-The app has no chat window of its own: you chat through an app you connect to it, such as Open WebUI, Ollama or LM Studio.
+The app has no chat window of its own: you chat in another app, such as Open WebUI (connected to that address), or Ollama or LM Studio (using the ready-made settings).
 
 It never makes up numbers. If something is unknown, it says "unknown". If something is an estimate, it says "estimate".
 
@@ -52,10 +52,10 @@ Your browser opens **http://127.0.0.1:8765** (`127.0.0.1` means "this computer";
 
 ## What happens on your computer
 
-> - **Runs locally.** The app and any model server it starts listen on `127.0.0.1` only (your own computer). Other devices on your network cannot reach them.
+> - **Runs locally.** The app and any model server it starts listen on `127.0.0.1` only (your own computer). Other devices on your network cannot reach them, and websites you visit cannot read your model's answers.
 > - **Nothing is downloaded without you asking.** Model files and the llama.cpp engine are only fetched when you click **Download** / **Install the engine** or run the matching command. Downloads are checked against their published fingerprint (a unique code that changes if even one byte is different) before use.
 > - **No tracking.** The app sends no usage data. It only contacts Hugging Face (the main website where AI models are shared: model info and files), GitHub (the llama.cpp engine, community results you choose to import) and, if you add a key, Artificial Analysis (quality rankings).
-> - **Your key stays in your system's password store** (Windows Credential Manager, macOS Keychain, or a Linux keyring). Never in a plain file.
+> - **Your key is never saved in a plain file.** With **Remember on this computer** ticked (the default), it goes into your system's password store (Windows Credential Manager, macOS Keychain, or a Linux keyring). Untick it and the app forgets the key when it closes.
 > - **Sharing is manual.** Community sharing only opens a pre-filled GitHub page. You review it and press submit yourself.
 >
 > Full details: [Privacy and safety](https://github.com/Eyad-3D/LLM-Configurator/blob/main/docs/privacy-and-safety.md).
@@ -73,7 +73,7 @@ Your browser opens **http://127.0.0.1:8765** (`127.0.0.1` means "this computer";
 | [Privacy and safety](https://github.com/Eyad-3D/LLM-Configurator/blob/main/docs/privacy-and-safety.md) | Network use, keys, downloads, sharing |
 | [Troubleshooting](https://github.com/Eyad-3D/LLM-Configurator/blob/main/docs/troubleshooting.md) | Install problems, out of memory, antivirus, ports |
 | [FAQ](https://github.com/Eyad-3D/LLM-Configurator/blob/main/docs/faq.md) | Short answers to common questions |
-| [Contributing](https://github.com/Eyad-3D/LLM-Configurator/blob/main/docs/contributing.md) | Developer setup and tests |
+| [Contributing](https://github.com/Eyad-3D/LLM-Configurator/blob/main/docs/contributing.md) | Developer setup and tests (including tests against a real llama.cpp) |
 | [Changelog](https://github.com/Eyad-3D/LLM-Configurator/blob/main/CHANGELOG.md) | What changed in each version |
 
 Quality rankings, when enabled, come from [Artificial Analysis](https://artificialanalysis.ai). Models run on [llama.cpp](https://github.com/ggml-org/llama.cpp).
