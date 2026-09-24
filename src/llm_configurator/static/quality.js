@@ -775,7 +775,8 @@
             box.addEventListener("change", () => {
               box.checked ? selected.add(v.id) : selected.delete(v.id);
               fillChoices(false);
-              choices.querySelector(`[id="${box.id}"]`)?.focus();
+              const again = document.getElementById(box.id);
+              if (again && choices.contains(again)) again.focus();
             });
             return h("label", { class: "check qp-check", for: box.id }, box, ` ${label(v)}`);
           }))
@@ -812,7 +813,8 @@
       const focused = panel.contains(document.activeElement) ? document.activeElement.id : null;
       fillReference(reference.value);
       fillChoices(false);
-      if (focused) panel.querySelector(`[id="${focused}"]`)?.focus();
+      const back = focused ? document.getElementById(focused) : null;
+      if (back && panel.contains(back)) back.focus();
     }, () => {});
     start.addEventListener("click", async () => {
       const issue = selected.size < 1 ? "Pick at least one file to check." : selected.size > 3 ? "Pick at most three files." : null;

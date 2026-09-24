@@ -249,7 +249,7 @@ test("cards show plain verdict badges and fall back for older reports", async ()
   assert.deepEqual(badges, [
     "Runs well",
     "Runs slowly · estimate",
-    "Too slow · estimated from nearby tests",
+    "Too slow · estimated from your tests at other lengths",
     "Not tested yet",
     "Runs well",
     "Not tested yet",
@@ -1045,7 +1045,7 @@ test("hardware shows the CPU name, shared memory and graphics chips we can't rea
   });
   let text = s.$("hardware").textContent;
   assert.match(text, /AMD Ryzen 7 7840U/);
-  assert.match(text, /Radeon 780M found — free memory can’t be read, so estimates use RAM/);
+  assert.match(text, /A graphics chip was found, but free memory can’t be read, so estimates use RAM/);
   assert.match(text, /Graphics found, but their free memory cannot be read/);
   assert.doesNotMatch(text, /NVIDIA/);
   await s.close();
@@ -1109,7 +1109,7 @@ test("cards show nearby-test and community speeds when that's the evidence", asy
   const text = s.$("cards").textContent;
   assert.match(text, /~18\.3 tok\/s/);
   assert.match(text, /Reported by 3 similar computers/);
-  assert.match(text, /Not tested yet · estimated from nearby tests/);
+  assert.match(text, /Not tested yet · estimated from your tests at other lengths/);
   await s.close();
 });
 
@@ -1182,7 +1182,7 @@ test("sharing says how many results were left out for being from different hardw
   const s = await shareSetup({ json: "{}", issue_url: "https://github.com/x/y/issues/new", fits_in_url: true, records: 1, skipped: 2 });
   await openShare(s);
   await until(() => s.step("test").querySelector(".share-json"), "json shown");
-  assert.match(s.stepText("test"), /2 results were measured on different hardware and were left out\./);
+  assert.match(s.stepText("test"), /2 results were measured on different hardware and were left out/);
   await s.close();
   const t = await shareSetup({ json: "{}", issue_url: "https://github.com/x/y/issues/new", fits_in_url: true, records: 1, skipped: 0 });
   await openShare(t);

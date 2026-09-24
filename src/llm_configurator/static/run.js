@@ -693,7 +693,7 @@
     if (plan.local === true && !plan.local_copy)
       return [
         reasonView(
-          "This model is a file from your computer, and it isn’t where it was found any more. Put it back, or scan for models again under “Model files already on this computer”.",
+          "This model is a file from your computer, and it isn’t where it was found any more. Put it back, or close this panel, open “Model files already on this computer” and scan again.",
         ),
         el("div", { class: "step-actions" }, button("Check again", () => planDownload(), "secondary")),
       ];
@@ -900,7 +900,7 @@
         el("p", {
           class: "step-note",
           text: Number(share.skipped) > 0
-            ? "There is nothing to share: every result was measured on different hardware from this computer’s, so all were left out."
+            ? "There is nothing to share: every result was measured on different hardware (or before a hardware or driver change), so all were left out."
             : "There is nothing to share yet.",
         }),
       );
@@ -921,7 +921,7 @@
       Number(share.skipped) > 0
         ? el("p", {
             class: "step-note",
-            text: `${share.skipped} result${Number(share.skipped) === 1 ? " was" : "s were"} measured on different hardware and ${Number(share.skipped) === 1 ? "was" : "were"} left out.`,
+            text: `${share.skipped} result${Number(share.skipped) === 1 ? " was" : "s were"} measured on different hardware and ${Number(share.skipped) === 1 ? "was" : "were"} left out (this includes results from before a hardware or driver change).`,
           })
         : null,
       share.fits_in_url === false
@@ -1057,7 +1057,7 @@
         .map((note) => hint(note)),
       // A cancelled tune (or a server that couldn't save) says saved: false.
       result.saved === false
-        ? hint("These settings were not saved.")
+        ? hint("These settings were not saved, so the model keeps using its earlier settings.")
         : hint("The best settings are saved on this computer for this model."),
     ];
   }

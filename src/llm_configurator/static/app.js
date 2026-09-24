@@ -78,7 +78,7 @@ function hardware(hw) {
         "Available GPU memory",
         others.length ? "Can’t be read" : "None found",
         others.length
-          ? `${others[0].name || "A graphics chip"} found — free memory can’t be read, so estimates use RAM`
+          ? `${others.length === 1 ? "A graphics chip was" : `${others.length} graphics chips were`} found, but free memory can’t be read, so estimates use RAM`
           : "No graphics card found — estimates use RAM",
       );
   // Graphics chips we can name but can't measure: say which, and why, so "uses RAM" isn't a mystery.
@@ -279,9 +279,9 @@ function speedEvidence(c) {
   if (n(c.tuned?.tps) && !(c.evidence === "tuned" && n(c.tps)))
     rows.push([
       c.tuned.verified
-        ? "Tuning run on this computer"
-        : "Tuning run with a short test (near the start of a conversation)",
-      `${c.tuned.tps.toFixed(1)} tok/s`,
+        ? "Measured after tuning, on this computer (the tuning run)"
+        : "Short tune near the start of a conversation (not checked at this length)",
+      `${c.tuned.verified ? "" : "~"}${c.tuned.tps.toFixed(1)} tok/s`,
     ]);
   if (n(c.speed_interpolated?.tps))
     rows.push(["Estimated from your tests at other lengths (not a test at this length)", `~${c.speed_interpolated.tps.toFixed(1)} tok/s`]);
@@ -306,7 +306,7 @@ const EVIDENCE = {
   measured: "measured on this computer",
   tuned: "measured after tuning",
   short_tune: "tuned with a short test",
-  interpolated: "estimated from nearby tests",
+  interpolated: "estimated from your tests at other lengths",
   community: "based on other people’s results",
   estimated: "estimate",
 };
@@ -360,7 +360,7 @@ function renderResults() {
           return `<article class="card"><div class="card-top"><div class="card-title"><h3>${esc(c.name)}</h3><span class="quant">${esc(c.quant)}</span></div><div class="card-tags">${verdictBadge(c)}${c.verdict ? "" : `<span class="tag ${c.speed_meets_target ? "" : "unknown"}">${esc(speed.tag)}</span>`}</div></div>${c.verdict_text ? `<p class="verdict-text">${esc(c.verdict_text)}</p>` : ""}
       ${qualityPanel(c)}
       <div class="card-metrics concise"><div><strong>${c.context.toLocaleString()}</strong><span>context tokens per session</span></div><div><strong>${esc(speed.value)}</strong><span>${esc(speed.label)}</span></div><div><strong>${esc(placementLabel(c))}</strong><span>${c.scenario === "now" ? "Fits current resources (estimated)" : "May fit after closing apps"}</span></div></div>
-      <div class="card-bottom"><p>${esc(explanationOf(c))}</p><div class="card-actions"><button class="text-button" data-detail="${esc(c.id)}">View details ↗</button><button type="button" data-run="${esc(c.id)}">Get it running →</button></div></div></article>`;
+      <div class="card-bottom"><p>${esc(explanationOf(c))}</p><div class="card-actions"><button class="text-button" data-detail="${esc(c.id)}">View details</button><button type="button" data-run="${esc(c.id)}">Get it running →</button></div></div></article>`;
         })
         .join("")
     : `<div class="empty"><h3>No qualifying configurations yet.</h3><p>${report.demo ? "Try reducing context or active users, or include unverified speed options." : "Refresh model metadata first. If models are cached, try a shorter context, fewer active users, or include unverified speed options."}</p><p class="hint">Rejections: ${esc(report.rejected?.context)} context · ${esc(report.rejected?.memory)} memory · ${esc(report.rejected?.speed)} speed</p></div>`;
