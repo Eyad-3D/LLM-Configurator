@@ -153,9 +153,26 @@ if "BROKEN" in model:
     print("llama_model_load: error loading model: tensor data is not within the file bounds")
     print("main: unable to load model")
     sys.exit(1)
+if os.environ.get("FAKE_KLD_ERROR"):
+    print(os.environ["FAKE_KLD_ERROR"])
+    sys.exit(0)  # the real tool logs these errors and still exits 0
 name = "FAKE_OUTPUT_" + ("Q6" if "Q6_K" in model else "Q4")
-sys.stdout.write(open(os.environ[name], encoding="utf-8").read())
+text = open(os.environ[name], encoding="utf-8").read()
+counter = os.environ.get("FAKE_COUNTER")
+if counter:
+    runs = int(open(counter).read() or 0) + 1 if os.path.exists(counter) else 1
+    open(counter, "w").write(str(runs))
+    if runs <= int(os.environ.get("FAKE_TRUNCATE_RUNS", "0")):
+        text = text[:text.index(os.environ.get("FAKE_CUT_AT", "====== KL divergence"))]
+sys.stdout.write(text)
 '''
+
+SAMPLES = Path(__file__).resolve().parent / "integration" / "samples"
+
+
+def real_sample(name):
+    """stdout+stderr of a real llama-perplexity run recorded by the harness."""
+    return (SAMPLES / name).read_text(encoding="utf-8")
 
 
 class ParserTests(unittest.TestCase):
@@ -206,8 +223,11 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(parsed["mean_kld"], 0.1)
         for key in ["median_kld", "kld_99", "same_top_p", "ppl_base", "ppl", "mean_delta_p"]:
             self.assertIsNone(parsed[key])
-        self.assertTrue(all(value is None for value in parse_kld_output("").values()))
-        self.assertTrue(all(value is None for value in parse_kld_output(None).values()))
+        for empty in ["", None]:
+            parsed = parse_kld_output(empty)
+            self.assertFalse(parsed.pop("complete"))
+            self.assertEqual(parsed.pop("from_rows"), [])
+            self.assertTrue(all(value is None for value in parsed.values()))
 
     def test_spacing_colour_codes_crlf_and_mangled_delta(self):
         text = ("\x1b[32mMean KLD :0.0200 +/- 0.0010\x1b[0m\r\n"
@@ -225,6 +245,53 @@ class ParserTests(unittest.TestCase):
         parsed = parse_kld_output("Mean    KLD:        nan ±        nan\nMedian  KLD: 1.5e-05\n")
         self.assertIsNone(parsed["mean_kld"])
         self.assertEqual(parsed["median_kld"], 1.5e-05)
+
+    def test_complete_flag(self):
+        self.assertTrue(parse_kld_output(KLD_CURRENT)["complete"])
+        self.assertTrue(parse_kld_output(KLD_MID_2024)["complete"])
+        self.assertTrue(parse_kld_output(KLD_EARLY_2024)["complete"])   # never prints a Same top summary
+        self.assertEqual(parse_kld_output(KLD_CURRENT)["from_rows"], [])
+        self.assertFalse(parse_kld_output(REFERENCE_RUN)["complete"])
+
+    def test_output_cut_before_the_last_line(self):
+        parsed = parse_kld_output(KLD_CURRENT[:KLD_CURRENT.index("Same top p:")])
+        self.assertFalse(parsed["complete"])
+        self.assertEqual(parsed["mean_kld"], 0.031273)           # the summary line survived
+        self.assertEqual(parsed["same_top_p"], 91.901)           # from the last row (running average)
+        self.assertEqual(parsed["from_rows"], ["same_top_p"])
+
+    def test_output_cut_before_the_kl_block(self):
+        parsed = parse_kld_output(KLD_CURRENT[:KLD_CURRENT.index("====== KL divergence")])
+        self.assertFalse(parsed["complete"])
+        self.assertEqual(parsed["mean_kld"], 0.03127)            # last row's running average
+        self.assertIsNone(parsed["median_kld"])
+        self.assertEqual(parsed["chunks_done"], 12)
+        self.assertEqual(sorted(parsed["from_rows"]), ["mean_kld", "same_top_p"])
+
+    def test_real_samples(self):
+        parsed = parse_kld_output(real_sample("perplexity-kld.txt"))
+        self.assertTrue(parsed["complete"])
+        self.assertEqual(parsed["from_rows"], [])
+        expected = {"mean_kld": 0.000234, "mean_kld_uncertainty": 0.000025, "median_kld": 0.000101,
+                    "kld_99": 0.001983, "kld_999": 0.002123, "max_kld": 0.002127, "same_top_p": 100.0,
+                    "ppl": 61360.395556, "ppl_base": 55470.500402, "ppl_ratio": 1.106181, "mean_delta_p": 0.0,
+                    "rms_delta_p": 0.014, "chunks_done": 4}
+        for key, value in expected.items():
+            self.assertEqual(parsed[key], value, key)
+        for name in ["perplexity-kld-base.txt", "perplexity-normal.txt"]:
+            parsed = parse_kld_output(real_sample(name))
+            self.assertIsNotNone(parsed["final_ppl"], name)
+            self.assertIsNone(parsed["mean_kld"], name)
+            self.assertIsNone(parsed["chunks_done"], name)     # "[1]58946.06," progress is not a row
+
+    def test_real_sample_cut_short(self):
+        text = real_sample("perplexity-kld.txt")
+        parsed = parse_kld_output(text[:text.index("====== Perplexity statistics")])
+        self.assertFalse(parsed["complete"])
+        self.assertEqual(parsed["mean_kld"], 0.00023)
+        self.assertEqual(parsed["same_top_p"], 100.0)
+        self.assertEqual(parsed["ppl"], 61360.3956)
+        self.assertIsNone(parsed["ppl_base"])
 
     def test_percentile_lines_are_not_mistaken_for_chunk_rows(self):
         parsed = parse_kld_output(" 5.0%   KLD:   0.000105\n 1.0%   KLD:   0.000011\n")
@@ -265,7 +332,7 @@ class InterpretTests(unittest.TestCase):
 class EstimateTests(unittest.TestCase):
     def test_matches_llama_cpp_writer_layout(self):
         # Header, tokens at 4 bytes each, then per chunk (n_ctx - 1 - n_ctx/2) rows of (2*((V+1)/2)+4) uint16.
-        self.assertEqual(estimate_logits_bytes(32000, 512, 1), 16 + 512 * 4 + 255 * 32004 * 2)
+        self.assertEqual(estimate_logits_bytes(32000, 512, 1), 20 + 512 * 4 + 255 * 32004 * 2)
         big = estimate_logits_bytes(151936, 512, 12)
         self.assertGreater(big, 0.9e9)
         self.assertLess(big, 1.0e9)
@@ -463,6 +530,132 @@ class KlCheckTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.check(run=run)
         self.assertEqual(os.listdir(self.work), [])
+
+    def test_cut_short_output_is_run_again_reusing_the_reference(self):
+        counter = self.dir / "runs.txt"
+        events = []
+        with mock.patch.dict(os.environ, {"FAKE_COUNTER": str(counter), "FAKE_TRUNCATE_RUNS": "2"}):
+            result = self.check(candidates={"Q4_K_M": self.q4}, progress=events.append)
+        q4 = result["results"]["Q4_K_M"]
+        self.assertEqual(q4["attempts"], 3)
+        self.assertTrue(q4["complete"])
+        self.assertIsNone(q4["partial"])
+        self.assertEqual(q4["median_kld"], 0.011044)
+        self.assertNotIn("Partial", q4["plain"])
+        calls = self.argv_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(calls), 4)                              # reference once, candidate three times
+        self.assertEqual(sum("--kl-divergence " in call + " " for call in calls), 3)
+        self.assertTrue(any("running it again (try 2 of 3)" in event["message"] for event in events))
+        self.assertEqual(events[-1]["done"], events[-1]["total"])
+        self.assertEqual(os.listdir(self.work), [])
+
+    def test_always_cut_short_falls_back_to_last_row_and_says_so(self):
+        with mock.patch.dict(os.environ, {"FAKE_COUNTER": str(self.dir / "runs.txt"), "FAKE_TRUNCATE_RUNS": "99"}):
+            result = self.check(candidates={"Q4_K_M": self.q4})
+        q4 = result["results"]["Q4_K_M"]
+        self.assertEqual(q4["attempts"], quantcheck.MAX_ATTEMPTS)
+        self.assertFalse(q4["complete"])
+        self.assertIsNone(q4["error"])
+        self.assertEqual(q4["mean_kld"], 0.03127)                 # last row's running average
+        self.assertEqual(q4["verdict"], "small")
+        self.assertIsNone(q4["median_kld"])
+        self.assertIn("cut short 3 times in a row", q4["partial"])
+        self.assertIn("running average after window 12 of 12", q4["partial"])
+        self.assertIn("missing: median, worst 1%", q4["partial"])
+        self.assertIn("(Partial result:", q4["plain"])
+        self.assertTrue(any(note.startswith("Q4_K_M: llama-perplexity's final report was cut short")
+                            for note in result["notes"]))
+        self.assertEqual(len(self.argv_log.read_text(encoding="utf-8").splitlines()), 1 + quantcheck.MAX_ATTEMPTS)
+
+    def test_missing_last_line_only_is_retried(self):
+        with mock.patch.dict(os.environ, {"FAKE_COUNTER": str(self.dir / "runs.txt"), "FAKE_TRUNCATE_RUNS": "1",
+                                          "FAKE_CUT_AT": "Same top p:"}):
+            result = self.check(candidates={"Q4_K_M": self.q4})
+        self.assertEqual(result["results"]["Q4_K_M"]["attempts"], 2)
+        self.assertTrue(result["results"]["Q4_K_M"]["complete"])
+
+    def test_real_errors_are_not_retried(self):
+        broken = _write(self.dir / "BROKEN-Q3_K_M.gguf", "x")      # exit 1
+        result = self.check(candidates={"Q3_K_M": broken})
+        self.assertEqual(result["results"]["Q3_K_M"]["attempts"], 1)
+        for message, words in [("kl_divergence: inconsistent vocabulary (151936 vs 32000)", "different vocabularies"),
+                               ("kl_divergence: /x/reference.kld has been computed with 1024, while the current "
+                                "context is 512. Increase it with -c and retry", "different window size")]:
+            self.argv_log.write_text("")
+            with mock.patch.dict(os.environ, {"FAKE_KLD_ERROR": message}):
+                result = self.check(candidates={"Q4_K_M": self.q4})
+            q4 = result["results"]["Q4_K_M"]
+            self.assertEqual(q4["attempts"], 1, message)          # exit 0, but a known error: no retry
+            self.assertIn(words, q4["error"])
+            self.assertIsNone(q4["verdict"])
+            self.assertEqual(len(self.argv_log.read_text(encoding="utf-8").splitlines()), 2)
+
+    def test_unknown_silent_failure_is_retried_then_reported(self):
+        with mock.patch.dict(os.environ, {"FAKE_KLD_ERROR": "llama_perf_context_print: load time = 1 ms"}):
+            result = self.check(candidates={"Q4_K_M": self.q4})
+        q4 = result["results"]["Q4_K_M"]
+        self.assertEqual(q4["attempts"], quantcheck.MAX_ATTEMPTS)
+        self.assertIn("gave no comparison", q4["error"])
+        self.assertIsNone(q4["partial"])
+        self.assertIn("Could not compare Q4_K_M", q4["plain"])
+
+    def test_cancel_during_retries_cleans_up(self):
+        cancel = threading.Event()
+        calls = []
+
+        def run(argv, env=None, timeout=None, cancel=None, on_line=None):
+            calls.append(argv)
+            if "--kl-divergence" not in argv:
+                Path(argv[argv.index("--kl-divergence-base") + 1]).write_bytes(b"_logits_" + b"\0" * 64)
+                return 0, REFERENCE_RUN
+            cancel.set()
+            return 0, KLD_CURRENT[:KLD_CURRENT.index("Same top p:")]
+        with self.assertRaises(Cancelled):
+            self.check(run=run, cancel=cancel)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(os.listdir(self.work), [])
+
+    def test_reference_ppl_from_progress_when_final_line_is_lost(self):
+        cut = REFERENCE_RUN[:REFERENCE_RUN.index("Final estimate")]
+        with mock.patch.dict(os.environ, {"FAKE_REFERENCE": str(_write(self.dir / "cut.txt", cut))}):
+            result = self.check(candidates={"Q6_K": self.q6})
+        self.assertEqual(result["reference"]["ppl"], 6.2316)
+        self.assertEqual(result["results"]["Q6_K"]["ppl_base"], 6.2316)
+
+    def test_results_and_errors_hide_folder_names(self):
+        import json
+        result = self.check()
+        dumped = json.dumps(result)
+        self.assertNotIn(str(self.dir), dumped)
+        self.assertEqual(result["reference"]["file"], "model-Q8_0.gguf")
+        self.assertEqual(result["results"]["Q4_K_M"]["file"], "model-Q4_K_M.gguf")
+        self.assertEqual(result["corpus"]["file"], CORPUS_PATH.name)
+
+        def run(argv, **_):
+            return 0, f"llama_model_load: loading model from {argv[argv.index('-m') + 1]}\nsomething odd\n"
+        with self.assertRaises(ValueError) as caught:
+            self.check(run=run)
+        self.assertIn("model-Q8_0.gguf", str(caught.exception))
+        self.assertNotIn(str(self.dir), str(caught.exception))
+        with self.assertRaises(ValueError) as caught:
+            self.check(candidates={"Q4": self.dir / "missing.gguf"})
+        self.assertNotIn(str(self.dir), str(caught.exception))
+
+    def test_vocab_size_from_gguf_summary(self):
+        from llm_configurator import gguf
+        info = {"metadata": {}, "architecture": "llama", "summary": {"vocab_size": 151936}}
+        with mock.patch.object(gguf, "read_metadata", return_value=info):
+            self.assertEqual(quantcheck._vocab_size(self.reference), 151936)
+            result = self.check(vocab_size=None, candidates={"Q4_K_M": self.q4})
+        self.assertEqual(result["estimated_temp_bytes"], estimate_logits_bytes(151936, 512, result["corpus"]["chunks"]))
+        self.assertNotIn("at most", result["notes"][0])
+        without = {"metadata": {"llama.vocab_size": 32000}, "architecture": "llama", "summary": {"layers": 4}}
+        with mock.patch.object(gguf, "read_metadata", return_value=without):
+            self.assertEqual(quantcheck._vocab_size(self.reference), 32000)
+        with mock.patch.object(gguf, "read_metadata", return_value={"metadata": {}, "summary": {}}):
+            self.assertIsNone(quantcheck._vocab_size(self.reference))
+        with mock.patch.object(gguf, "read_metadata", side_effect=ValueError("not a GGUF")):
+            self.assertIsNone(quantcheck._vocab_size(self.reference))
 
     def test_input_validation(self):
         with self.assertRaises(ValueError):
