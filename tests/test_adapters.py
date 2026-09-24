@@ -85,8 +85,8 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(variants[0].revision, "gguf123")
 
     def test_unsupported_architecture_is_rejected(self):
-        with patch("llm_configurator.catalogue.get_json", side_effect=[{"sha": "x"}, {"model_type": "qwen3_moe"}, {}]):
-            with self.assertRaises(ValueError):
+        with patch("llm_configurator.catalogue.get_json", side_effect=[{"sha": "x"}, {"model_type": "mamba"}, {}]):
+            with self.assertRaisesRegex(ValueError, "not supported"):
                 fetch_variants({"base_repo": "test/base", "gguf_repo": "test/gguf"})
 
     def test_aa_pagination_and_null_scores(self):
