@@ -507,6 +507,15 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(report["candidates"][0]["variant_id"], "b")
 
 
+    def test_speed_priority_never_puts_a_guess_above_a_verified_speed(self):
+        a = real(demo_variants()[0], id="a", base_repo="test/a", sha256="a")
+        b = real(demo_variants()[0], id="b", base_repo="test/b", sha256="b")
+        crowd = lambda records, variant, hardware, config: {"median_tps": 99, "n": 5} if variant.id == "b" else None
+        report = recommend([a, b], hardware(vram=0), Requirements(priority="speed"), [record(a, tps=25)],
+                           community=[{"r": 1}], community_evidence=crowd)
+        first = report["candidates"][0]
+        self.assertEqual((first["variant_id"], first["evidence"]), ("a", "measured"))
+
 class CandidateShapeTests(unittest.TestCase):
     def test_ids_are_unique_and_launch_fragments_valid(self):
         models = [real(v, sha256=v.id) for v in demo_variants()] + [moe_model()]
