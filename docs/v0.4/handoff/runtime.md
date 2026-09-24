@@ -84,7 +84,7 @@ Managed layout:
 
 ## How I tested
 
-`python3 -m unittest tests.test_runtime_install` runs 55 tests with no network access. The full suite (`python3 -m unittest discover -s tests`) is green.
+`python3 -m unittest tests.test_runtime_install` runs 61 tests with no network access. The full suite (`python3 -m unittest discover -s tests`) is green.
 
 - **Fixtures:**
   - A fake release built from the **real 35 asset names of b11158**.
@@ -99,6 +99,14 @@ Managed layout:
   - End-to-end installs (CPU, CUDA with cudart merge, macOS), GPU→CPU fallback, reinstall, cancel, and unverified installs.
   - `install_archive`, `use_directory`, detect precedence and broken-folder warnings, the `current.json` pointer, `binary()` using the cache.
   - One test that runs a real subprocess, skipped on Windows. The other tests mock `_run_version`.
+- **Independent review.** A separate review pass attacked the code. Everything it found is fixed and has a test:
+  - a tar link chain plus a hard link could write outside the folder. Links are now fully resolved, never written through, and a final pass re-checks every link;
+  - zip names with a drive letter mid-path (`bin/D:evil.dll`);
+  - a dropped connection gave a raw error. It is now plain and the `.part` file is kept;
+  - a wrong `Content-Range` on resume now restarts the download;
+  - on Windows, the old install could be lost if the final move failed. It is now restored;
+  - leftover `.staging-*` / `.old-*` folders counted as installs;
+  - CUDA asset names without a version crashed the chooser.
 
 ## llama.cpp facts assumed (harness, please confirm)
 
