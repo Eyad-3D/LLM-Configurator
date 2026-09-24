@@ -1027,7 +1027,7 @@
         : "Your starting settings were already about as fast as it gets.";
     // The starting point and the final double-check are re-runs, not new settings.
     const tried = (result.trials || []).filter(
-      (t) => t.status === "ok" && t.step !== "baseline" && t.step !== "confirm",
+      (t) => t.status === "ok" && t.step !== "baseline" && t.step !== "confirm" && t.step !== "full_depth",
     ).length;
     // The tuner's notes already say why it stopped, so the page adds no stop sentence of its own.
     const notes = (result.notes || []).map(plain);

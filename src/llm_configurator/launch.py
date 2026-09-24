@@ -127,7 +127,8 @@ def server_env(config, base=None):
     # llama-server lets any website read its answers by default (CORS "*"); allow only pages on this computer.
     # An environment variable, not a flag, so builds without the option ignore it instead of refusing to start.
     env["LLAMA_ARG_CORS_ORIGINS"] = "localhost"
-    if c["gpu_backend"] == "cuda" and c["gpu_uuid"] and c["gpu_layers"]:
+    # Only real NVIDIA UUIDs: a placeholder such as "[N/A]" would hide every CUDA device.
+    if c["gpu_backend"] == "cuda" and (c["gpu_uuid"] or "").startswith("GPU-") and c["gpu_layers"]:
         env["CUDA_VISIBLE_DEVICES"] = c["gpu_uuid"]
     return env
 
@@ -151,5 +152,9 @@ def from_candidate(candidate, model_path=None, hardware=None, runtime_backend=No
               "cache_type_k": candidate.get("kv_cache_type", "f16"), "cache_type_v": candidate.get("kv_cache_type", "f16"),
               "n_cpu_moe": candidate.get("n_cpu_moe", 0) or 0}
     config.update({k: v for k, v in launch.items() if k in DEFAULTS and k != "model_path"})
+    if runtime_backend in BACKENDS - {None, "cpu"}:
+        # The installed build decides; on a CPU-only placement this also yields -dev none, so a GPU
+        # build never quietly uses a card the app is not tracking.
+        config["gpu_backend"] = runtime_backend
     config.update(overrides)
     return normalize(config)

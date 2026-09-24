@@ -72,6 +72,8 @@ def engine_extras(store, function=recommend):
     except (TypeError, ValueError):
         return {}
     extras = {"community": (store.get("community") or {}).get("records") or [], "tuned": store.get("tuned", [])}
+    if "runtime_backend" in accepted:
+        extras["runtime_backend"] = installed_backend(store)
     return {k: v for k, v in extras.items() if k in accepted}
 
 
@@ -554,7 +556,8 @@ def export_config(store, variant, candidate, hardware, fmt, platform="posix", tu
         command = binary(store, "llama-server")
     except ValueError:
         command = None
-    result = export.export(config, variant, fmt, platform=platform, server_command=command)
+    result = _call(export.export, config, variant, fmt, platform=platform, server_command=command,
+                   runtime_backend=installed_backend(store))
     if not path:
         result.setdefault("notes", []).insert(0, "The model is not downloaded yet. The file path shown is where it will be saved after you download it.")
     return result

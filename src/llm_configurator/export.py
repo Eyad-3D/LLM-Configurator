@@ -204,7 +204,7 @@ def _llama_server(config, variant, platform, server_command, notes):
         ]
     if not server_command:
         notes.append("Expects llama-server on your PATH. Put the full path to llama-server in the script if it is elsewhere.")
-    if env:
+    if "CUDA_VISIBLE_DEVICES" in env:
         notes.append("CUDA_VISIBLE_DEVICES pins the model to the graphics card it was tested on.")
     return filename, content, instructions
 

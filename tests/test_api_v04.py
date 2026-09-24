@@ -556,8 +556,10 @@ class JobTests(ApiCase):
         self.assertEqual(done["state"], "done", done["error"])
         self.assertEqual(done["result"]["quiz"]["score"], 0.75)
         self.assertEqual(done["result"]["needle"]["context_tokens"], 4096)
-        kinds = [r["kind"] for r in self.call("/api/quality/results")[1]["results"]]
-        self.assertEqual(kinds, ["quiz", "needle"])
+        results = self.call("/api/quality/results")[1]["results"]
+        # Pinned shape (FIXUPS.md): one quiz record with the needle result nested inside it.
+        self.assertEqual([r["kind"] for r in results], ["quiz"])
+        self.assertEqual(results[0]["needle"]["context_tokens"], 4096)
         self.assertEqual(self.fakes.modules["llama_server"].LlamaServer.live, 0)
 
     def test_blind_comparison_runs_models_one_at_a_time(self):
@@ -583,7 +585,7 @@ class JobTests(ApiCase):
         self.downloaded(self.other)
         done = self.wait(self.call("/api/quality/quant-check", body)[1]["id"])
         self.assertEqual(done["state"], "done", done["error"])
-        self.assertEqual(done["result"]["reference"], "Q8_0")
+        self.assertEqual(done["result"]["reference_quant"], "Q8_0")
         self.assertEqual(done["result"]["notes"], ["Temporary files in tmp were deleted."])
         saved = self.store.get("quality_results")[-1]
         self.assertEqual((saved["kind"], saved["reference_variant_id"], list(saved["results"])), ("quant_check", self.other.id, [self.variant.id]))

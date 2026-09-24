@@ -142,6 +142,18 @@ class LaunchTests(unittest.TestCase):
                                 {"gpus": [{"index": 0, "uuid": "GPU-x", "backend": "cuda"}]}, runtime_backend="vulkan")
         self.assertEqual(vulkan["gpu_backend"], "vulkan")
         self.assertNotIn("CUDA_VISIBLE_DEVICES", server_env(vulkan, base={}))
+        # The installed build wins over the candidate's own launch fragment too.
+        fragment = {"context": 4096, "gpu_layers": 2, "total_layers": 8, "gpu_index": 0, "launch": {"gpu_backend": "cuda"}}
+        self.assertEqual(from_candidate(fragment, "m.gguf", {"gpus": [{"index": 0, "uuid": "GPU-x"}]},
+                                        runtime_backend="vulkan")["gpu_backend"], "vulkan")
+        # CPU-only on a GPU build: -dev none keeps llama.cpp off cards the app is not tracking.
+        cpu = from_candidate({"context": 4096, "gpu_layers": 0, "total_layers": 8, "gpu_index": None}, "m.gguf", {"gpus": []},
+                             runtime_backend="cuda")
+        self.assertIn("-dev none", " ".join(server_args(cpu)))
+        self.assertEqual(from_candidate({"context": 4096, "gpu_layers": 0, "total_layers": 8}, "m.gguf", {},
+                                        runtime_backend="cpu")["gpu_backend"], None)
+        # A placeholder UUID must not hide every CUDA device.
+        self.assertNotIn("CUDA_VISIBLE_DEVICES", server_env({"gpu_backend": "cuda", "gpu_uuid": "[N/A]", "gpu_layers": 3}, base={}))
         env = server_env({"gpu_backend": "cuda", "gpu_uuid": "GPU-1", "gpu_layers": 3}, base={})
         self.assertEqual(env, {"CUDA_VISIBLE_DEVICES": "GPU-1", "LLAMA_ARG_CORS_ORIGINS": "localhost"})
         self.assertEqual(server_env({"gpu_layers": 0}, base={}), {"LLAMA_ARG_CORS_ORIGINS": "localhost"})

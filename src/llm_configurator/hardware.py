@@ -362,8 +362,8 @@ def drm_cards(root=None):
     return cards
 
 
-_NVIDIA_REASON = {False: "nvidia-smi is missing, so free graphics memory cannot be read.",
-                  True: "nvidia-smi did not answer, so free graphics memory cannot be read."}
+_NVIDIA_REASON = {False: "The NVIDIA driver tool (nvidia-smi) is missing, so free graphics memory can't be read.",
+                  True: "The NVIDIA driver tool (nvidia-smi) did not answer, so free graphics memory can't be read."}
 _NVIDIA_MISSING = ("An NVIDIA GPU is present but nvidia-smi was not found. Install or repair the NVIDIA driver "
                    "so its memory can be read.")
 

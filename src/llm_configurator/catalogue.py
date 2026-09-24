@@ -549,6 +549,7 @@ def refresh(store, include_scores=True, include_models=True, progress=None, canc
                     state["models_done"] += 1
                     state["models_failed"] += int(failed)
                 notify()
+        check_cancel(cancel)
     except Cancelled:
         cancelled = True
         raise
