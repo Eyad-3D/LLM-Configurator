@@ -58,7 +58,7 @@ The existing test that asserted `"settings" not in result` was pinned to the old
 | same **with** `-v` | `ggml_aligned_malloc: insufficient memory (attempted to allocate 7813.00 MB)`, `…failed to allocate buffer of size 8192524288`, `alloc_tensor_range: failed to allocate CPU buffer…`, `llama_init_from_model: failed to initialize the context: failed to allocate buffer for kv cache` (context padded to 256 cells: 2,000,128 × 4 KiB) |
 | llama-server `-c 2000000` under the same limit | prints the same four lines **without** any flag, then `exiting due to model loading error` |
 | `LLAMA_ARG_ENDPOINT_SLOTS=0` | `/slots` → 501 (text above); unset → 200 with slot settings |
-| `tune`, tiny llama, context 4096, 60 s | 21.7 s, converged; search at 1024: 241 → 649 t/s writing; full length 3456: 83 → 352 t/s (4.22×), threads 4, flash attention off |
+| `tune`, tiny llama, context 4096, 60 s | 21.7 s, converged; search at 1024: 241 → 649 t/s writing; full length 3456: 83 → 352 t/s (4.22×), threads 4, flash attention off. Re-run after the review fixes: 27.1 s, full length 86 → 342 t/s (3.99×) |
 | `tune`, tiny llama, context 8192, 12 s budget | 10.5 s, stopped on budget, depth 1024 with the "no time left" note |
 | `tune`, tiny qwen3moe, context 2048, 40 s | 13.5 s, full length 1408: 205 → 667 t/s |
 | `python3 -m unittest discover -s tests` | 847 tests OK (32 skipped: real-runtime tests without the env vars) |
