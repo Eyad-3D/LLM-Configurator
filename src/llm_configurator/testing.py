@@ -27,7 +27,10 @@ TEMPLATE_MARKERS = re.compile(r"<\|im_start\|>|<\|im_end\|>|<\|eot_id\|>|<\|star
                               r"<start_of_turn>|<end_of_turn>|\[/?INST\]|<\|endoftext\|>|<\|assistant\|>|<\|user\|>|"
                               r"<\|system\|>|<\|end\|>|<\|channel\|>|<\|message\|>|<\|begin_of_text\|>|</?s>")
 THINK_BLOCK = re.compile(r"<think>.*?</think>", re.S | re.I)
-OOM_HINTS = ("out of memory", "memory", "oom", "alloc")
+# Only llama.cpp's own words count as "out of memory" (llama_server.FAILURES turns them into "Not enough memory …").
+# A bare "memory" or "alloc" also appears in other reasons, e.g. "most likely because memory ran out" for a killed
+# process, which is a guess and is passed on as one.
+OOM_REASON = re.compile(r"^Not enough memory|\bout of memory\b", re.I)
 
 BENCH_PROMPT = 512
 BENCH_GEN = 128
@@ -94,7 +97,7 @@ def _tail(server):
 
 def _start_message(reason):
     text = (reason or "").strip()
-    if any(hint in text.lower() for hint in OOM_HINTS):
+    if OOM_REASON.search(text):
         return "The model ran out of memory while loading. Try fewer GPU layers, a shorter context or a smaller file."
     if not text:
         return "The model did not start. Check that llama.cpp is installed and the model file is complete."
@@ -354,9 +357,10 @@ def filler_prompt(tokens=TTFT_PROMPT_TOKENS):
 
 def fitted_prompt(server, target):
     """Filler text of at most `target` tokens, counted by the model's own tokenizer (word-based guesses can overflow
-    a short context). Returns (prompt, tokens); tokens is None when the server can't count."""
+    a short context: a small vocabulary can spend 3+ tokens per word). Returns (prompt, tokens); tokens is None when
+    the server can't count."""
     size = target
-    for _ in range(4):
+    for _ in range(8):
         prompt = filler_prompt(size)
         try:
             count = len(server.tokenize(prompt))
@@ -364,8 +368,16 @@ def fitted_prompt(server, target):
             return prompt, None
         if count <= target or size <= 16:
             return prompt, count
-        size = max(16, int(size * target / count) - 8)
+        # Shrink in proportion, and always by at least one sentence's worth, so this ends even when counts are lumpy.
+        size = max(16, min(size - 16, int(size * target / count) - 8))
     return prompt, count
+
+
+def ttft_target(config):
+    """First-word prompt size in tokens: TTFT_PROMPT_TOKENS, or less so it fits the context with room for the chat
+    template and the reply. `context` is per user: launch passes -c context*parallel, so each slot gets all of it."""
+    context = config["context"]
+    return max(16, min(TTFT_PROMPT_TOKENS, context - 256 if context >= 512 else context // 2))
 
 
 class _PeakWatcher:
@@ -489,8 +501,7 @@ def speed_test(bench_command, server_command, variant, config, hardware, progres
         check_cancel(cancel)
         # A tiny warm-up request so one-off start-up costs don't land in the timed request.
         _chat(server, [{"role": "user", "content": "Hi"}], 1, temperature=0.0)
-        target = min(TTFT_PROMPT_TOKENS, max(64, config["context"] - 256))
-        prompt, prompt_tokens = fitted_prompt(server, target)
+        prompt, prompt_tokens = fitted_prompt(server, ttft_target(config))
         check_cancel(cancel)
         started = _now()
         reply = _chat(server, [{"role": "user", "content": prompt}], 1, temperature=0.0)

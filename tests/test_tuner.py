@@ -155,8 +155,11 @@ class TuneTests(unittest.TestCase):
         self.assertEqual(result["best"]["flash_attn"], "on")
         self.assertEqual(result["stopped"], "converged")
         self.assertTrue(result["confirmed"])
-        self.assertIn("-r", bench.calls[-1])
-        self.assertEqual(bench.calls[-1][bench.calls[-1].index("-r") + 1], "5")
+        confirm = [c for c in bench.calls if c[c.index("-r") + 1] == "5"]
+        self.assertEqual(len(confirm), 1)
+        # The last runs re-measure the start and the winner with the full conversation length in memory.
+        self.assertEqual([c[c.index("-d") + 1] for c in bench.calls[-2:]], ["3456", "3456"])
+        self.assertEqual(result["settings"]["depth"], 3456)
         self.assertAlmostEqual(result["improvement"], (50 * 1.1) / (50 * (1 - 0.04 * 9)), places=3)
         self.assertEqual(result["trials"][0]["changes"], {})
         self.assertTrue(all(t["status"] == "ok" for t in result["trials"]))
@@ -168,7 +171,8 @@ class TuneTests(unittest.TestCase):
         self.assertIn("8,7,4,16", [c[c.index("-t") + 1] for c in bench.calls if "-t" in c])
         # The unset thread count is re-measured in its own run during the thread step (baseline + that one), so the
         # sweep is compared with a fresh number, not the first cold run.
-        self.assertEqual(sum("-t" not in c for c in bench.calls), 2)
+        # (The full-length check runs the start once more.)
+        self.assertEqual(sum("-t" not in c and c[c.index("-d") + 1] == "1024" for c in bench.calls), 2)
 
     def test_auto_flash_attention_never_goes_in_a_comma_list(self):
         _, bench, _ = run()
@@ -406,8 +410,12 @@ class TuneTests(unittest.TestCase):
         self.assertEqual(result["runtime_build"], "abc123")
         self.assertEqual(result["threads"], 7)
         self.assertEqual(result["bench"], {"n_prompt": 512, "n_gen": 128, "depth": 1024, "repetitions": 2})
-        self.assertEqual(result["depth"], 1024)
-        self.assertNotIn("settings", result)  # §2.3 `settings` means llama.cpp settings; these were bench sizes
+        # best_result and baseline were measured again at context - 640, and settings.depth says so.
+        self.assertEqual(result["depth"], 3456)
+        self.assertEqual(result["settings"], {"flash_attn": "on", "cache_type_k": "f16", "cache_type_v": "f16",
+                                              "batch": None, "ubatch": None, "n_cpu_moe": 0, "depth": 3456})
+        self.assertEqual(result["search"]["depth"], 1024)
+        self.assertGreater(result["search"]["improvement"], 1.0)
         json.dumps(result)
 
     def test_progress_reports(self):
@@ -433,6 +441,286 @@ class TuneTests(unittest.TestCase):
         self.assertLessEqual(timeout, tuner.DEFAULT_TIMEOUT)
         self.assertIn("-d", argv)
         self.assertEqual(argv[argv.index("-d") + 1], "1024")
+
+
+class FullDepthTests(unittest.TestCase):
+    """The winner is measured again with the user's full conversation length in memory (-d context-640)."""
+
+    def depth_bench(self, clock, long_speed=None, long_fail=None):
+        bench = FakeBench(clock)
+
+        def run_it(argv, env, timeout, cancel):
+            d = int(argv[argv.index("-d") + 1])
+            out = bench(argv, env, timeout, cancel)
+            if d > 1024:
+                rows = json.loads(out["stdout"])
+                for row in rows:
+                    row["n_depth"] = d
+                    if long_speed:
+                        row["avg_ts"] = long_speed(row, row["avg_ts"])
+                if long_fail and any(long_fail(r) for r in rows):
+                    keep = []
+                    for row in rows:
+                        if long_fail(row):
+                            break
+                        keep.append(row)
+                    return {**out, "returncode": 1, "stdout": json.dumps(keep)[:-1],
+                            "stderr": "llama_bench: error: failed to create context with model '/models/m.gguf'\n"}
+                out = {**out, "stdout": json.dumps(rows)}
+            return out
+        run_it.calls = bench.calls
+        return run_it
+
+    def test_full_depth_numbers_replace_the_short_ones(self):
+        clock = Clock()
+        bench = self.depth_bench(clock, long_speed=lambda row, ts: ts / 2)
+        result, _, _ = run(clock=clock, bench=bench)
+        self.assertEqual(result["depth"], 3456)
+        self.assertAlmostEqual(result["best_result"]["tps"] * 2, result["search"]["best_result"]["tps"], delta=1.0)
+        self.assertAlmostEqual(result["baseline"]["tps"] * 2, result["search"]["baseline"]["tps"], delta=1.0)
+        self.assertTrue(any("3,456 tokens of conversation" in n for n in result["notes"]))
+        self.assertTrue(any(t["step"] == "full_depth" for t in result["trials"]))
+
+    def test_winner_not_faster_at_full_length_keeps_the_start(self):
+        clock = Clock()
+        # At full length flash attention on is slower than the default, so the tuned settings lose.
+        bench = self.depth_bench(clock, long_speed=lambda row, ts: ts * (0.5 if row["flash_attn"] == 1 else 1.0))
+        result, _, _ = run(clock=clock, bench=bench)
+        self.assertEqual(result["best"]["flash_attn"], "auto")
+        self.assertEqual(result["best"]["threads"], None)
+        self.assertEqual(result["improvement"], 1.0)
+        self.assertTrue(any("were not clearly faster, so your starting settings are kept" in n for n in result["notes"]))
+        self.assertEqual(result["settings"]["depth"], 3456)
+
+    def test_winner_that_does_not_fit_at_full_length_keeps_the_start(self):
+        clock = Clock()
+        # Threads and flash attention already at their best, so the winner differs from the start only in layers.
+        base = config(gpu_layers=20, total_layers=32, gpu_backend="cuda", threads=7, flash_attn="on")
+        bench = self.depth_bench(clock, long_fail=lambda row: row["n_gpu_layers"] >= 23)
+        result, _, _ = run(clock=clock, bench=bench, base=base)
+        self.assertEqual(result["best"]["gpu_layers"], 20)
+        note = next(n for n in result["notes"] if "did not work with your full conversation length" in n)
+        # llama-bench named no cause, but the lighter start loaded in the same run: memory is the likely reason.
+        self.assertIn("Probably not enough memory", note)
+        self.assertEqual(result["depth"], 3456)
+
+    def long_bench(self, clock, on_long):
+        """FakeBench whose full-length runs (-d > 1024) are answered by on_long(argv, out) instead."""
+        bench = FakeBench(clock)
+
+        def run_it(argv, env, timeout, cancel):
+            out = bench(argv, env, timeout, cancel)
+            return on_long(argv, out, timeout) if int(argv[argv.index("-d") + 1]) > 1024 else out
+        run_it.calls = bench.calls
+        return run_it
+
+    def test_running_out_of_time_at_full_length_keeps_the_winner(self):
+        clock = Clock()
+        seen = []
+
+        def out_of_time(argv, out, timeout):
+            seen.append(timeout)
+            return {"returncode": -9, "stdout": "[", "stderr": "", "seconds": timeout, "timed_out": True}
+        result, _, _ = run(clock=clock, bench=self.long_bench(clock, out_of_time))
+        self.assertEqual((result["best"]["threads"], result["best"]["flash_attn"]), (7, "on"))
+        self.assertTrue(result["confirmed"])
+        self.assertEqual(result["depth"], 1024)
+        self.assertEqual(result["best_result"], result["search"]["best_result"])
+        self.assertTrue(any("ran out of time" in n for n in result["notes"]))
+        self.assertFalse(any("failed to run" in n for n in result["notes"]))
+        self.assertFalse(any("already the fastest" in n for n in result["notes"]))
+        self.assertEqual(len(seen), 1)  # the start timed out; the winner was never run (not blamed)
+
+    def test_start_fails_at_full_length_but_the_winner_runs(self):
+        clock = Clock()
+
+        def start_fails(argv, out, timeout):
+            if "-t" not in argv:  # the start leaves threads to llama.cpp
+                return {**out, "returncode": 1, "stdout": "[\n",
+                        "stderr": "llama_bench: error: failed to create context with model '/models/m.gguf'\n"}
+            return out
+        result, _, _ = run(clock=clock, bench=self.long_bench(clock, start_fails))
+        self.assertEqual(result["best"]["threads"], 7)
+        self.assertEqual(result["depth"], 1024)
+        note = next(n for n in result["notes"] if "your starting settings did not run" in n)
+        self.assertIn("but the tuned settings did", note)
+
+    def test_nothing_runs_at_full_length_says_the_context_may_not_fit(self):
+        clock = Clock()
+
+        def all_fail(argv, out, timeout):
+            return {**out, "returncode": 1, "stdout": "[\n",
+                    "stderr": "llama_bench: error: failed to create context with model '/models/m.gguf'\n"}
+        result, _, _ = run(clock=clock, bench=self.long_bench(clock, all_fail))
+        self.assertTrue(any("may not fit in memory" in n for n in result["notes"]))
+        self.assertEqual(result["depth"], 1024)
+        self.assertEqual(result["best"]["threads"], 7)
+
+    def test_winner_within_noise_at_full_length_keeps_the_start(self):
+        clock = Clock()
+
+        def same_speed(argv, out, timeout):
+            rows = json.loads(out["stdout"])
+            for row in rows:
+                row["avg_ts"] = 50.05 if "-t" in argv else 50.0
+            return {**out, "stdout": json.dumps(rows)}
+        result, _, _ = run(clock=clock, bench=self.long_bench(clock, same_speed))
+        self.assertEqual(result["best"]["threads"], None)
+        self.assertEqual(result["improvement"], 1.0)
+        self.assertTrue(any("not clearly faster" in n for n in result["notes"]))
+        self.assertIn("Your starting settings are kept", result["notes"][0])
+        self.assertFalse(any("already the fastest" in n for n in result["notes"]))
+
+    def test_step_notes_are_labelled_as_the_short_test(self):
+        result, _, _ = run()
+        self.assertTrue(any(n.startswith("In the shorter search test: using 7 CPU threads") for n in result["notes"]))
+
+    def test_cancel_during_full_length_keeps_the_short_results(self):
+        clock = Clock()
+
+        def cancel_now(argv, out, timeout):
+            raise Cancelled()
+        result, _, _ = run(clock=clock, bench=self.long_bench(clock, cancel_now))
+        self.assertEqual(result["stopped"], "cancelled")
+        self.assertEqual(result["depth"], 1024)
+        self.assertEqual(result["best"]["threads"], 7)
+
+    def test_each_full_length_run_gets_its_share_of_the_time(self):
+        clock = Clock()
+        seen = []
+
+        def spy(argv, out, timeout):
+            seen.append(timeout)
+            return out
+        run(clock=clock, bench=self.long_bench(clock, spy), budget=200)
+        self.assertEqual(len(seen), 2)
+        self.assertLess(seen[0], seen[1] + 60)  # the first run did not get everything that was left
+
+    def test_no_time_left_keeps_the_short_depth_and_says_so(self):
+        clock = Clock()
+        bench = FakeBench(clock, load=5, per_test=2)
+        result, _, _ = run(clock=clock, bench=bench, budget=60)
+        self.assertEqual(result["depth"], 1024)
+        self.assertEqual(result["settings"]["depth"], 1024)
+        self.assertTrue(any("no time left to measure with your full conversation length" in n for n in result["notes"]))
+        self.assertFalse(any(c[c.index("-d") + 1] != "1024" for c in bench.calls))
+
+    def test_short_contexts_are_already_measured_at_full_length(self):
+        result, bench, _ = run(base=config(context=640))
+        self.assertEqual(result["depth"], 0)
+        self.assertFalse(any(t["step"] == "full_depth" for t in result["trials"]))
+        self.assertEqual(result["settings"]["depth"], 0)
+        result, bench, _ = run(base=config(context=1024))
+        self.assertEqual(result["depth"], 384)
+        self.assertEqual(result["search"]["depth"], 256)
+
+    def test_can_be_switched_off(self):
+        result, bench, _ = run(verify_full_depth=False)
+        self.assertEqual(result["depth"], 1024)
+        self.assertFalse(any(t["step"] == "full_depth" for t in result["trials"]))
+
+    def test_long_contexts_are_capped(self):
+        result, bench, _ = run(base=config(context=131072), v=variant(max_context=131072), budget=86400)
+        self.assertEqual(result["depth"], tuner.MAX_BENCH_DEPTH)
+
+
+class FailureTextTests(unittest.TestCase):
+    def test_only_stderr_is_read_and_json_stdout_is_ignored(self):
+        text = tuner.bench_failure("main: something broke\n", "[\n", 1)
+        self.assertIn("something broke", text)
+        self.assertNotIn("[", text.split(":", 1)[1])
+
+    def test_no_cause_is_not_called_out_of_memory(self):
+        text = tuner.bench_failure("llama_bench: error: failed to load model '/m/x.gguf'\n", "[", 1)
+        self.assertEqual(text, tuner.NO_CAUSE)
+
+    def test_llama_cpp_named_cause_wins(self):
+        oom = ("llama_model_load: error loading model: unable to allocate CUDA0 buffer\n"
+               "llama_bench: error: failed to load model '/m/x.gguf'\n")
+        self.assertEqual(tuner.bench_failure(oom, "[", 1), "Ran out of memory with these settings.")
+        ctx = ("ggml_backend_cpu_buffer_type_alloc_buffer: failed to allocate buffer of size 68719476768\n"
+               "llama_init_from_model: failed to initialize the context: failed to allocate buffer for kv cache\n"
+               "llama_bench: error: failed to create context with model '/m/x.gguf'\n")
+        self.assertEqual(tuner.bench_failure(ctx, "[", 1), "Ran out of memory with these settings.")
+
+    def test_memory_warnings_that_carry_on_are_not_the_cause(self):
+        text = ("warning: failed to allocate 512.00 MiB of pinned memory: out of memory\n"
+                "llama_model_load: error loading model: unknown model architecture: 'notarealarch'\n"
+                "llama_bench: error: failed to load model '/m/x.gguf'\n")
+        self.assertIn("unknown model architecture", tuner.bench_failure(text, "[", 1))
+        only_warning = "warning: failed to allocate 512.00 MiB of pinned memory\nllama_bench: error: failed to load model 'x'\n"
+        self.assertEqual(tuner.bench_failure(only_warning, "[", 1), tuner.NO_CAUSE)
+
+    def test_deprecation_glued_to_the_next_line_is_split_off(self):
+        text = ("DEPRECATED: -mmp and --mmap are deprecated in favour of --load-mode. Please use --load-mode mmap "
+                "instead.llama_model_load: error loading model: tensor 'blk.1.ffn_down.weight' data is not within "
+                "the file bounds, model is corrupted or incomplete\nllama_bench: error: failed to load model 'x'\n")
+        self.assertIn("not within the file bounds", tuner.bench_failure(text, "[", 1))
+
+    def test_missing_file_names_only_the_file(self):
+        # Real llama-bench -v for a missing file (the cause line itself only says "failed to load model from").
+        text = ("gguf_init_from_file: failed to open GGUF file '/home/me/models/nope.gguf' (No such file or directory)\n"
+                "llama_model_load: error loading model: llama_model_loader: failed to load model from /home/me/models/nope.gguf\n"
+                "llama_model_load_from_file_impl: failed to load model\n"
+                "llama_bench: error: failed to load model '/home/me/models/nope.gguf'\n")
+        self.assertEqual(tuner.bench_failure(text, "[\n", 1), "The model file is missing or cannot be read (nope.gguf).")
+
+    def test_quantized_v_cache_needs_flash_attention(self):
+        text = ("llama_init_from_model: quantized V cache requires flash_attn to be enabled\n"
+                "llama_bench: error: failed to create context with model 'x'\n")
+        self.assertIn("flash attention", tuner.bench_failure(text, "[", 1))
+
+    def test_probably_memory_only_after_a_lighter_setting_ran(self):
+        clock = Clock()
+        bench = FakeBench(clock)
+
+        def no_cause(argv, env, timeout, cancel):
+            out = bench(argv, env, timeout, cancel)
+            if "-ngl" in argv and "," in argv[argv.index("-ngl") + 1]:
+                rows = [r for r in json.loads(out["stdout"]) if r["n_gpu_layers"] < 24]  # -ngl 25 (24 blocks) fails
+                return {**out, "returncode": 1, "stdout": json.dumps(rows)[:-1],
+                        "stderr": "llama_bench: error: failed to load model '/models/m.gguf'\n"}
+            return out
+        base = config(gpu_layers=20, total_layers=32, gpu_backend="cuda")
+        result, _, _ = run(clock=clock, bench=no_cause, base=base, verify_full_depth=False)
+        errors = {t["changes"].get("gpu_layers"): t.get("error") for t in result["trials"] if t["step"] == "gpu_layers"}
+        self.assertEqual(errors[24], tuner.PROBABLY_MEMORY)
+        self.assertNotIn("/models", errors[24])
+
+    def test_lighter_means_only_less_offload_or_smaller_chunks(self):
+        from llm_configurator import launch
+        base = launch.normalize(config(gpu_layers=20, total_layers=32, gpu_backend="cuda"))
+        more = {**base, "gpu_layers": 22}
+        self.assertTrue(tuner._lighter(base, more))
+        self.assertFalse(tuner._lighter(more, base))
+        # A compressed cache with flash attention on can fail for reasons other than memory.
+        q8 = {**base, "cache_type_k": "q8_0", "cache_type_v": "q8_0", "flash_attn": "on"}
+        self.assertFalse(tuner._lighter(base, q8))
+        self.assertFalse(tuner._lighter({**base, "threads": 4}, {**more, "threads": 8}))
+        self.assertTrue(tuner._lighter({**base, "batch": 512, "ubatch": 512}, base))  # unset = 2048/512
+
+    def test_killed_and_bad_alloc_are_worded_honestly(self):
+        self.assertIn("possibly because memory ran out", tuner.bench_failure("", "[", -9))
+        text = "terminate called after throwing an instance of 'std::bad_alloc'\n  what():  std::bad_alloc\n"
+        self.assertEqual(tuner.bench_failure(text, "", -6), "Ran out of memory with these settings.")
+        glued = "some error happened\nDEPRECATED: --x is deprecated. Please use --y instead.\n"
+        self.assertIn("some error happened", tuner.bench_failure(glued, "", 2))
+
+    def test_first_failure_in_a_run_gets_no_memory_guess(self):
+        clock = Clock()
+        bench = FakeBench(clock)
+
+        def all_fail(argv, env, timeout, cancel):
+            out = bench(argv, env, timeout, cancel)
+            if "-ngl" in argv and "," in argv[argv.index("-ngl") + 1]:
+                return {**out, "returncode": 1, "stdout": "[\n",
+                        "stderr": "llama_bench: error: failed to load model '/models/m.gguf'\n"}
+            return out
+        base = config(gpu_layers=20, total_layers=32, gpu_backend="cuda")
+        result, _, _ = run(clock=clock, bench=all_fail, base=base, verify_full_depth=False)
+        errors = [t.get("error") for t in result["trials"] if t["step"] == "gpu_layers" and t["status"] == "failed"]
+        self.assertIn(tuner.NO_CAUSE, errors)
+        self.assertNotIn(tuner.PROBABLY_MEMORY, errors)
 
 
 class MemoryCheckTests(unittest.TestCase):
