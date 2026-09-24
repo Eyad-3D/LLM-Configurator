@@ -60,6 +60,8 @@ class _MetadataRedirect(HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if urlsplit(req.full_url).scheme.lower() == "https" and urlsplit(newurl).scheme.lower() != "https":
+            if fp is not None:
+                fp.close()
             raise ValueError("Metadata request was redirected away from HTTPS; refused")
         redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
         if redirected is not None and _origin(req.full_url) != _origin(newurl):

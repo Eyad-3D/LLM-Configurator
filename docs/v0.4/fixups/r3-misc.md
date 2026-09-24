@@ -52,11 +52,17 @@ Files changed: `catalogue.py`, `runtime_install.py`, `downloads.py`, `runtime.py
 - **lead (`launch.from_candidate`)**: a CPU-only candidate has `gpu_index=None`, so `gpu_backend` stays `None` unless the engine's `launch` dict sets it.
   Suggestion: when `gpu` is None and `runtime_backend` is a GPU backend, set `gpu_backend=runtime_backend`, so `-dev none` also follows from the installed build.
   Today it depends only on engine's `hide`, which covers the known cases.
+- **lead (`launch.server_env`)**: pin `CUDA_VISIBLE_DEVICES` only for uuids starting with `GPU-`, as `runtime.gpu_placement` does.
+  A placeholder uuid such as `[N/A]` would otherwise hide every CUDA device. (From the independent review.)
 - **api-cli (`cli.py` `runtime install`)**: the manual `runtime_dir` clearing after `install` can go. `install()` does it and returns the note.
   `install-archive` gets the same behaviour for free.
 - **ui**: download progress now has `unit: "bytes"`. Format `done/total` as sizes only when it is present.
 
 ## Evidence
+
+- An independent review by a subagent found no serious issue. It confirmed the header removal, including on 307/308 and on chained redirects;
+  that settings are cleared only after a successful install; and that the `-ngl` row check lines up.
+  One nit was applied: the redirect response is closed before refusing. Known, accepted limit: `bench` now also stops at `launch`'s 1,048,576-token context cap, with a plain message.
 
 - `python3 -m unittest discover -s tests`: **817 tests OK** (26 skipped).
 - Real llama.cpp (`scripts/build_llama_cpp.sh`, llama-cpp-python 0.3.35 sdist, `version: 0.1.0-dev (build 1, commit 4df29be)`) and the tiny models:
