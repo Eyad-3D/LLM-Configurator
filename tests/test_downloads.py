@@ -485,7 +485,8 @@ class BenchDeviceTests(unittest.TestCase):
         return {"fingerprint": "machine", "ram_available": 64 * GIB, "cores": 8, "threads": 16, "gpus": list(gpus)}
 
     def run_bench(self, hardware, devices, layers=4, executable="llama-bench", build_number=11158):
-        row = {"n_prompt": 0, "n_gen": 128, "n_depth": 4096 - 128, "avg_ts": 30.0, "n_gpu_layers": layers, "n_threads": 8,
+        # -ngl N puts N-1 blocks plus the output layer on the GPU (launch.runtime_gpu_layers).
+        row = {"n_prompt": 0, "n_gen": 128, "n_depth": 4096 - 128, "avg_ts": 30.0, "n_gpu_layers": layers + 1 if layers else 0, "n_threads": 8,
                "type_k": "f16", "type_v": "f16", "build_commit": "d2e5458", "build_number": build_number, "n_batch": 2048,
                "n_ubatch": 512}
 
@@ -591,6 +592,33 @@ class BenchDeviceTests(unittest.TestCase):
         self.assertEqual(self.dev(), "none")
         self.assertEqual(result["runtime"]["backend"], "cpu")
         self.assertEqual(self.listed, [])
+
+    def test_env_and_layers_come_from_launch(self):
+        # Partial offload: 4 blocks need -ngl 5 (launch.runtime_gpu_layers). The environment is launch's:
+        # inherited LLAMA_ARG_* dropped, CORS limited to this computer, for GPU and CPU runs alike.
+        gpu = {"index": 0, "uuid": "GPU-abc", "name": "NVIDIA GeForce RTX 4090", "backend": "cuda", "available": 24 * GIB}
+        with patch.dict(os.environ, {"LLAMA_ARG_N_GPU_LAYERS": "99", "LLAMA_ARG_CTX_SIZE": "8"}):
+            result = self.run_bench(self.hw(gpu), [self.device("CUDA0", "NVIDIA GeForce RTX 4090", "cuda")], layers=4)
+            args, env = self.calls[-1]
+            self.assertEqual(args[args.index("-ngl") + 1], "5")
+            self.assertEqual(result["gpu_layers"], 4)
+            self.assertFalse([k for k in env if k.startswith("LLAMA_ARG_") and k != "LLAMA_ARG_CORS_ORIGINS"])
+            self.assertEqual(env["LLAMA_ARG_CORS_ORIGINS"], "localhost")
+            self.assertNotIn("LLAMA_ARG_N_GPU_LAYERS", self.listed[0])   # the device listing sees the same env
+            self.run_bench(self.hw(), None, layers=0)
+            args, env = self.calls[-1]
+            self.assertEqual(args[args.index("-ngl") + 1], "0")
+            self.assertNotIn("LLAMA_ARG_N_GPU_LAYERS", env)
+            self.assertEqual(env["LLAMA_ARG_CORS_ORIGINS"], "localhost")
+
+    def test_record_has_the_measurement_shape(self):
+        result = self.run_bench(self.hw(), None, layers=0)
+        for key in ["variant_id", "sha256", "fingerprint", "timestamp", "context", "users", "gpu_layers", "gpu_uuid",
+                    "threads", "tps", "runtime_build", "raw", "note", "kind", "id", "depth", "settings", "runtime"]:
+            self.assertIn(key, result)
+        self.assertEqual(set(result["settings"]), {"flash_attn", "cache_type_k", "cache_type_v", "batch", "ubatch", "n_cpu_moe"})
+        self.assertEqual(result["settings"]["flash_attn"], "auto")   # the row has no flash_attn: llama-bench's default
+        self.assertEqual(result["runtime"], {"version": "b11158", "backend": "cpu"})
 
     def test_missing_gpu_says_gpu_not_nvidia(self):
         with self.assertRaisesRegex(ValueError, "^The selected GPU is unavailable$"):

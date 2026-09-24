@@ -11,6 +11,7 @@ from .domain import GIB, now
 from .downloads import DownloadRedirect, digest, download_variant  # noqa: F401 (re-exported for compatibility)
 from .engine import allocations
 from .hardware import scan
+from . import launch
 from .runtime_install import list_devices, pick_device
 
 
@@ -74,13 +75,19 @@ def bench(variant, model_path, executable, context, layers, gpu_index=0, timeout
     if memory["ram"] > hardware["ram_available"] - 2 * GIB or (vram_free is not None and memory["vram"] > vram_free - 0.5 * GIB):
         raise ValueError("Current resources do not meet the conservative benchmark memory check; free resources or reduce context")
     threads = hardware.get("cores") or hardware["threads"] or 1
+    # The same launch settings a served model would get: launch owns the environment (inherited LLAMA_ARG_*
+    # dropped, CORS limited to this computer, NVIDIA pinned by UUID) and the -ngl count.
+    config = launch.normalize({"context": context, "gpu_layers": layers, "total_layers": variant.layers,
+                               "threads": threads, "gpu_uuid": gpu.get("uuid") or None if layers else None,
+                               "gpu_backend": (gpu.get("backend") or "cuda") if layers else None})
+    env = launch.server_env(config)
     if layers:
-        device_args, env, devices = gpu_placement(command, gpu)
+        device_args, env, devices = gpu_placement(command, gpu, env)
     else:
         # `none` is the one device name every build accepts: nothing is offloaded.
-        device_args, env, devices = ["-dev", "none"], os.environ.copy(), None
+        device_args, devices = ["-dev", "none"], None
     # Test 128 generated tokens near the requested context capacity, not an empty cache.
-    runtime_layers = layers + 1 if layers == variant.layers else layers
+    runtime_layers = launch.runtime_gpu_layers(layers, variant.layers)
     args = command + ["-m", str(Path(model_path).resolve()), "-p", "0", "-n", "128", "-d", str(context - 128),
                       "-ngl", str(runtime_layers), "-t", str(threads), "-ctk", "f16", "-ctv", "f16", "-r", "3", "-o", "json"]
     args += device_args
@@ -107,7 +114,7 @@ def bench(variant, model_path, executable, context, layers, gpu_index=0, timeout
             "context": context, "users": 1, "gpu_layers": layers, "gpu_uuid": gpu["uuid"] if layers else None,
             "threads": threads, "tps": tps, "runtime_build": version, "raw": row,
             "kind": "bench", "id": secrets.token_hex(6), "depth": context - 128,
-            "settings": {"flash_attn": "auto", "cache_type_k": "f16", "cache_type_v": "f16", "batch": row.get("n_batch"),
+            "settings": {"flash_attn": {0: "off", 1: "on"}.get(row.get("flash_attn"), "auto"), "cache_type_k": "f16", "cache_type_v": "f16", "batch": row.get("n_batch"),
                          "ubatch": row.get("n_ubatch"), "n_cpu_moe": 0},
             "runtime": {"version": version, "backend": backend},
             "note": "Synthetic generation benchmark; not TTFT, quality or concurrent throughput. Load changes can affect speed."}
