@@ -169,3 +169,15 @@ class LaunchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AppServerTests(unittest.TestCase):
+    def test_start_does_not_look_up_the_network_name(self):
+        # HTTPServer.server_bind calls socket.getfqdn(), which can stall ~30 s on some macOS networks.
+        import socket
+        from unittest.mock import patch
+        from llm_configurator.server import make_server
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(socket, "getfqdn", side_effect=AssertionError("network name lookup")):
+            server = make_server(Store(directory), port=0, demo=True)
+            server.server_close()

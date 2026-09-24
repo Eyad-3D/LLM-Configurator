@@ -9,6 +9,7 @@ session token; POSTs also need a same-origin Origin (or none) and a small JSON b
 never contain absolute file paths (only file names), except the export text the user asked for.
 """
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import socketserver
 import functools
 import inspect
 import json
@@ -180,6 +181,12 @@ def text_list(body, name, low, high, limit=400):
 
 class AppServer(ThreadingHTTPServer):
     daemon_threads = True
+
+    def server_bind(self):
+        # Skip HTTPServer's socket.getfqdn() lookup: it can stall ~30 s on some macOS networks, and a
+        # loopback-only server never needs its network name.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def server_close(self):
         """Stop the user's llama-server and cancel jobs so nothing outlives the app.

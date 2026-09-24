@@ -158,7 +158,7 @@ def _scan_plain(root, source, cancel, counter):
     if real_root is None:
         return
     for path in _walk(root, cancel, counter):
-        real = _resolve(path) if path.is_symlink() else path
+        real = _resolve(path)  # always resolved: on macOS /var is a link to /private/var, and keys must match
         if real is None or path.is_symlink() and not _inside(real, real_root):
             continue  # a link pointing outside the scanned folder is never followed
         entry = _stat_entry(path, real, source=source, filename=path.name)

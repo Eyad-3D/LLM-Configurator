@@ -30,11 +30,19 @@ import os
 from pathlib import Path
 import random
 import re
+import socketserver
 import struct
 import sys
 import threading
 import time
 import zlib
+
+class FastHTTPServer(ThreadingHTTPServer):
+    """Like the real llama-server, start instantly: skip HTTPServer's getfqdn(), which can stall ~30 s on macOS."""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 BUILD = int(os.environ.get("FAKE_LLAMA_BUILD", "6512"))
 COMMIT = os.environ.get("FAKE_LLAMA_COMMIT", "fa4ec0d")
@@ -807,7 +815,7 @@ def run_server(args):
             server_log("llama_server", line, "W")
     Handler.state = state
     try:
-        httpd = ThreadingHTTPServer((host, port), Handler)
+        httpd = FastHTTPServer((host, port), Handler)
     except OSError:
         httpd = None
     if httpd is None or os.environ.get("FAKE_LLAMA_FAIL") == "port":
