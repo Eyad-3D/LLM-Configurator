@@ -31,6 +31,7 @@ from .catalogue import definitions, refresh, test_connection
 from . import credentials
 from .hardware import scan
 from .calibration import calibrate, valid
+from .domain import check_cancel
 from .jobs import JobManager
 from .storage import models_dir, runtime_dir
 
@@ -47,7 +48,7 @@ IDLE = {"running": False, "starting": False, "base_url": None, "openai_base_url"
 STALE_MESSAGE = "Compare again first. That option is not in the latest comparison."
 # Absolute POSIX, Windows or UNC paths inside text; replaced with their last part before reaching the page.
 # A folder name may hold single inner spaces ("Program Files", "My Models") as long as a separator follows it.
-_SEG = r"[^\s/\\\"'<>|:*?]+(?: [^\s/\\\"'<>|:*?~][^\s/\\\"'<>|:*?]*)*[\\/]"
+_SEG = r"[^\s/\\\"'<>|:*?][^\s/\\\"<>|:*?]*(?: +[^\s/\\\"'<>|:*?~][^\s/\\\"<>|:*?]*)*[\\/]"
 PATH = re.compile(rf"(?<![\w.:/~\\-])(?:~[\\/](?:{_SEG})*|(?:[A-Za-z]:[\\/]|\\\\|[\\/])(?:{_SEG})+)([^\s/\\\"'<>|:*?]*)")
 # Model-written text is shown as written (a quiz answer like "cd /usr/bin" is not a leak), and
 # folder labels are built by app.page_location as "~/..." on purpose.
@@ -365,8 +366,16 @@ def make_server(store, port=8765, demo=False):
         path = app.require_model(store, found)
         port = preferred_port()
         config = app.launch_config(store, chosen, hardware, path, tuned, **({"port": port} if port else {}))
+        command = app.binary(store, "llama-server")
+        previous = dict(served)
         served.update(variant_id=found.id, candidate_id=chosen["id"])
-        status = server_registry.start(app.binary(store, "llama-server"), config, progress=progress, cancel=cancel)
+        try:
+            status = server_registry.start(command, config, progress=progress, cancel=cancel)
+        except BaseException:
+            # The registry validates before stopping the old server, so it may still be running: keep naming it.
+            if server_registry.status().get("running"):
+                served.update(previous)
+            raise
         return serve_status(status)
 
     def test_job(found, chosen, hardware, kind, tuned):
@@ -648,8 +657,11 @@ def make_server(store, port=8765, demo=False):
                 catalogue.add_entry(store, base_repo, gguf_repo)
             forget()
             def fetch(progress, cancel):
-                if not refresh_lock.acquire(timeout=600):
-                    raise ValueError("A model list refresh is still running. Try again when it finishes.")
+                waited = time.monotonic()
+                while not refresh_lock.acquire(timeout=0.5):
+                    check_cancel(cancel)
+                    if time.monotonic() - waited > 600:
+                        raise ValueError("A model list refresh is still running. Try again when it finishes.")
                 try:
                     progress({"stage": "fetching", "done": 0, "total": None, "message": f"Reading {base_repo} from Hugging Face…"})
                     return catalogue.refresh_entry(store, base_repo)
@@ -665,8 +677,14 @@ def make_server(store, port=8765, demo=False):
             if not REPO.fullmatch(base_repo):
                 raise ValueError("Use Hugging Face repository names like owner/model")
             from . import catalogue
-            with catalogue_lock:
-                result = catalogue.remove_entry(store, base_repo)
+            # A refresh running now would write the removed model's files back when it finishes.
+            if not refresh_lock.acquire(blocking=False):
+                raise Conflict("Wait for the model list refresh to finish, then remove the model.")
+            try:
+                with catalogue_lock:
+                    result = catalogue.remove_entry(store, base_repo)
+            finally:
+                refresh_lock.release()
             forget()
             return 200, result
         raise NotFound("Not found")
@@ -842,4 +860,13 @@ def serve(store, port=8765, demo=False, open_browser=True):
     except KeyboardInterrupt:
         pass
     finally:
+        # A second Ctrl+C or a closed terminal during clean-up must not skip stopping llama-server.
+        if threading.current_thread() is threading.main_thread():
+            for name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"):
+                number = getattr(signal, name, None)
+                if number is not None:
+                    try:
+                        signal.signal(number, signal.SIG_IGN)
+                    except (OSError, ValueError):
+                        pass
         server.server_close()

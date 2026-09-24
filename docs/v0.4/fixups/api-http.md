@@ -32,6 +32,10 @@ Review findings are numbered as in `docs/v0.4/review/api-http.md` (R#). Handoff 
 | `POST /api/catalogue {base_repo, gguf_repo}` checks the names, calls `catalogue.add_entry`, then runs a `catalogue_refresh` job with `refresh_entry` (it waits for `refresh_lock`). `POST /api/catalogue/remove {base_repo}` calls `remove_entry`. Both clear the cached candidates and return 409 in demo mode. | catalogue request (optional) |
 | `/api/community/share` accepts 1–50 ids matching `[A-Za-z0-9_-]{1,64}` (the same as `share_payload`; the old hex-only rule rejected valid ids). `json` and `issue_url` are passed through unchanged, because they are exactly what the user posts. | community request |
 | Token comparison uses `secrets.compare_digest`. `/api/credentials/save` checks that `remember` is a bool. `/api/map` checks that `base_repo` and `slug` are text (a missing key gave the error text `'base_repo'`). | own review |
+| A failed restart (bad settings or a missing binary: the registry checks these before stopping the old server) keeps `candidate_id`/`variant_id` pointing at the server that is still running, so its file stays protected from `/api/downloads/remove`. | review agent (2nd pass) |
+| `/api/catalogue/remove` returns 409 while a refresh runs; a finishing refresh would otherwise write the removed model back. The add-model job waits for the refresh in 0.5 s steps and can be cancelled while it waits. | review agent (2nd pass) |
+| During shutdown, further Ctrl+C or SIGTERM/SIGHUP signals are ignored, so they can't skip stopping llama-server. | review agent (2nd pass) |
+| Path scrubbing also covers folder names with `'` (`Eyad's SSD`) or runs of spaces. | review agent (2nd pass) |
 | A corrupt user `catalogue.json` no longer makes `/api/state` fail. It returns `definitions: []` plus `definitions_error`. | review agent |
 
 Response shapes are additive only. The one pinned exception is reveal's `mapping` entries, which are now keyed by candidate id.
@@ -73,10 +77,10 @@ Response shapes are additive only. The one pinned exception is reveal's `mapping
 
 ## Test evidence
 
-- `python3 -m pip install -e .` then `python3 -m unittest discover -s tests`: 620 tests, the same 3 failures as the base branch, none in my files:
+- `python3 -m pip install -e .` then `python3 -m unittest discover -s tests`: 622 tests, the same 3 failures as the base branch, none in my files:
   - `test_adapters.test_aa_pagination_and_null_scores` (credentials/keyring)
   - `test_fake_matches_real` ×2 (server-fake)
-- `python3 -m unittest tests.test_api_v04 tests.test_server`: OK. There are 15 new tests in `FixupTests`, `ServeProcessTests` (a real `serve` subprocess exits 0 on SIGTERM) and `DemoCatalogueTests`, plus the opt-in `RealRuntimeHttpTests`.
+- `python3 -m unittest tests.test_api_v04 tests.test_server`: OK. There are 17 new tests in `FixupTests`, `ServeProcessTests` (a real `serve` subprocess exits 0 on SIGTERM) and `DemoCatalogueTests`, plus the opt-in `RealRuntimeHttpTests`.
 - `npm ci && npm test`: 56 pass, 0 fail.
 - Real llama.cpp: I built it with `JOBS=4 bash scripts/build_llama_cpp.sh /opt/llama-work` (bin: `/opt/llama-work/llama_cpp_python-0.3.35/vendor/llama.cpp/build/bin`) and made the tiny models with `scripts/make_tiny_models.py`.
   - `LLM_CONFIG_REAL_RUNTIME=<bin> LLM_CONFIG_TINY_MODELS=/opt/llama-work/models python3 -m unittest tests.integration.test_real_runtime tests.integration.test_fake_matches_real`: 32 tests, the 3 known failures (runtime_install build parsing, fake `--draft-max`, fake bench `--version`).

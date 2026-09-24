@@ -814,6 +814,35 @@ class FixupTests(ApiCase):
             self.assertEqual(self.call("/api/catalogue/remove", {"base_repo": "Org/Model-1"})[1]["removed"], True)
         self.assertEqual(calls, [("add", "Org/Model-1", "Org/Model-1-GGUF"), ("refresh", "Org/Model-1"), ("remove", "Org/Model-1")])
 
+    def test_failed_restart_keeps_naming_the_running_model(self):
+        first, second = candidate(self.variant), candidate(self.other)
+        self.remember(first, second)
+        self.downloaded(self.variant)
+        self.downloaded(self.other)
+        self.wait(self.call("/api/serve/start", {"candidate_id": first["id"]})[1]["id"])
+        registry = self.server.registry
+        original = registry.start
+        def refuse(command, config, progress=None, cancel=None):
+            raise ValueError("Those launch settings are not valid.")  # validated before the old server stops
+        registry.start = refuse
+        failed = self.wait(self.call("/api/serve/start", {"candidate_id": second["id"]})[1]["id"])
+        registry.start = original
+        self.assertEqual(failed["state"], "failed")
+        self.assertEqual(self.call("/api/serve")[1]["candidate_id"], first["id"])
+        self.assertEqual(self.call("/api/downloads/remove", {"variant_id": self.variant.id})[0], 409)
+
+    def test_catalogue_remove_waits_for_a_running_refresh(self):
+        gate = threading.Event()
+        with patch("llm_configurator.server.refresh", lambda *a, **k: gate.wait(5) and {"warnings": []}), \
+             patch("llm_configurator.catalogue.remove_entry", lambda store, b: {"removed": True}):
+            self.assertEqual(self.call("/api/refresh", {})[0], 202)
+            self.assertEqual(self.call("/api/catalogue/remove", {"base_repo": "a/b"})[0], 409)
+            gate.set()
+            deadline = time.monotonic() + 5
+            while self.call("/api/refresh")[1]["running"] and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertEqual(self.call("/api/catalogue/remove", {"base_repo": "a/b"})[0], 200)
+
     def test_community_share_accepts_up_to_fifty_ids(self):
         seen = []
         self.fakes.modules["community"].share_payload = lambda store, ids: seen.append(ids) or {"json": "{}", "issue_url": "https://github.com/o/r/issues/new?body=%2Fhome"}
