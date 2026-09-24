@@ -77,19 +77,20 @@ class DiscoverTest(unittest.TestCase):
 
     # locations -------------------------------------------------------------------------------------------------
 
-    @unittest.skipIf(os.name == "nt", "checks POSIX-style default paths")
     def test_default_locations_per_system(self):
+        # Paths are compared as this OS writes them (Path turns "/" into "\\" on Windows).
+        linux_ollama = str(Path("/usr/share/ollama/.ollama/models"))
         paths = {(loc["source"], loc["path"]) for loc in discover.locations()}
         self.assertIn(("hf_cache", str(self.home / ".cache/huggingface/hub")), paths)
         self.assertIn(("ollama", str(self.home / ".ollama/models")), paths)
-        self.assertIn(("ollama", "/usr/share/ollama/.ollama/models"), paths)
+        self.assertIn(("ollama", linux_ollama), paths)
         self.assertIn(("lmstudio", str(self.home / ".lmstudio/models")), paths)
         self.assertIn(("lmstudio", str(self.home / ".cache/lm-studio/models")), paths)
         self.assertTrue(all(loc["exists"] is False for loc in discover.locations()))
         for system in ["Windows", "Darwin"]:
             with mock.patch.object(discover, "_system", return_value=system):
                 sources = [loc["path"] for loc in discover.locations()]
-                self.assertNotIn("/usr/share/ollama/.ollama/models", sources)
+                self.assertNotIn(linux_ollama, sources)
                 self.assertIn(str(self.home / ".ollama/models"), sources)
 
     def test_windows_deduplicates_case_insensitively(self):

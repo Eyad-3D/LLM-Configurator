@@ -469,9 +469,9 @@ class ExtractTests(Base):
         self.assertTrue(os.access(out / "build/bin/llama-server", os.X_OK))
         self.assertEqual(ri.find_bin_dir(out), out / "build" / "bin")
 
-    @unittest.skipIf(os.name == "nt", "fake builds are POSIX shell scripts without .exe")
     def test_zip_layouts(self):
-        out = self.extract(zip_bytes({"llama-server": (GOOD, 0o755), "ggml-cuda.dll": ("x", 0o644)}), ".zip")
+        # Only names are checked here, so use the platform's own executable name (llama-server.exe on Windows).
+        out = self.extract(zip_bytes({ri._exe("llama-server"): (GOOD, 0o755), "ggml-cuda.dll": ("x", 0o644)}), ".zip")
         self.assertEqual(ri.find_bin_dir(out), out)
 
 
