@@ -5,12 +5,43 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "llm-configurator"
 version = "0.4.0"
-description = "Local hardware-aware model, quantisation and context recommendations"
+description = "Pick, download, test, tune and run local AI models that fit your own computer"
+readme = "README.md"
 requires-python = ">=3.10"
+authors = [{ name = "Eyad-3D" }]
+keywords = ["llm", "llama.cpp", "gguf", "local-ai", "quantization", "hardware", "benchmark", "ollama", "openai-compatible"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: Science/Research",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Benchmark",
+]
 dependencies = ["psutil==7.2.2", "keyring==25.6.0", "numpy==2.2.6"]
+
+[project.urls]
+Homepage = "https://github.com/Eyad-3D/LLM-Configurator"
+Documentation = "https://github.com/Eyad-3D/LLM-Configurator/tree/main/docs"
+Changelog = "https://github.com/Eyad-3D/LLM-Configurator/blob/main/CHANGELOG.md"
+Issues = "https://github.com/Eyad-3D/LLM-Configurator/issues"
+Source = "https://github.com/Eyad-3D/LLM-Configurator"
 
 [project.scripts]
 llm-config = "llm_configurator.cli:main"
+# Same entry point under the package name, so `uvx llm-configurator` and `pipx run llm-configurator` work.
+llm-configurator = "llm_configurator.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
