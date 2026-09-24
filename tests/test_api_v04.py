@@ -5,8 +5,11 @@ fakes injected into sys.modules, so these tests pin down only the api wiring.
 """
 from contextlib import ExitStack
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
+import signal
+import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -90,7 +93,7 @@ class Fakes:
         m["quantcheck"].kl_check = self.kl_check
         m["export"].formats = lambda: [{"id": "llama-server", "label": "Script", "description": "d"}, {"id": "ollama", "label": "Ollama", "description": "d"}]
         m["export"].export = lambda config, variant, fmt, platform="posix", server_command=None: {
-            "format": fmt, "filename": "run.sh", "content": f"{server_command} -m {config['model_path']}", "instructions": [], "notes": []}
+            "format": fmt, "filename": "run.sh", "content": f"{server_command} -m {config['model_path']} -t {config['threads']}", "instructions": [], "notes": []}
         m["community"].import_records = lambda store, source=None, text=None, progress=None, cancel=None: (
             store.put("community", {"source": source or "default", "fetched_at": "2026-09", "records": [{"tps": 1}]})
             or {"source": source or "default", "fetched_at": "2026-09", "records": [{"tps": 1}], "rejected": 2})
@@ -648,6 +651,216 @@ class JobTests(ApiCase):
             status, result, _ = self.call("/api/community/share", {"measurement_ids": ["a1b2c3"]})
         self.assertEqual(status, 409)
         self.assertIn("not installed", result["error"])
+
+
+class FixupTests(ApiCase):
+    """Seams found when the modules met each other and real llama.cpp (docs/v0.4/fixups/api-http.md)."""
+
+    def test_scrub_handles_spaces_bare_paths_whole_folders_and_cut_log_tails(self):
+        for value in [r"C:\Program Files\llama.cpp\llama-server.exe", r"E:\LLM stuff\x.gguf",
+                      "/mnt/My Models/secret project/x.gguf", r"C:\Users\j\OneDrive - Contoso Ltd\Models\x.gguf"]:
+            self.assertEqual(scrub({"directory": value})["directory"].rsplit(" ", 1)[-1], PureWindowsPath(value).name)
+        self.assertEqual(scrub("Model file not found: /Volumes/Samsung T7/m.gguf. Download it first."),
+                         "Model file not found: m.gguf. Download it first.")
+        # A root only replaces whole folders: "/tmp" must not eat the end of another folder's name.
+        self.assertEqual(scrub("in /home/u/private/tmp now", roots=("/tmp",)), "in tmp now")
+        self.assertEqual(scrub("/tmp/My Dir/x.gguf and more", roots=("/tmp",)), "x.gguf and more")
+        tail = "e/secret user/models/m.gguf'\n" + "llama_model_load: ok\n" * 100
+        self.assertNotIn("secret", scrub({"log_tail": tail})["log_tail"])
+        for kept in ["tokens/s", "see ~ for more", "/v1/chat/completions"]:
+            self.assertEqual(scrub(kept), kept)
+
+    def test_job_errors_and_progress_are_path_free_in_memory(self):
+        c = candidate(self.variant)
+        self.remember(c)
+        self.downloaded()
+        def failing(store, variant, config, commands, **kwargs):
+            kwargs["progress"]({"stage": "loading", "done": 12.5, "total": 300, "message": "Loading the model into memory…"})
+            raise OSError(f"[Errno 2] No such file: '{SECRET}/My Models/m.gguf'")
+        self.fakes.modules["testing"].run_tests = failing
+        job = self.wait(self.call("/api/test", {"candidate_id": c["id"], "kind": "smoke"})[1]["id"])
+        stored = self.server.jobs.get(job["id"])
+        self.assertEqual(stored["state"], "failed")
+        self.assertNotIn(SECRET, json.dumps(stored))
+        self.assertIn("m.gguf", stored["error"])
+        self.assertEqual((stored["progress"]["done"], stored["progress"]["total"], stored["progress"]["seconds"]), (None, None, 12.5))
+
+    def test_serve_status_names_the_candidate_and_uses_logs_folder(self):
+        c = candidate(self.variant)
+        self.remember(c)
+        self.downloaded()
+        idle = self.call("/api/serve")[1]
+        self.assertEqual((idle["candidate_id"], idle["variant_id"], idle["starting"], idle["error"]), (None, None, False, None))
+        done = self.wait(self.call("/api/serve/start", {"candidate_id": c["id"]})[1]["id"])
+        self.assertEqual((done["result"]["candidate_id"], done["result"]["variant_id"]), (c["id"], self.variant.id))
+        state = self.call("/api/serve")[1]
+        self.assertEqual((state["candidate_id"], state["variant_id"]), (c["id"], self.variant.id))
+        self.assertTrue((Path(self.temp.name) / "logs").is_dir())
+        stopped = self.call("/api/serve/stop", {})[1]
+        self.assertEqual((stopped["running"], stopped["candidate_id"]), (False, None))
+
+    def test_serve_prefers_the_port_the_exports_use(self):
+        from llm_configurator import server as server_module
+        c = candidate(self.variant)
+        self.remember(c)
+        self.downloaded()
+        with socket.socket() as busy:
+            busy.bind(("127.0.0.1", 0))
+            busy.listen()
+            for port, expected in [(busy.getsockname()[1], None), (0, None)]:
+                with patch.object(server_module, "PREFERRED_PORT", port):
+                    self.wait(self.call("/api/serve/start", {"candidate_id": c["id"]})[1]["id"])
+                self.assertEqual(self.fakes.calls[-1][2]["port"], expected)
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            free = probe.getsockname()[1]
+        with patch.object(server_module, "PREFERRED_PORT", free):
+            self.wait(self.call("/api/serve/start", {"candidate_id": c["id"]})[1]["id"])
+        self.assertEqual(self.fakes.calls[-1][2]["port"], free)
+
+    def test_saved_tune_is_used_unless_the_page_says_otherwise(self):
+        c = candidate(self.variant)
+        self.remember(c)
+        self.downloaded()
+        self.wait(self.call("/api/serve/start", {"candidate_id": c["id"]})[1]["id"])
+        self.assertEqual(self.fakes.calls[-1][2]["threads"], 4)
+        self.call("/api/serve/stop", {})
+        tune = self.wait(self.call("/api/tune", {"candidate_id": c["id"], "budget_seconds": 60})[1]["id"])
+        self.assertTrue(tune["result"]["saved"])
+        self.wait(self.call("/api/serve/start", {"candidate_id": c["id"]})[1]["id"])
+        self.assertEqual(self.fakes.calls[-1][2]["threads"], 8)
+        self.wait(self.call("/api/serve/start", {"candidate_id": c["id"], "tuned": False})[1]["id"])
+        self.assertEqual(self.fakes.calls[-1][2]["threads"], 4)
+        self.assertIn("-t 8", self.call("/api/export", {"candidate_id": c["id"], "format": "llama-server"})[1]["content"])
+
+    def test_cancelled_tune_says_it_was_not_saved(self):
+        c = candidate(self.variant)
+        self.remember(c)
+        self.downloaded()
+        original = self.fakes.tune
+        self.fakes.modules["tuner"].tune = lambda *a, **k: {**original(*a, **k), "stopped": "cancelled"}
+        done = self.wait(self.call("/api/tune", {"candidate_id": c["id"], "budget_seconds": 60})[1]["id"])
+        self.assertFalse(done["result"]["saved"])
+        self.assertEqual(self.store.get("tuned", []), [])
+
+    def test_speed_target_reaches_the_test_when_the_app_accepts_it(self):
+        c = candidate(self.variant)
+        report = {"candidates": [c], "hardware": {"fingerprint": "fp"}, "requirements": {"min_tps": 25.0}, "notes": []}
+        with patch("llm_configurator.server.evaluate", return_value=report):
+            self.call("/api/recommend", {})
+        seen = {}
+        def test_job(store, variant, candidate, hardware, kind="full", tuned=False, min_tps=None):
+            seen["min_tps"] = min_tps
+            return lambda progress, cancel: {"verdict": "works_slowly"}
+        with patch.object(app, "test_job", test_job):
+            self.wait(self.call("/api/test", {"candidate_id": c["id"]})[1]["id"])
+        self.assertEqual(seen, {"min_tps": 25.0})
+
+    def test_local_models_are_reused_never_downloaded_or_deleted(self):
+        local = Variant(**{**self.variant.to_dict(), "id": "local:abc:m.gguf", "source": "local", "repo": "local"})
+        self.store.put("local_variants", [{"variant": local.to_dict(), "path": f"{SECRET}/gone.gguf"}])
+        plan = self.call("/api/downloads/plan", {"variant_id": local.id})
+        self.assertEqual((plan[0], plan[1]["local"], plan[1]["local_copy"]), (200, True, False))
+        status, error, raw = self.call("/api/downloads", {"variant_id": local.id})
+        self.assertEqual(status, 409)
+        self.assertIn("no longer there", error["error"])
+        self.assertEqual(self.call("/api/downloads/remove", {"variant_id": local.id})[0], 409)
+        self.fakes.local[local.id] = Path(self.temp.name) / "m.gguf"
+        done = self.wait(self.call("/api/downloads", {"variant_id": local.id})[1]["id"])
+        self.assertTrue(done["result"]["reused"])
+        self.assertNotIn("download", [call[0] for call in self.fakes.calls])
+
+    def test_reveal_names_candidates_and_waits_for_answers(self):
+        first, second = candidate(self.variant), candidate(self.other)
+        self.remember(first, second)
+        self.downloaded(self.variant)
+        self.downloaded(self.other)
+        evals = self.fakes.modules["evals"]
+        labels = [f"{self.variant.name} {self.variant.quant}", f"{self.other.name} {self.other.quant}"]
+        state = {"state": "running"}
+        def blinded(store, cid):
+            if cid != "cmp_1":
+                raise ValueError("That comparison was not found. It may be old; start a new one.")
+            return {"comparison_id": cid, "state": state["state"], "items": []}
+        evals.blinded = blinded
+        evals.reveal = lambda store, cid: {"comparison_id": cid, "mapping": [{"item": 0, "slots": {"A": labels[1], "B": labels[0]},
+                                                                             "vote": "A", "winner": labels[1]}],
+                                           "tallies": {labels[0]: 0, labels[1]: 1}, "overall": labels[1],
+                                           "speed": {labels[0]: {"answers": 1}, labels[1]: {"answers": 1}}, "note": "n"}
+        evals.vote = lambda store, cid, item, slot: {"slot": slot}
+        self.wait(self.call("/api/quality/compare", {"candidate_ids": [first["id"], second["id"]], "prompts": ["Hi"]})[1]["id"])
+        self.assertEqual(self.call("/api/quality/reveal", {"comparison_id": "cmp_1"})[0], 409)
+        self.assertEqual(self.call("/api/quality/compare/cmp_9")[0], 404)
+        self.assertEqual(self.call("/api/quality/vote", {"comparison_id": "cmp_1", "item": 0, "slot": "tie"})[1], {"slot": "tie"})
+        state["state"] = "ready"
+        out = self.call("/api/quality/reveal", {"comparison_id": "cmp_1"})[1]
+        self.assertEqual({k: out["mapping"][0][k] for k in "AB"}, {"A": second["id"], "B": first["id"]})
+        self.assertEqual((out["tallies"], out["overall"]), ({first["id"]: 0, second["id"]: 1}, second["id"]))
+        self.assertEqual(out["labels"], {first["id"]: labels[0], second["id"]: labels[1]})
+        self.assertEqual(out["mapping"][0]["winner"], second["id"])
+
+    def test_catalogue_endpoints_validate_and_refresh_in_a_job(self):
+        calls = []
+        catalogue = types.ModuleType("llm_configurator.catalogue_fake")
+        with patch("llm_configurator.catalogue.add_entry", lambda store, b, g: calls.append(("add", b, g))), \
+             patch("llm_configurator.catalogue.refresh_entry", lambda store, b: calls.append(("refresh", b)) or {"base_repo": b, "variants": 3}), \
+             patch("llm_configurator.catalogue.remove_entry", lambda store, b: calls.append(("remove", b)) or {"base_repo": b, "removed": True}):
+            for body in [{"base_repo": "../x", "gguf_repo": "a/b"}, {"base_repo": "a/b", "gguf_repo": "https://x/y"},
+                         {"base_repo": "a/b"}, {"base_repo": "a/b", "gguf_repo": "c/d", "url": "x"}]:
+                self.assertEqual(self.call("/api/catalogue", body)[0], 400, body)
+            status, job, _ = self.call("/api/catalogue", {"base_repo": "Org/Model-1", "gguf_repo": "Org/Model-1-GGUF"})
+            self.assertEqual((status, job["kind"]), (202, "catalogue_refresh"))
+            self.assertEqual(self.wait(job["id"])["result"], {"base_repo": "Org/Model-1", "variants": 3})
+            self.assertEqual(self.call("/api/catalogue/remove", {"base_repo": "Org/Model-1"})[1]["removed"], True)
+        self.assertEqual(calls, [("add", "Org/Model-1", "Org/Model-1-GGUF"), ("refresh", "Org/Model-1"), ("remove", "Org/Model-1")])
+
+    def test_community_share_accepts_up_to_fifty_ids(self):
+        seen = []
+        self.fakes.modules["community"].share_payload = lambda store, ids: seen.append(ids) or {"json": "{}", "issue_url": "https://github.com/o/r/issues/new?body=%2Fhome"}
+        ids = [f"id_{i}" for i in range(50)]
+        status, out, _ = self.call("/api/community/share", {"measurement_ids": ids})
+        self.assertEqual((status, seen[-1], out["issue_url"]), (200, ids, "https://github.com/o/r/issues/new?body=%2Fhome"))
+        self.assertEqual(self.call("/api/community/share", {"measurement_ids": ids + ["x"]})[0], 400)
+        self.assertEqual(self.call("/api/community/share", {"measurement_ids": ["../x"]})[0], 400)
+
+    def test_scan_job_kind_and_export_formats(self):
+        self.assertEqual(self.call("/api/local-models/scan", {})[1]["kind"], "local_scan")
+        self.assertEqual([f["id"] for f in self.call("/api/export")[1]["formats"]], ["llama-server", "ollama"])
+
+    def test_shutdown_waits_for_cancelled_jobs(self):
+        stopped = threading.Event()
+        def slow(progress, cancel):
+            while not cancel.wait(0.01):
+                pass
+            time.sleep(0.2)  # the job's own clean-up, like killing llama-bench
+            stopped.set()
+        self.server.jobs.submit("tune", "t", slow)
+        time.sleep(0.05)
+        self.server.server_close()
+        self.assertTrue(stopped.is_set())
+
+
+class ServeProcessTests(unittest.TestCase):
+    @unittest.skipIf(sys.platform == "win32", "POSIX signals")
+    def test_terminate_takes_the_clean_shutdown_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            process = subprocess.Popen([sys.executable, "-m", "llm_configurator", "--data-dir", directory, "serve",
+                                        "--no-browser", "--port", "0"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            try:
+                self.assertIn("LLM Configurator", process.stdout.readline())
+                process.send_signal(signal.SIGTERM)
+                self.assertEqual(process.wait(timeout=20), 0)
+            finally:
+                process.kill() if process.poll() is None else None
+                process.stdout.close()
+
+
+class DemoCatalogueTests(ApiCase):
+    demo = True
+
+    def test_demo_cannot_change_the_catalogue(self):
+        self.assertEqual(self.call("/api/catalogue", {"base_repo": "a/b", "gguf_repo": "c/d"})[0], 409)
+        self.assertEqual(self.call("/api/catalogue/remove", {"base_repo": "a/b"})[0], 409)
 
 
 class RecommendEvidenceTests(unittest.TestCase):

@@ -270,10 +270,14 @@ def make_server(store, port=8765, demo=False):
             raise NotFound("Unknown model. Refresh the model list and compare again.")
         return found
 
-    def not_local(found, action):
-        if getattr(found, "source", None) == "local":
-            raise Conflict(f"This model came from a file on your computer, so the app can't {action} it. "
-                           "If the file moved, put it back or scan for models again.")
+    def is_local(found):
+        return getattr(found, "source", None) == "local"
+
+    def local_file_present(found):
+        """A model the user brought from their own disk can only be reused, never fetched from the internet."""
+        if is_local(found) and app.local_model(store, found, verify=False) is None:
+            raise Conflict("This model came from a file on your computer, and the file is no longer there. "
+                           "Put it back, or scan for models again.")
 
     def use_tune(body, chosen, hardware):
         """An explicit `tuned` wins; otherwise use the saved tune for this candidate when one exists."""
@@ -348,6 +352,8 @@ def make_server(store, port=8765, demo=False):
     def preferred_port():
         """8080 when it is free, so the client setups shown next to the server work as shown."""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            if sys.platform != "win32":  # like llama-server itself; a closed connection's TIME_WAIT is not "in use"
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 probe.bind(("127.0.0.1", PREFERRED_PORT))
             except OSError:
@@ -420,8 +426,13 @@ def make_server(store, port=8765, demo=False):
             return 200, credentials.status()
         if path == "/api/state":
             cache = store.get("scores", {})
+            try:
+                entries, problem = definitions(store), None
+            except ValueError as error:  # a hand-edited catalogue.json must not stop the whole page from loading
+                entries, problem = [], str(error)
             return 200, {"hardware": scan(), "demo": demo, "status": store.get("refresh_status"),
-                         "definitions": definitions(store), "scores": [{"slug": x["slug"], "name": x["name"]} for x in cache.get("data", [])]}
+                         "definitions": entries, "scores": [{"slug": x["slug"], "name": x["name"]} for x in cache.get("data", [])],
+                         **({"definitions_error": problem} if problem else {})}
         if path == "/api/calibrate":
             return 200, calibration_state
         if path == "/api/refresh":
@@ -481,13 +492,13 @@ def make_server(store, port=8765, demo=False):
             fields(body, ["variant_id"])
             no_demo()
             found = variant(body["variant_id"])
-            not_local(found, "download")
-            return 200, app.download_plan(store, found)
+            plan = app.download_plan(store, found)
+            return 200, {**plan, "local": is_local(found)} if is_local(found) else plan
         if path == "/api/downloads":
             fields(body, ["variant_id"])
             no_demo()
             found = variant(body["variant_id"])
-            not_local(found, "download")
+            local_file_present(found)
             active = jobs.active(kind="download", subject_key="variant_id", subject_value=found.id)
             if active:
                 return 202, active[0]
@@ -497,7 +508,8 @@ def make_server(store, port=8765, demo=False):
             fields(body, ["variant_id"])
             no_demo()
             found = variant(body["variant_id"])
-            not_local(found, "delete")
+            if is_local(found):
+                raise Conflict("This file is yours, outside the app's models folder, so the app does not delete it.")
             if busy(found.id):
                 raise Conflict("This model is in use. Cancel its tasks or stop the server first.")
             return 200, {"freed_bytes": app.remove_download(store, found)}
