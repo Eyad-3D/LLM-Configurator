@@ -52,6 +52,8 @@
   const pct = (v) => (v == null ? null : v <= 1 ? v * 100 : v);
   const fmtPct = (v, digits = 0) =>
     v == null ? "unknown" : `${pct(v).toFixed(digits)}%`;
+  const fmtPercent = (v, digits = 0) =>
+    typeof v === "number" && Number.isFinite(v) ? `${v.toFixed(digits)}%` : "unknown";
   const num = (v, digits = 3) =>
     typeof v === "number" && Number.isFinite(v) ? v.toFixed(digits) : "unknown";
   const capital = (text) => String(text || "").replace(/^./, (c) => c.toUpperCase());
@@ -88,7 +90,7 @@
 
   function errorText(error) {
     const text = (error && error.message) || String(error || "");
-    if (/failed to fetch|networkerror|load failed/i.test(text))
+    if (/failed to fetch|networkerror|load failed/i.test(text) || (error instanceof TypeError && !error.status))
       return "Couldn't reach the app. Check that LLM Configurator is still running, then try again.";
     return text || "Something went wrong. Please try again.";
   }
@@ -240,7 +242,8 @@
     if (twins.length > 1) label += ` (${c.context ? c.context.toLocaleString() + " tokens" : "#" + (twins.indexOf(c) + 1)})`;
     return label;
   }
-  function modelName(ctx, key) {
+  function modelName(ctx, key, labels) {
+    if (labels && typeof labels === "object" && typeof labels[key] === "string") return labels[key];
     const list = ctx.candidates || [];
     const c =
       list.find((x) => x.id === key) ||
@@ -305,6 +308,11 @@
       }
       if (session.alive) renderHistory();
     }
+    // Saved records carry the model's name; use it when the model isn't in today's list.
+    function rowName(row) {
+      const name = modelName(ctx, row.key);
+      return name === String(row.key) && row.name ? row.name : name;
+    }
     function quizRows() {
       const latest = new Map();
       for (const entry of past) {
@@ -314,7 +322,7 @@
         const key = entry.variant_id || entry.candidate_id || r.name;
         const prev = latest.get(key);
         if (!prev || String(entry.timestamp || "") >= String(prev.timestamp || ""))
-          latest.set(key, { key, timestamp: entry.timestamp, r });
+          latest.set(key, { key, timestamp: entry.timestamp, r, name: [entry.name, entry.quant].filter(Boolean).join(" · ") });
       }
       return [...latest.values()].sort((a, b) => b.r.score - a.r.score);
     }
@@ -343,14 +351,14 @@
       if (rows.length < 2) return;
       const [best, second] = rows;
       const verdict = overlaps(best.r, second.r)
-        ? `Too close to call: ${modelName(ctx, best.key)} and ${modelName(ctx, second.key)} have overlapping ranges, so this quiz can't tell them apart.`
-        : `${modelName(ctx, best.key)} scored clearly higher than the others on this quiz.`;
+        ? `Too close to call: ${rowName(best)} and ${rowName(second)} have overlapping ranges, so this quiz can't tell them apart.`
+        : `${rowName(best)} scored clearly higher than the others on this quiz.`;
       history.append(
         h("h4", { text: "Scores so far on these questions" }),
         h("p", { class: "qp-verdict", text: verdict }),
         h("ul", { class: "qp-score-list" },
           rows.map((row) => h("li", {},
-            h("span", { class: "qp-score-name", text: modelName(ctx, row.key) }),
+            h("span", { class: "qp-score-name", text: rowName(row) }),
             h("span", { text: `${fmtPct(row.r.score)} (${rangeText(row.r)})` }),
             row.r.ci_low == null || row.r.ci_high == null ? null : rangeBar(row.r)))),
       );
@@ -569,7 +577,7 @@
           revealSlots.push({ index, slot, who });
           return h("article", { class: "qp-answer" },
             h("h5", { text: `Answer ${slot}` }),
-            h("div", { class: "qp-answer-text", tabindex: "0", role: "region", "aria-label": `Answer ${slot}, prompt ${index + 1}`, text: o.text ?? "" }),
+            h("div", { class: "qp-answer-text", tabindex: "0", role: "region", "aria-label": `Answer ${slot}, prompt ${index + 1}`, text: o.ready === false ? "Still writing this answer…" : o.text ?? "" }),
             who);
         });
         const choice = h("p", { class: "hint" });
@@ -582,6 +590,13 @@
           sync();
           try {
             if (slot) await session.post("/api/quality/vote", { comparison_id: comparisonId, item: index, slot });
+            else {
+              try {
+                await session.post("/api/quality/vote", { comparison_id: comparisonId, item: index, slot: "tie" });
+              } catch (error) {
+                if (error.status !== 400) throw error; // older server: keep "no preference" on this page only
+              }
+            }
             if (!session.alive) return;
             button.setAttribute("aria-pressed", "true");
             decided[index] = slot || "skip";
@@ -637,7 +652,7 @@
           if (!session.alive) return;
           for (const r of revealSlots) {
             const label = slotLabel(out, items, r.index, r.slot);
-            r.who.textContent = label == null ? "Written by an unknown model" : `Written by ${modelName(ctx, label)}`;
+            r.who.textContent = label == null ? "Written by an unknown model" : `Written by ${modelName(ctx, label, friendly(out))}`;
             r.who.hidden = false;
           }
           renderTallies(out);
@@ -662,7 +677,7 @@
         fill(summary, 
           h("h4", { text: "Your votes", tabindex: "-1" }),
           rows.length
-            ? h("ul", {}, rows.map(([label, n]) => h("li", { text: `${modelName(ctx, label)}: ${n} ${n === 1 ? "vote" : "votes"}` })))
+            ? h("ul", {}, rows.map(([label, n]) => h("li", { text: `${modelName(ctx, label, friendly(out))}: ${n} ${n === 1 ? "vote" : "votes"}` })))
             : h("p", { text: "No votes were recorded." }),
           lead ? h("p", { class: "qp-verdict", text: "Too close to call: the top two are within one vote of each other." }) : null,
           h("p", { class: "hint", text: "A handful of prompts is a small sample. Treat a one-vote lead as a tie." }),
@@ -681,6 +696,9 @@
     setup();
     return panel;
   }
+  // Pinned reveal shape: {mapping: [{A: candidate_id, …}], tallies, labels: {candidate_id: name}}.
+  // `labels` is a name lookup only when a mapping is present too (older servers used it as the map).
+  const friendly = (out) => (out && out.mapping && out.labels && !Array.isArray(out.labels) ? out.labels : null);
   // The reveal shape is "mapping plus tallies"; accept per-item or shared maps.
   function slotLabel(out, items, index, slot) {
     if (!out) return null;
@@ -814,23 +832,37 @@
     function sentence(r) {
       if (r.plain) return r.plain;
       if (r.same_top_p == null) return "No result: the check did not report how often the top word matched.";
-      const diff = 100 - pct(r.same_top_p);
+      const diff = 100 - r.same_top_p;
       return `Picks a different top word about ${diff < 1 ? diff.toFixed(1) : Math.round(diff)}% of the time.`;
     }
+    // Plain names for quantcheck's verdicts (how much the smaller file differs).
+    const VERDICTS = {
+      negligible: "No real difference",
+      small: "Small difference",
+      moderate: "Noticeable difference",
+      large: "Large difference",
+      severe: "Very large difference",
+    };
     function renderResult(out) {
       const entries = Object.entries(out.results || {});
-      const refName = seen.get(out.reference) ? label(seen.get(out.reference)) : seen.get(reference.value) ? label(seen.get(reference.value)) : "the reference";
+      // Result keys are quant labels (e.g. "Q4_K_M"); `variant_ids` maps them back to files.
+      const idOf = (key) => (out.variant_ids && out.variant_ids[key]) || key;
+      const nameFor = (key) => (seen.get(idOf(key)) ? label(seen.get(idOf(key))) : modelName(ctx, idOf(key)));
+      const refName = seen.get(reference.value) ? label(seen.get(reference.value)) : seen.get(out.reference) ? label(seen.get(out.reference)) : typeof out.reference === "string" ? out.reference : "the reference";
       const row = (term, explain, value) => [h("dt", {}, term, h("span", { class: "hint", text: ` (${explain})` })), h("dd", { text: value })];
       fill(result, 
         h("h4", { text: `Compared with ${refName}` }),
         entries.length
           ? entries.map(([key, r]) => h("section", { class: "qp-item" },
-              h("h5", { text: seen.get(key) ? label(seen.get(key)) : modelName(ctx, key) }),
+              h("div", { class: "qp-file-head" },
+                h("h5", { text: nameFor(key) }),
+                VERDICTS[r.verdict] ? h("span", { class: `qp-badge qp-badge-${r.verdict}`, text: VERDICTS[r.verdict] }) : null),
               h("p", { text: sentence(r) }),
+              r.error ? h("p", { class: "qp-error-text", text: String(r.error) }) : null,
               h("details", {},
                 h("summary", { text: "Show the numbers" }),
                 h("dl", { class: "qp-numbers" },
-                  row("Same top word", "how often both files pick the same next word", fmtPct(r.same_top_p, 1)),
+                  row("Same top word", "how often both files pick the same next word", fmtPercent(r.same_top_p, 1)),
                   row("Average difference", "KL divergence: how far apart the two files' word guesses are; 0 means identical", num(r.mean_kld, 4)),
                   row("Median difference", "the typical word", num(r.median_kld, 4)),
                   row("Worst 1% difference", "the same, for the hardest 1 in 100 words", num(r.kld_99, 4)),
@@ -912,17 +944,17 @@
             const facts = [gib(f.size_bytes), g.quant, g.layers ? `${g.layers} layers` : null, `found in ${SOURCES[f.source] || f.source || "an unknown folder"}`].filter(Boolean);
             return h("li", {},
               h("div", { class: "qp-file-head" },
-                h("strong", { class: "qp-file-name", text: g.name || basename(f.path) || "Unnamed file" }),
+                h("strong", { class: "qp-file-name", text: g.name || f.filename || basename(f.path) || "Unnamed file" }),
                 h("span", { class: f.variant_id ? "tag" : "tag unknown", text: f.variant_id ? "Known model" : "Not in the catalogue" })),
               h("div", { class: "hint", text: facts.join(" · ") }),
-              h("div", { class: "hint", text: basename(f.path) }),
-              h("div", { class: "hint", text: f.verified ? "Checked: the file's fingerprint matches." : f.variant_id ? "Matched by name and size (not fingerprint-checked yet)." : "Not checked." }));
+              f.filename || f.path ? h("div", { class: "hint", text: f.filename || basename(f.path) }) : null,
+              h("div", { class: "hint", text: f.match_note || (f.verified ? "Checked: the file's fingerprint matches." : f.variant_id ? "Matched by name and size (not fingerprint-checked yet)." : "Not checked.") }));
           }))
         : h("p", { class: "qp-empty", text: "No model files found yet. Click Scan my disk to look." }));
       const locations = (data && data.locations) || [];
       fill(where, locations.length
         ? h("details", {}, h("summary", { text: "Where we looked" }),
-            h("ul", { class: "hint" }, locations.map((l) => h("li", { text: `${capital(SOURCES[l.source] || l.source)}: ${l.path} ${l.exists ? "" : "(folder not found)"}`.trim() }))))
+            h("ul", { class: "hint" }, locations.map((l) => h("li", { text: `${capital(SOURCES[l.source] || l.source)}: ${l.label ?? l.path ?? "unknown folder"} ${l.exists ? "" : "(folder not found)"}`.trim() }))))
         : null);
     }
     async function load() {

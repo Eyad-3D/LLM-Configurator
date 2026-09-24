@@ -380,3 +380,25 @@
 .qp-detail:empty {
   display: none;
 }
+
+/* Compression-check verdict badges: text carries the meaning, colour only helps. */
+.qp .qp-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 650;
+  border: 1px solid currentColor;
+}
+.qp .qp-badge-negligible,
+.qp .qp-badge-small {
+  color: var(--qp-good);
+}
+.qp .qp-badge-moderate {
+  color: var(--qp-muted);
+}
+.qp .qp-badge-large,
+.qp .qp-badge-severe,
+.qp .qp-error-text {
+  color: var(--qp-bad);
+}

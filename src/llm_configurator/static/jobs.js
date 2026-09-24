@@ -32,10 +32,14 @@
           /(^|[\s'"(=])(?:[A-Za-z]:[\\/]|\/)[^\s'"]*[\\/][^\s'")]*/g,
           "$1a file in the app’s folder",
         );
+  // Progress units differ per stage: downloads count bytes, tuning counts seconds
+  // of its time budget, loading counts seconds against a time limit, the rest count steps.
+  const BYTE_STAGES = new Set(["download", "verifying"]);
   const isBytes = (job, p) =>
     p.bytes_per_second != null ||
-    /download|install|runtime/.test(job.kind || "") ||
-    p.unit === "bytes";
+    p.unit === "bytes" ||
+    BYTE_STAGES.has(p.stage) ||
+    (p.stage == null && /download/.test(job.kind || ""));
 
   /** {fraction: 0..1 | null, text} — a plain summary of a job's progress. */
   function describe(job) {
@@ -47,25 +51,27 @@
     if (job.state === "failed")
       return { fraction: null, text: plain(job.error) || "Something went wrong" };
     const p = job.progress || {};
-    const total = Number(p.total);
-    const done = Number(p.done);
-    const fraction =
-      total > 0 && Number.isFinite(done)
-        ? Math.max(0, Math.min(1, done / total))
-        : null;
+    const total = p.total == null ? NaN : Number(p.total);
+    const done = p.done == null ? NaN : Number(p.done);
+    const known = total > 0 && Number.isFinite(done);
+    let fraction = known ? Math.max(0, Math.min(1, done / total)) : null;
     const parts = [];
-    if (isBytes(job, p) && Number.isFinite(done)) {
-      parts.push(
-        total > 0 ? `${bytes(done)} of ${bytes(total)}` : `${bytes(done)}`,
-      );
+    if (p.message) parts.push(plain(p.message));
+    if (isBytes(job, p)) {
+      if (Number.isFinite(done) && (done > 0 || known))
+        parts.push(known ? `${bytes(done)} of ${bytes(total)}` : bytes(done));
       if (p.bytes_per_second > 0) parts.push(`${bytes(p.bytes_per_second)}/s`);
       const eta = duration(p.eta_seconds);
       if (eta) parts.push(`about ${eta} left`);
-      if (p.message) parts.unshift(p.message);
-    } else {
-      if (p.message) parts.push(p.message);
-      if (total > 0 && Number.isFinite(done) && !isBytes(job, p))
-        parts.push(`step ${Math.min(done, total)} of ${total}`);
+    } else if (p.stage === "tune") {
+      // done/total are seconds used of the time budget.
+      if (known) parts.push(`${duration(done)} of ${duration(total)} used`);
+    } else if (p.stage === "loading") {
+      // total is a time limit, not an expected length: no bar, just time so far.
+      fraction = null;
+      if (Number.isFinite(done)) parts.push(`${duration(done)} so far`);
+    } else if (known && total > 1) {
+      parts.push(`step ${Math.min(done, total)} of ${total}`);
     }
     return { fraction, text: parts.join(" · ") || "Working…" };
   }

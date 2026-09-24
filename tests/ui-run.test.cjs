@@ -191,6 +191,7 @@ async function setup({
   );
   const $ = (id) => w.document.getElementById(id);
   s.$ = $;
+  s.run = (code) => vm.runInContext(code, context);
   s.panel = () => $("run-panel");
   s.step = (id) => w.document.querySelector(`[data-step="${id}"]`);
   s.stepText = (id) => s.step(id).textContent;
@@ -451,7 +452,7 @@ test("a failed quick check explains what went wrong and hides unmeasured speed",
           result: {
             verdict: "failed",
             verdict_text: "The model did not answer.",
-            smoke: { ok: false, stage_failed: "start", checks: [{ name: "Model loads", ok: false, detail: "Out of memory" }], message: "Not enough memory to load the model." },
+            smoke: { ok: false, stage_failed: "start", checks: [{ name: "model_loads", ok: false, detail: "Out of memory" }], message: "Not enough memory to load the model." },
             speed: null,
           },
         }),
@@ -462,7 +463,8 @@ test("a failed quick check explains what went wrong and hides unmeasured speed",
   s.buttonIn("test", "Quick check only").click();
   await until(() => /It didn’t work/.test(s.stepText("test")), "failure");
   assert.equal(s.calls.find((c) => c.path === "/api/test").body.kind, "smoke");
-  assert.match(s.stepText("test"), /Failed: Model loads — Out of memory/);
+  assert.match(s.stepText("test"), /Failed: Out of memory/);
+  assert.doesNotMatch(s.stepText("test"), /model_loads/, "machine check ids stay off the page");
   assert.match(s.stepText("test"), /Not enough memory to load the model/);
   assert.doesNotMatch(s.stepText("test"), /Reading speed/);
   await s.close();
@@ -643,6 +645,9 @@ test("demo mode explains that downloads, tests and serving are unavailable", asy
   await until(() => s.step("use").querySelector("[role=tab]"), "use step");
   assert.match(s.stepText("use"), /Not available in demo mode/);
   assert.equal(s.buttonIn("use", "Start server"), undefined);
+  assert.match(s.stepText("runtime"), /Demo/);
+  assert.equal(s.buttonIn("runtime", "Install the engine"), undefined, "no button that can only fail");
+  assert.equal(s.$("run-content").textContent.split("The demo models are made up").length - 1, 1, "long demo note shown once");
   await s.close();
 });
 
@@ -831,5 +836,281 @@ test("an unreachable app gives a plain message instead of a browser error", asyn
   s.buttonIn("test", "Run the full test").click();
   await until(() => /didn’t respond/.test(s.stepText("test")), "plain network error");
   assert.doesNotMatch(s.stepText("test"), /Failed to fetch/);
+  await s.close();
+});
+
+// ---- fix-up round: shapes the server really sends ----
+
+test("progress text uses the right unit for each stage", async () => {
+  const s = await setup();
+  const d = (progress, kind = "test") => s.w.Jobs.describe({ kind, state: "running", progress });
+  assert.equal(d({ stage: "tune", done: 75, total: 300, message: "Trying settings" }, "tune").text, "Trying settings · 1 min of 5 min used");
+  assert.equal(d({ stage: "tune", done: 75, total: 300 }, "tune").fraction, 0.25);
+  const loading = d({ stage: "loading", done: 12.4, total: 300, message: "Loading the model" }, "serve");
+  assert.equal(loading.text, "Loading the model · 12 s so far");
+  assert.equal(loading.fraction, null, "a time limit is not a progress bar");
+  assert.equal(d({ stage: "extract", done: 0, total: null, message: "Unpacking llama.cpp" }, "runtime_install").text, "Unpacking llama.cpp");
+  assert.match(d({ stage: "download", done: 1048576 * 5, total: 1048576 * 10, bytes_per_second: 1048576 }, "runtime_install").text, /5 MiB of 10 MiB · 1 MiB\/s/);
+  assert.match(d({ stage: "verifying", done: 2 * GiB, total: 4 * GiB, message: "Checking" }, "local_scan").text, /2\.0 GiB of 4\.0 GiB/);
+  assert.equal(d({ stage: "bench", done: 1, total: 3, message: "Measuring speed" }).text, "Measuring speed · step 1 of 3");
+  assert.equal(d({ stage: "x", message: "See /home/alice/models/a.gguf" }).text, "See a file in the app’s folder");
+  await s.close();
+});
+
+test("tuning counts only new settings, shows batch changes and doesn't repeat notes", async () => {
+  const s = await setup({
+    routes: {
+      "GET /api/runtime": installed,
+      "POST /api/downloads/plan": downloadedPlan,
+      "POST /api/tune": (body, s) =>
+        s.job("tune", "Tune Model A", {
+          state: "done",
+          result: {
+            best: { threads: 4, batch: 2048, ubatch: 512, flash_attn: "auto", cache_type_k: "f16", cache_type_v: "f16" },
+            baseline: { tps: 20, pp_tps: 400 },
+            best_result: { tps: 20.2, pp_tps: 700 },
+            improvement: 1.3,
+            trials: [
+              { status: "ok", step: "baseline" },
+              { status: "ok", step: "batch" },
+              { status: "ok", step: "batch" },
+              { status: "failed", step: "threads" },
+              { status: "ok", step: "confirm" },
+            ],
+            stopped: "budget",
+            notes: ["Overall, the tuned settings made reading faster than where we started.", "Stopped because the time budget ran out."],
+          },
+        }),
+    },
+    candidates: [candidate({ launch: { threads: 4, cache_type_k: "f16", cache_type_v: "f16", flash_attn: "auto" } })],
+  });
+  await s.open();
+  s.expand("tune");
+  await until(() => s.buttonIn("tune", "Start tuning"), "tune button");
+  s.buttonIn("tune", "Start tuning").click();
+  await until(() => /Tried/.test(s.stepText("tune")), "tune result");
+  const text = s.stepText("tune");
+  assert.match(text, /Tried 2 settings\./);
+  assert.match(text, /Text read in one go: default → 2048/);
+  assert.equal(text.match(/Stopped/g).length, 1, "stop reason shown once");
+  await s.close();
+});
+
+test("a finished speed test can be shared: the JSON is shown before any link", async () => {
+  let shareBody;
+  const share = {
+    json: '{\n "schema": 1,\n "records": [{"model": "<script>alert(1)</script>"}]\n}',
+    issue_url: "https://github.com/Eyad-3D/LLM-Configurator/issues/new?title=x",
+    fits_in_url: false,
+    records: 1,
+  };
+  const s = await setup({
+    routes: {
+      "GET /api/runtime": installed,
+      "POST /api/downloads/plan": downloadedPlan,
+      "POST /api/test": (body, s) =>
+        s.job("test", "Test", {
+          state: "done",
+          result: {
+            verdict: "works",
+            verdict_text: "It works.",
+            smoke: { ok: true, checks: [{ name: "not_empty", ok: true, detail: "The model wrote an answer." }] },
+            speed: {
+              measurement: { id: "a1b2c3d4e5f6" },
+              summary: { pp_tps: 100, tps: 20, ttft_s: 0.5, depth: 1000 },
+              memory: {},
+            },
+          },
+        }),
+      "POST /api/community/share": (body) => {
+        shareBody = body;
+        return share;
+      },
+    },
+  });
+  await s.open();
+  await until(() => s.buttonIn("test", "Run the full test"), "test button");
+  s.buttonIn("test", "Run the full test").click();
+  await until(() => s.buttonIn("test", "Show what would be shared"), "share offer");
+  assert.equal(s.step("test").querySelector("a"), null, "no link before the person has seen the JSON");
+  s.buttonIn("test", "Show what would be shared").click();
+  await until(() => s.step("test").querySelector(".share-json"), "json shown");
+  assert.deepEqual(shareBody, { measurement_ids: ["a1b2c3d4e5f6"] });
+  assert.equal(s.step("test").querySelector(".share-json").textContent, share.json);
+  assert.equal(s.step("test").querySelector("script"), null);
+  assert.match(s.stepText("test"), /too long to fit in a link/);
+  const link = s.step("test").querySelector("a");
+  assert.equal(link.getAttribute("href"), share.issue_url);
+  assert.equal(link.getAttribute("target"), "_blank");
+  assert.match(link.getAttribute("rel"), /noopener/);
+  s.step("test").querySelector('[data-copy="share"]').click();
+  await until(() => s.copied.includes(share.json), "json copied");
+  await s.close();
+});
+
+test("a share link that isn't GitHub is never shown", async () => {
+  const s = await setup({
+    routes: {
+      "GET /api/runtime": installed,
+      "POST /api/downloads/plan": downloadedPlan,
+      "POST /api/test": (body, s) =>
+        s.job("test", "Test", {
+          state: "done",
+          result: { verdict: "works", smoke: { ok: true, checks: [] }, speed: { measurement: { id: "abcd1234" }, summary: {}, memory: {} } },
+        }),
+      "POST /api/community/share": { json: "{}", issue_url: "javascript:alert(1)", fits_in_url: true, records: 1 },
+    },
+  });
+  await s.open();
+  await until(() => s.buttonIn("test", "Run the full test"), "test button");
+  s.buttonIn("test", "Run the full test").click();
+  await until(() => s.buttonIn("test", "Show what would be shared"), "share offer");
+  s.buttonIn("test", "Show what would be shared").click();
+  await until(() => s.step("test").querySelector(".share-json"), "json shown");
+  assert.equal(s.step("test").querySelector("a"), null);
+  await s.close();
+});
+
+test("a server that stopped by itself says why, without paths", async () => {
+  const s = await setup({
+    routes: {
+      "GET /api/runtime": installed,
+      "POST /api/downloads/plan": downloadedPlan,
+      "GET /api/serve": { running: false, starting: false, error: "llama-server exited: cannot open /home/alice/m.gguf", base_url: null },
+    },
+  });
+  await s.open();
+  s.expand("use");
+  await until(() => /The last server stopped/.test(s.stepText("use")), "error shown");
+  assert.doesNotMatch(s.stepText("use"), /alice/);
+  await s.close();
+});
+
+test("hardware shows the CPU name, shared memory and graphics chips we can't read", async () => {
+  const state = (hw) => () => ({
+    hardware: { ram_available: 16e9, ram_total: 32e9, cpu_percent: 1, cores: 8, threads: 16, disk_free: 100e9, processes: [], ...hw },
+    demo: false,
+    status: { variants: 1, timestamp: new Date().toISOString(), warnings: [] },
+    definitions: [],
+    scores: [],
+  });
+  let s = await setup({
+    routes: {
+      "GET /api/state": state({
+        cpu: "x86_64",
+        cpu_name: "AMD Ryzen 7 7840U",
+        gpus: [],
+        other_gpus: [{ name: "Radeon 780M", available: null }],
+        warnings: ["Graphics found, but their free memory cannot be read."],
+      }),
+    },
+  });
+  let text = s.$("hardware").textContent;
+  assert.match(text, /AMD Ryzen 7 7840U/);
+  assert.match(text, /Radeon 780M found — free memory can’t be read, so estimates use RAM/);
+  assert.match(text, /Graphics found, but their free memory cannot be read/);
+  assert.doesNotMatch(text, /NVIDIA/);
+  await s.close();
+  s = await setup({
+    routes: {
+      "GET /api/state": state({
+        cpu: "arm",
+        cpu_name: "Apple M3",
+        gpus: [{ index: 0, name: "Apple M3", unified: true, available: 10 * GiB, total: 12 * GiB, backend: "metal" }],
+      }),
+    },
+  });
+  text = s.$("hardware").textContent;
+  assert.match(text, /Shared with system RAM/);
+  await s.close();
+});
+
+test("MoE cards say Experts on CPU; details use the real memory total and KV setting; hostile text stays text", async () => {
+  const evil = '<img src=x onerror="window.pwned=1">';
+  const s = await setup({
+    candidates: [
+      candidate({
+        name: evil,
+        quant: evil,
+        verdict_text: evil,
+        explanation: evil,
+        mode: "split",
+        n_cpu_moe: 12,
+        kv_cache_type: "q8_0",
+        memory_total_bytes: 9 * GiB,
+        ram_headroom_bytes: GiB,
+        kv_bytes: GiB,
+        file_bytes: 5 * GiB,
+        memory_max_context: 32768,
+        metadata_date: evil,
+        score_source: "javascript:alert(1)",
+        quality_evidence: evil,
+      }),
+    ],
+  });
+  assert.match(s.$("cards").textContent, /Experts on CPU/);
+  assert.equal(s.$("cards").querySelector("img"), null);
+  s.w.document.querySelector("[data-detail]").click();
+  const detail = s.$("detail_content");
+  assert.match(detail.textContent, /Estimated memory in total9\.0 GiB/);
+  assert.match(detail.textContent, /Conversation memory \(half size\)/);
+  assert.match(detail.textContent, /"kv_cache": "q8_0"/);
+  assert.equal(detail.querySelector("img"), null);
+  assert.equal(detail.querySelector("a"), null, "non-https sources are not linked");
+  assert.equal(s.w.pwned, undefined);
+  await s.close();
+});
+
+test("cards show nearby-test and community speeds when that's the evidence", async () => {
+  const s = await setup({
+    candidates: [
+      candidate({ id: "a", verdict: "unknown", evidence: "interpolated", speed_interpolated: { tps: 18.25 } }),
+      candidate({ id: "b", verdict: "unknown", evidence: "community", community: { median_tps: 30, n: 3 } }),
+    ],
+  });
+  const text = s.$("cards").textContent;
+  assert.match(text, /~18\.3 tok\/s/);
+  assert.match(text, /Reported by 3 similar computers/);
+  assert.match(text, /Not tested yet · estimated from nearby tests/);
+  await s.close();
+});
+
+test("the comparison request carries the conversation memory setting", async () => {
+  const s = await setup();
+  assert.equal(s.run("requirements().kv_cache_type"), "f16");
+  s.$("kv_cache_type").value = "q4_0";
+  assert.equal(s.run("requirements().kv_cache_type"), "q4_0");
+  await s.close();
+});
+
+test("community results can be downloaded from the results page", async () => {
+  let importJob;
+  const s = await setup({
+    routes: {
+      "GET /api/community": { records: [], source: null, fetched_at: null },
+      "POST /api/community/import": (body, s) => {
+        assert.deepEqual(body, {});
+        return (importJob = s.job("community_import", "Import community results"));
+      },
+    },
+  });
+  s.$("community-box").open = true;
+  s.$("community-box").dispatchEvent(new s.w.Event("toggle"));
+  await until(() => /No shared results/.test(s.$("community-status").textContent), "status");
+  s.$("community-import").click();
+  await until(() => importJob, "import started");
+  s.update(importJob.id, { state: "done", result: { count: 120, rejected: 2, source: "x", fetched_at: "2026-09-01T00:00:00Z" } });
+  await until(() => /Got 120 shared results \(2 skipped/.test(s.$("community-status").textContent), "done");
+  assert.match(s.$("community-status").textContent, /Recalculate/);
+  await s.close();
+});
+
+test("many 'couldn't reach' warnings become one plain sentence", async () => {
+  const s = await setup();
+  const list = Array.from({ length: 44 }, (_, i) => `org/model-${i}: Metadata unavailable (URLError); cached results remain available`);
+  const text = s.run(`summarizeWarnings(${JSON.stringify([...list, "Scores need a key"])})`);
+  assert.match(text, /Couldn’t get the latest details for 44 models/);
+  assert.match(text, /Scores need a key/);
+  assert.doesNotMatch(text, /URLError|org\/model-3/);
   await s.close();
 });

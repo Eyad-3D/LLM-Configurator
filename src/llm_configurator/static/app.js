@@ -10,6 +10,21 @@ const esc = (value) =>
         c
       ],
   );
+// Model refreshes can return one warning per model (e.g. 40+ when offline). Show one
+// plain sentence for the "couldn't reach" group and at most a few others.
+function summarizeWarnings(list) {
+  const items = (Array.isArray(list) ? list : []).map(String).filter(Boolean);
+  const unreachable = items.filter((w) => /Metadata unavailable/i.test(w));
+  const others = items.filter((w) => !/Metadata unavailable/i.test(w));
+  const parts = [];
+  if (unreachable.length)
+    parts.push(
+      `Couldn’t get the latest details for ${unreachable.length} model${unreachable.length === 1 ? "" : "s"} (is the internet connected?). Using what’s already saved on this computer.`,
+    );
+  parts.push(...others.slice(0, 3));
+  if (others.length > 3) parts.push(`and ${others.length - 3} more notes`);
+  return parts.join(" · ");
+}
 let report = null;
 let appState = null;
 let includeRankings = false;
@@ -21,7 +36,8 @@ async function api(path, body) {
     options.body = JSON.stringify(body);
   }
   const response = await fetch(path, options);
-  const payload = await response.json();
+  // A crash page or proxy error may not be JSON; keep the status so callers can explain it.
+  const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(
       payload.error || `Request failed: ${response.status}`,
@@ -44,39 +60,57 @@ function hardware(hw) {
       (input) => `${input.value}:${input.dataset.created}`,
     ),
   );
-  const gpu = hw.gpus[0];
+  const gpus = Array.isArray(hw.gpus) ? hw.gpus : [];
+  const others = Array.isArray(hw.other_gpus) ? hw.other_gpus : [];
+  // Show the graphics chip the comparison will use (the one picked in Advanced settings).
+  const wanted = Number($("gpu_index").value);
+  const gpu = gpus.find((g) => g.index === wanted) || gpus[0];
+  const known = (n) => n != null && Number.isFinite(Number(n));
+  const gpuMetric = gpu
+    ? metric(
+        gpu.unified ? "Graphics memory (shared)" : "Available GPU memory",
+        known(gpu.available) ? `${GiB(gpu.available)} GiB` : "Unknown",
+        gpu.unified
+          ? `${gpu.name} · Shared with system RAM, not extra memory`
+          : `${gpu.name}${known(gpu.total) ? ` · ${GiB(gpu.total)} GiB total` : ""}`,
+      )
+    : metric(
+        "Available GPU memory",
+        others.length ? "Can’t be read" : "None found",
+        others.length
+          ? `${others[0].name || "A graphics chip"} found — free memory can’t be read, so estimates use RAM`
+          : "No graphics card found — estimates use RAM",
+      );
+  const warnings = (Array.isArray(hw.warnings) ? hw.warnings : [])
+    .map((w) => `<p class="hint">${esc(w)}</p>`)
+    .join("");
   $("hardware").innerHTML =
     metric(
       "Available system RAM",
       `${GiB(hw.ram_available)} GiB`,
       `of ${GiB(hw.ram_total)} GiB installed`,
     ) +
-    metric(
-      "Available GPU memory",
-      gpu ? `${GiB(gpu.available)} GiB` : "Unknown",
-      gpu
-        ? `${gpu.name} · ${GiB(gpu.total)} GiB total`
-        : "No supported NVIDIA telemetry",
-    ) +
+    gpuMetric +
     metric(
       "CPU activity",
       `${Math.round(hw.cpu_percent)}%`,
-      `${hw.cores ?? "?"} cores · ${hw.threads ?? "?"} threads · ${hw.cpu}`,
+      `${hw.cores ?? "?"} cores · ${hw.threads ?? "?"} threads · ${hw.cpu_name || hw.cpu || "Processor"}`,
     ) +
     metric(
       "Free disk space",
       `${GiB(hw.disk_free)} GiB`,
       "Home drive · checked again before downloading",
-    );
+    ) +
+    warnings;
   const previousGPU = $("gpu_index").value;
-  $("gpu_index").innerHTML = hw.gpus.length
-    ? hw.gpus
+  $("gpu_index").innerHTML = gpus.length
+    ? gpus
         .map(
           (g) =>
-            `<option value="${g.index}">${esc(g.name)} (${g.index})</option>`,
+            `<option value="${esc(g.index)}">${esc(g.name)} (${esc(g.index)})</option>`,
         )
         .join("")
-    : '<option value="0">CPU only — GPU telemetry unavailable</option>';
+    : '<option value="0">Processor only — no usable graphics card found</option>';
   if ([...$("gpu_index").options].some((o) => o.value === previousGPU))
     $("gpu_index").value = previousGPU;
   $("processes").innerHTML = hw.processes.length
@@ -84,7 +118,7 @@ function hardware(hw) {
         .sort((a, b) => (b.rss ?? -1) - (a.rss ?? -1))
         .map(
           (p) =>
-            `<label class="process-row" title="PID ${p.pid}; RSS ${GiB(p.rss)} GiB"><input type="checkbox" value="${p.pid}" data-created="${p.created}" ${selected.has(`${p.pid}:${p.created}`) ? "checked" : ""} ${p.reclaimable == null ? "disabled" : ""}><span class="process-name">${esc(p.name)}</span><span class="process-size"><strong>${p.rss == null ? "Usage unknown" : GiB(p.rss) + " GiB used"}</strong><small>${p.reclaimable == null ? "Freeable memory unknown" : "~" + GiB(p.reclaimable) + " GiB could be freed"}</small></span></label>`,
+            `<label class="process-row" title="PID ${esc(p.pid)}; RSS ${esc(GiB(p.rss))} GiB"><input type="checkbox" value="${esc(p.pid)}" data-created="${esc(p.created)}" ${selected.has(`${p.pid}:${p.created}`) ? "checked" : ""} ${p.reclaimable == null ? "disabled" : ""}><span class="process-name">${esc(p.name)}</span><span class="process-size"><strong>${p.rss == null ? "Usage unknown" : GiB(p.rss) + " GiB used"}</strong><small>${p.reclaimable == null ? "Freeable memory unknown" : "~" + GiB(p.reclaimable) + " GiB could be freed"}</small></span></label>`,
         )
         .join("")
     : '<p class="hint">No sizeable accessible processes found.</p>';
@@ -95,7 +129,7 @@ async function loadState() {
   hardware(state.hardware);
   $("demo").hidden = !state.demo;
   $("catalogue_status").textContent = state.status
-    ? `${state.status.variants} variants cached · Last refresh ${new Date(state.status.timestamp).toLocaleString()}. ${(state.status.warnings || []).join(" · ")}`
+    ? `${state.status.variants} variants cached · Last refresh ${new Date(state.status.timestamp).toLocaleString()}. ${summarizeWarnings(state.status.warnings)}`
     : "No metadata cached yet. Refresh to retrieve available GGUF variants.";
   $("mappings").innerHTML = state.definitions
     .map((entry, index) => {
@@ -138,6 +172,7 @@ function requirements() {
     gpu_reserve_gib: Number($("gpu_reserve_gib").value),
     gpu_index: Number($("gpu_index").value),
     strict_speed: $("strict_speed").checked,
+    kv_cache_type: $("kv_cache_type")?.value || "f16",
     reclaim_pids:
       $("resource-mode").value === "free"
         ? [...$("processes").querySelectorAll("input:checked")].map((input) =>
@@ -159,14 +194,44 @@ function qualityPanel(c) {
   if (!q || q.rank == null) {
     return `<section class="quality-panel quality-missing"><strong>Not ranked</strong><p>${q?.reason === "incomparable" ? "Benchmark versions or reference scores differ. Refresh and check the model mappings before comparing." : "No comparable benchmark score for this workload. Add your API key, refresh metadata and match the benchmark entry."}</p><button type="button" class="text-button" data-open-rank>Set up benchmark comparison →</button></section>`;
   }
-  return `<section class="quality-panel"><div class="quality-heading"><div><span class="quality-label">${esc(metric)}</span><strong>${Number(c.quality_score).toFixed(1)} <small>index points</small></strong></div><div class="quality-rank"><strong>${q.tied ? "Joint " : ""}#${q.rank} <small>of ${q.rated_models} rated models</small></strong></div></div><p class="hint">Base-model benchmark · Exact quantisation quality is unmeasured.</p></section>`;
+  return `<section class="quality-panel"><div class="quality-heading"><div><span class="quality-label">${esc(metric)}</span><strong>${Number(c.quality_score).toFixed(1)} <small>index points</small></strong></div><div class="quality-rank"><strong>${q.tied ? "Joint " : ""}#${esc(q.rank)} <small>of ${esc(q.rated_models)} rated models</small></strong></div></div><p class="hint">Base-model benchmark · Exact quantisation quality is unmeasured.</p></section>`;
+}
+// The engine appends the verdict sentence to the explanation; the card already shows it above.
+const when = (value) => {
+  const date = value ? new Date(value) : null;
+  return date && !Number.isNaN(date.getTime()) ? date.toLocaleString() : value || "Unknown";
+};
+function explanationOf(c) {
+  const text = String(c.explanation ?? "");
+  return c.verdict_text && text.endsWith(c.verdict_text)
+    ? text.slice(0, -c.verdict_text.length).trim()
+    : text;
+}
+// Where the model runs. MoE models keep their "experts" (big, rarely used parts) in main memory.
+function placementLabel(c) {
+  if (c.mode === "split" && c.n_cpu_moe > 0) return "Experts on CPU";
+  return { cpu: "CPU", gpu: "GPU", split: "GPU + CPU" }[c.mode] || "";
 }
 function speedPresentation(c) {
   if (c.tps != null)
     return {
       value: `${c.tps.toFixed(1)} tok/s`,
-      label: "Measured local generation speed",
+      label: c.evidence === "tuned" ? "Measured after tuning" : "Measured local generation speed",
       tag: "Speed verified locally",
+    };
+  const nearby = c.speed_interpolated?.tps;
+  if (c.evidence === "interpolated" && Number.isFinite(nearby))
+    return {
+      value: `~${nearby.toFixed(1)} tok/s`,
+      label: "Estimated from your tests at other lengths",
+      tag: "Speed not tested at this length",
+    };
+  const crowd = c.community?.median_tps;
+  if (c.evidence === "community" && Number.isFinite(crowd))
+    return {
+      value: `~${crowd.toFixed(1)} tok/s`,
+      label: `Reported by ${c.community.n ?? "other"} similar computer${c.community.n === 1 ? "" : "s"}`,
+      tag: "Speed from other people",
     };
   const e = c.speed_estimate;
   if (e?.available)
@@ -208,7 +273,14 @@ function verdictBadge(c) {
   const verdict = verdictOf(c);
   const [tone, label] = VERDICTS[verdict];
   // Anything not measured on this computer is labelled, so estimates never read as tests.
-  const source = verdict === "unknown" ? null : c.verdict ? c.evidence : "measured";
+  const source =
+    verdict === "unknown"
+      ? ["interpolated", "community"].includes(c.evidence)
+        ? c.evidence
+        : null
+      : c.verdict
+        ? c.evidence
+        : "measured";
   const origin = source ? EVIDENCE[source] || EVIDENCE.estimated : null;
   const qualifier = origin && !["measured", "tuned"].includes(source) ? origin : null;
   const title = c.verdict_text || (origin ? `${label} (${origin})` : label);
@@ -237,13 +309,13 @@ function renderResults() {
             c.quality_score == null
               ? "No quality score"
               : `Base-model ${c.quality_metric} index: ${c.quality_score.toFixed(1)}`;
-          return `<article class="card"><div class="card-top"><div class="card-title"><h3>${esc(c.name)}</h3><span class="quant">${esc(c.quant)}</span></div><div class="card-tags">${verdictBadge(c)}<span class="tag ${c.speed_meets_target ? "" : "unknown"}">${esc(speed.tag)}</span></div></div>${c.verdict_text ? `<p class="verdict-text">${esc(c.verdict_text)}</p>` : ""}
+          return `<article class="card"><div class="card-top"><div class="card-title"><h3>${esc(c.name)}</h3><span class="quant">${esc(c.quant)}</span></div><div class="card-tags">${verdictBadge(c)}${c.verdict ? "" : `<span class="tag ${c.speed_meets_target ? "" : "unknown"}">${esc(speed.tag)}</span>`}</div></div>${c.verdict_text ? `<p class="verdict-text">${esc(c.verdict_text)}</p>` : ""}
       ${qualityPanel(c)}
-      <div class="card-metrics concise"><div><strong>${c.context.toLocaleString()}</strong><span>context tokens per session</span></div><div><strong>${esc(speed.value)}</strong><span>${esc(speed.label)}</span></div><div><strong>${esc({ cpu: "CPU", gpu: "GPU", split: "GPU + CPU" }[c.mode])}</strong><span>${c.scenario === "now" ? "Fits current resources (estimated)" : "May fit after closing apps"}</span></div></div>
-      <div class="card-bottom"><p>${esc(c.explanation)}</p><div class="card-actions"><button class="text-button" data-detail="${esc(c.id)}">View details ↗</button><button type="button" data-run="${esc(c.id)}">Get it running →</button></div></div></article>`;
+      <div class="card-metrics concise"><div><strong>${c.context.toLocaleString()}</strong><span>context tokens per session</span></div><div><strong>${esc(speed.value)}</strong><span>${esc(speed.label)}</span></div><div><strong>${esc(placementLabel(c))}</strong><span>${c.scenario === "now" ? "Fits current resources (estimated)" : "May fit after closing apps"}</span></div></div>
+      <div class="card-bottom"><p>${esc(explanationOf(c))}</p><div class="card-actions"><button class="text-button" data-detail="${esc(c.id)}">View details ↗</button><button type="button" data-run="${esc(c.id)}">Get it running →</button></div></div></article>`;
         })
         .join("")
-    : `<div class="empty"><h3>No qualifying configurations yet.</h3><p>${report.demo ? "Try reducing context or active users, or include unverified speed options." : "Refresh model metadata first. If models are cached, try a shorter context, fewer active users, or include unverified speed options."}</p><p class="hint">Rejections: ${report.rejected.context} context · ${report.rejected.memory} memory · ${report.rejected.speed} speed</p></div>`;
+    : `<div class="empty"><h3>No qualifying configurations yet.</h3><p>${report.demo ? "Try reducing context or active users, or include unverified speed options." : "Refresh model metadata first. If models are cached, try a shorter context, fewer active users, or include unverified speed options."}</p><p class="hint">Rejections: ${esc(report.rejected?.context)} context · ${esc(report.rejected?.memory)} memory · ${esc(report.rejected?.speed)} speed</p></div>`;
   $("notes").innerHTML = report.notes
     .map((note) => `<p>· ${esc(note)}</p>`)
     .join("");
@@ -286,14 +358,15 @@ function detail(c) {
     gpu_index: c.gpu_index,
     context_per_user: c.context,
     parallel_sequences: c.users,
-    kv_cache: "f16",
+    kv_cache: c.kv_cache_type || "f16",
+    experts_on_cpu_layers: c.n_cpu_moe || 0,
     threads: c.threads,
   };
   const variantArgument = `'${c.variant_id.replace(/'/g, "'\\''")}'`;
   $("detail_content").innerHTML =
     `<p class="eyebrow">DEPLOYMENT DETAILS</p><h3>${esc(c.name)} · ${esc(c.quant)}</h3><p>${esc(c.explanation)}</p>
-    <dl><dt>Quality rank among rated eligible models</dt><dd>${c.quality_comparison?.rank == null ? "Not ranked" : "#" + c.quality_comparison.rank + " of " + c.quality_comparison.rated_models}</dd><dt>Gap to highest reference score</dt><dd>${c.quality_comparison?.points_behind_best == null ? "Unavailable" : c.quality_comparison.points_behind_best + " index points"}</dd><dt>Estimated system RAM</dt><dd>${GiB(c.ram_bytes)} GiB</dd><dt>Estimated VRAM</dt><dd>${GiB(c.vram_bytes)} GiB</dd><dt>RAM headroom after reserve</dt><dd>${GiB(c.ram_headroom_bytes)} GiB</dd><dt>Memory-only context ceiling</dt><dd>${c.memory_max_context.toLocaleString()} tokens / session</dd><dt>FP16 KV cache, all users</dt><dd>${GiB(c.kv_bytes)} GiB</dd><dt>Weight file size</dt><dd>${GiB(c.file_bytes)} GiB</dd><dt>Quality evidence</dt><dd>${esc(c.quality_evidence)}</dd><dt>Evaluation entry</dt><dd>${esc(c.score_settings || "Unmapped")}</dd><dt>Benchmark version</dt><dd>${esc(c.score_version || "Unavailable")}</dd><dt>Metadata retrieved</dt><dd>${esc(c.metadata_date)}</dd></dl>
-    ${c.score_source ? `<p>Source: <a href="${esc(c.score_source)}" target="_blank" rel="noreferrer">Artificial Analysis</a>. Scores apply to the evaluation entry above.</p>` : ""}
+    <dl><dt>Quality rank among rated eligible models</dt><dd>${c.quality_comparison?.rank == null ? "Not ranked" : "#" + esc(c.quality_comparison.rank) + " of " + esc(c.quality_comparison.rated_models)}</dd><dt>Gap to highest reference score</dt><dd>${c.quality_comparison?.points_behind_best == null ? "Unavailable" : esc(c.quality_comparison.points_behind_best) + " index points"}</dd>${c.memory_total_bytes != null ? `<dt>Estimated memory in total</dt><dd>${GiB(c.memory_total_bytes)} GiB</dd>` : ""}<dt>Estimated system RAM</dt><dd>${GiB(c.ram_bytes)} GiB</dd><dt>${c.unified_memory ? "Of which the graphics chip uses (shared with RAM)" : "Estimated VRAM"}</dt><dd>${GiB(c.vram_bytes)} GiB</dd><dt>RAM headroom after reserve</dt><dd>${GiB(c.ram_headroom_bytes)} GiB</dd><dt>Memory-only context ceiling</dt><dd>${c.memory_max_context.toLocaleString()} tokens / session</dd><dt>Conversation memory (${esc({ f16: "full size", q8_0: "half size", q4_0: "quarter size" }[c.kv_cache_type] || "full size")}), all users</dt><dd>${GiB(c.kv_bytes)} GiB</dd><dt>Weight file size</dt><dd>${GiB(c.file_bytes)} GiB</dd><dt>Quality evidence</dt><dd>${esc(c.quality_evidence)}</dd><dt>Evaluation entry</dt><dd>${esc(c.score_settings || "Unmapped")}</dd><dt>Benchmark version</dt><dd>${esc(c.score_version || "Unavailable")}</dd><dt>Model details downloaded</dt><dd>${esc(when(c.metadata_date))}</dd></dl>
+    ${/^https:\/\//.test(c.score_source || "") ? `<p>Source: <a href="${esc(c.score_source)}" target="_blank" rel="noreferrer">Artificial Analysis</a>. Scores apply to the evaluation entry above.</p>` : ""}
     <h3>Speed evidence</h3><p>${esc(speedPresentation(c).value)} · ${esc(speedPresentation(c).label)}</p>
     ${c.speed_estimate?.available ? `<p>${esc(c.speed_estimate.method)}. ${esc(c.speed_estimate.scope)}</p><p>${esc(c.speed_estimate.caveat)}</p><p>Calibrated: ${esc(c.speed_estimate.calibrated_at)}</p>` : ""}
     <h3>Runtime settings</h3><pre>${esc(JSON.stringify(settings, null, 2))}</pre><p>Use these settings in your llama.cpp installation. The memory ceiling is an estimate; it is not a validated context or speed guarantee.</p>
@@ -364,7 +437,7 @@ $("refresh").addEventListener("click", async () => {
     message("Refreshing model and benchmark metadata…");
     const result = await refreshMetadata(true);
     message(
-      (result.warnings || []).join(" · ") ||
+      summarizeWarnings(result.warnings) ||
         "Metadata updated. You can now match benchmark entries.",
     );
   } catch (error) {
@@ -440,3 +513,76 @@ $("api-key-form").addEventListener("submit", (event) => {
 });
 $("test-key").addEventListener("click", () => credentialAction("test"));
 $("remove-key").addEventListener("click", () => credentialAction("remove"));
+
+// ---- community speed results (public list; downloading sends nothing about this computer) ----
+function communitySummary(info) {
+  const count = Array.isArray(info?.records) ? info.records.length : 0;
+  if (!count) return "No shared results downloaded yet.";
+  const when = info.fetched_at ? new Date(info.fetched_at) : null;
+  return `${count.toLocaleString()} shared result${count === 1 ? "" : "s"} on this computer${when && !Number.isNaN(when.getTime()) ? `, downloaded ${when.toLocaleString()}` : ""}.`;
+}
+async function communityStatus() {
+  try {
+    $("community-status").textContent = communitySummary(
+      await api("/api/community"),
+    );
+  } catch {
+    $("community-status").textContent = "Couldn’t check for shared results.";
+  }
+}
+async function communityImport() {
+  const buttonNode = $("community-import");
+  buttonNode.disabled = true;
+  $("community-status").textContent = "Downloading shared results…";
+  const finish = (job) => {
+    buttonNode.disabled = false;
+    if (job.state === "done") {
+      const n = job.result?.count ?? 0;
+      const skipped = job.result?.rejected;
+      $("community-status").textContent =
+        `Got ${Number(n).toLocaleString()} shared result${n === 1 ? "" : "s"}${skipped ? ` (${skipped} skipped because they looked wrong)` : ""}. Press Recalculate to use them.`;
+    } else if (job.state === "cancelled")
+      $("community-status").textContent = "Stopped. Nothing was changed.";
+    else
+      $("community-status").textContent =
+        window.Jobs?.describe(job).text || "The download didn’t work. Try again later.";
+  };
+  try {
+    const job = await api("/api/community/import", {});
+    if (!window.Jobs || !job?.id) return finish({ state: "done", result: job });
+    window.Jobs.track(job);
+    window.Jobs.watch(job.id, (latest) => {
+      if (["done", "failed", "cancelled"].includes(latest.state)) finish(latest);
+      else $("community-status").textContent = window.Jobs.describe(latest).text;
+    });
+  } catch (error) {
+    buttonNode.disabled = false;
+    $("community-status").textContent = error.status
+      ? error.message
+      : "The app didn’t respond. Is it still running?";
+  }
+}
+if ($("community-import")) {
+  $("community-import").addEventListener("click", communityImport);
+  $("community-box").addEventListener(
+    "toggle",
+    () => $("community-box").open && communityStatus(),
+  );
+}
+$("gpu_index").addEventListener("change", () => {
+  if (appState?.hardware) hardware(appState.hardware);
+});
+// Files already on disk (mounted on first open so the page doesn't scan early).
+if ($("local-files-box")) {
+  $("local-files-box").addEventListener("toggle", () => {
+    if (!$("local-files-box").open || $("local-files").dataset.mounted) return;
+    if (!window.LocalModels?.mount) {
+      $("local-files").textContent = "This list isn’t available in this version.";
+      return;
+    }
+    $("local-files").dataset.mounted = "1";
+    window.LocalModels.mount($("local-files"), {
+      onJob: (job) => job && window.Jobs?.track(job),
+    });
+  });
+}

@@ -9,6 +9,8 @@
   const fmt = () => window.Jobs?.format || { bytes: String, duration: String };
   const DEMO_TEXT =
     "Not available in demo mode. The demo models are made up, so they can’t be downloaded, tested or run. Restart the app normally (not the demo) to use real models.";
+  // Steps repeat only this short line; the full explanation shows once at the top.
+  const DEMO_SHORT = "Not available in demo mode (see the note at the top).";
   const STEPS = [
     {
       id: "runtime",
@@ -61,6 +63,14 @@
     gpu_layers: "Layers on the graphics card",
     context: "Context size",
     parallel: "Chats at once",
+  };
+  // Fallback wording for smoke-test checks when the server sends no sentence.
+  const CHECK_LABELS = {
+    not_empty: "The model wrote an answer.",
+    valid_utf8: "The text is readable.",
+    not_repeating: "No stuck repetition.",
+    no_template_leak: "No raw chat-format markers.",
+    correct_answer: "Answered a simple sum correctly.",
   };
   const STATE_LABELS = {
     checking: "Checking…",
@@ -138,7 +148,7 @@
   }
   function problem(error) {
     if (error?.status === 409 && ctx?.demo)
-      return { status: "demo", reason: DEMO_TEXT };
+      return { status: "demo", reason: DEMO_SHORT };
     if (!error?.status)
       return {
         status: "failed",
@@ -174,13 +184,15 @@
 
   // ---- step status ----
   function prerequisite() {
-    if (ctx.demo) return DEMO_TEXT;
+    if (ctx.demo) return DEMO_SHORT;
     if (shared.runtime.status !== "done") return "Get the engine first (step 1).";
     if (mem.download.status !== "done")
       return "Download the model first (step 2).";
     return null;
   }
   function status(id) {
+    if (id === "runtime" && ctx.demo && !["done", "working"].includes(shared.runtime.status))
+      return { state: "demo", reason: DEMO_SHORT };
     if (id === "runtime" || id === "download") {
       const s = id === "runtime" ? shared.runtime : mem.download;
       return {
@@ -205,6 +217,7 @@
         : { state: "ready", reason: null };
     }
     const serve = shared.serve;
+    if (ctx.demo) return { state: "demo", reason: DEMO_SHORT };
     if (serve.status === "working") return { state: "working", reason: null };
     if (runningHere()) return { state: "done", reason: null };
     return { state: "ready", reason: null };
@@ -214,9 +227,9 @@
   function summary(c) {
     const parts = [
       `Remembers about ${Math.round((Number(c.context) || 0) * 0.75).toLocaleString()} words per chat`,
-      { cpu: "Runs on the processor", gpu: "Runs on the graphics card", split: "Graphics card + processor" }[
-        c.mode
-      ],
+      c.mode === "split" && c.n_cpu_moe > 0
+        ? "Graphics card, with experts on the processor"
+        : { cpu: "Runs on the processor", gpu: "Runs on the graphics card", split: "Graphics card + processor" }[c.mode],
     ].filter(Boolean);
     const notes = [];
     if (c.kv_cache_type && c.kv_cache_type !== "f16")
@@ -305,6 +318,7 @@
           ),
           window.verdictBadge ? verdictNode(c) : null,
           summary(c),
+          ctx.demo ? el("p", { class: "step-note", text: DEMO_TEXT }) : null,
         ),
       ),
       steps,
@@ -495,6 +509,7 @@
     if (s.status === "checking") return [hint("Checking for the engine…")];
     if (s.status === "working")
       return [progressView(s.job, () => cancelJob(s))];
+    if (ctx.demo && s.status !== "done") return [reasonView(DEMO_SHORT)];
     if (s.status === "done") {
       const where = {
         managed: "installed by this app",
@@ -745,7 +760,7 @@
     const smoke = result.smoke;
     const speed = result.speed;
     const summaryData = speed?.summary || {};
-    const mem = speed?.memory || {};
+    const usage = speed?.memory || {};
     const nodes = [
       el(
         "div",
@@ -765,7 +780,7 @@
               { class: check.ok ? "ok" : "bad" },
               el("span", { "aria-hidden": "true", text: check.ok ? "✓" : "✗" }),
               el("span", { class: "visually-hidden", text: check.ok ? "Passed: " : "Failed: " }),
-              `${check.name}${check.detail ? ` — ${check.detail}` : ""}`,
+              check.detail || CHECK_LABELS[check.name] || String(check.name ?? "Check"),
             ),
           ),
         ),
@@ -778,14 +793,14 @@
       );
     if (speed) {
       const used = [
-        mem.peak_ram_bytes != null && `${bytes(mem.peak_ram_bytes)} RAM`,
-        mem.peak_vram_bytes != null && `${bytes(mem.peak_vram_bytes)} graphics`,
+        usage.peak_ram_bytes != null && `${bytes(usage.peak_ram_bytes)} RAM`,
+        usage.peak_vram_bytes != null && `${bytes(usage.peak_vram_bytes)} graphics`,
       ].filter(Boolean);
       const estimated = [
-        mem.estimated_ram_bytes != null && `${bytes(mem.estimated_ram_bytes)} RAM`,
-        mem.peak_vram_bytes != null &&
-          mem.estimated_vram_bytes != null &&
-          `${bytes(mem.estimated_vram_bytes)} graphics`,
+        usage.estimated_ram_bytes != null && `${bytes(usage.estimated_ram_bytes)} RAM`,
+        usage.peak_vram_bytes != null &&
+          usage.estimated_vram_bytes != null &&
+          `${bytes(usage.estimated_vram_bytes)} graphics`,
       ].filter(Boolean);
       nodes.push(
         el(
@@ -811,9 +826,9 @@
             used.length ? used.join(" + ") : null,
             [
               estimated.length && `We estimated ${estimated.join(" + ")}`,
-              mem.within_estimate === true
+              usage.within_estimate === true
                 ? "within our estimate"
-                : mem.within_estimate === false
+                : usage.within_estimate === false
                   ? "more than we estimated"
                   : null,
             ]
@@ -821,7 +836,7 @@
               .join(" · ") || null,
           ),
         ),
-        mem.note ? hint(mem.note) : null,
+        usage.note ? hint(usage.note) : null,
         summaryData.depth
           ? hint(
               `Speeds measured with ${Number(summaryData.depth).toLocaleString()} tokens already in the chat, close to your chosen size.`,
@@ -829,8 +844,70 @@
           : null,
         hint("A token is a piece of a word — roughly ¾ of a word on average."),
       );
+      const id = speed.measurement?.id;
+      if (id && !ctx.demo) nodes.push(shareView(mem.test, [id]));
     }
     return nodes;
+  }
+
+  // ---- sharing a speed result (community) ----
+  // Nothing leaves the computer here: the app prepares the text, the person reads it,
+  // and only then chooses to post it on GitHub themselves.
+  const prepareShare = once("share", async function (holder, ids) {
+    holder.share = { loading: true };
+    render("test");
+    try {
+      holder.share = await call("/api/community/share", { measurement_ids: ids });
+    } catch (error) {
+      holder.share = { error: problem(error).reason };
+    }
+    render("test");
+  });
+  const safeIssueUrl = (url) =>
+    typeof url === "string" && /^https:\/\/github\.com\//.test(url) ? url : null;
+  function shareView(holder, ids) {
+    const share = holder.share;
+    const box = el("div", { class: "share-box" }, el("h4", { text: "Share this result (optional)" }));
+    if (!share) {
+      box.append(
+        hint("Help other people with similar computers: you can post this speed result publicly on GitHub. You’ll see exactly what is shared first. Nothing is sent until you post it yourself."),
+        el("div", { class: "step-actions" }, button("Show what would be shared", () => prepareShare(holder, ids), "secondary")),
+      );
+      return box;
+    }
+    if (share.loading) {
+      box.append(hint("Preparing…"));
+      return box;
+    }
+    if (share.error) {
+      box.append(el("p", { class: "step-note", text: share.error }));
+      return box;
+    }
+    const text = typeof share.json === "string" ? share.json : "";
+    const url = safeIssueUrl(share.issue_url);
+    const copyStatus = el("span", { class: "copy-status", role: "status" });
+    box.append(
+      hint("This is everything that would be shared: model names, a rough description of your computer (memory rounded, no names or serial numbers), the settings and the speeds. No file paths or user names."),
+      el(
+        "div",
+        { class: "code-head" },
+        el("span", { text: "What would be shared" }),
+        el("span", {}, copyStatus, button("Copy", () => copy(text, copyStatus), "secondary small", { "data-copy": "share" })),
+      ),
+      el("pre", { class: "export-content share-json", tabindex: "0" }, el("code", { text })),
+      share.fits_in_url === false
+        ? el("p", { class: "step-note", text: "This is too long to fit in a link. Press Copy first, then paste it into the GitHub page that opens." })
+        : null,
+      url
+        ? el(
+            "p",
+            {},
+            el("a", { href: url, target: "_blank", rel: "noopener noreferrer", class: "button-link" }, "Open GitHub to post it ↗"),
+          )
+        : null,
+      hint("GitHub is a public website. You need a free GitHub account to post."),
+    );
+    return box;
   }
   function testView(reason) {
     const s = mem.test;
@@ -912,19 +989,26 @@
     const base = ctx.candidate.launch || {};
     const best = result.best || {};
     const changes = Object.keys(SETTING_LABELS).filter(
-      (key) => key in best && base[key] !== undefined && best[key] !== base[key],
+      (key) => key in best && (base[key] ?? null) !== (best[key] ?? null),
     );
     const ratio = Number(result.improvement);
     const headline =
       Number.isFinite(ratio) && ratio > 1.02
         ? `Found settings about ${Math.round((ratio - 1) * 100)}% faster.`
         : "Your starting settings were already about as fast as it gets.";
-    const tried = (result.trials || []).filter((t) => t.status === "ok").length;
-    const stopped = {
-      budget: "Stopped when the time ran out.",
-      converged: "Stopped early: nothing faster left to try.",
-      cancelled: "Stopped because you cancelled.",
-    }[result.stopped];
+    // The starting point and the final double-check are re-runs, not new settings.
+    const tried = (result.trials || []).filter(
+      (t) => t.status === "ok" && t.step !== "baseline" && t.step !== "confirm",
+    ).length;
+    const notes = (result.notes || []).map(plain);
+    // Newer results already say why tuning stopped in notes; add ours only for older ones.
+    const stopped = notes.some((n) => /^Stopped\b/.test(n))
+      ? null
+      : {
+          budget: "Stopped when the time ran out.",
+          converged: "Stopped early: nothing faster left to try.",
+          cancelled: "Stopped because you cancelled.",
+        }[result.stopped];
     return [
       el("p", { class: "step-done", text: headline }),
       el(
@@ -945,7 +1029,10 @@
           )
         : null,
       hint([`Tried ${tried} setting${tried === 1 ? "" : "s"}.`, stopped].filter(Boolean).join(" ")),
-      (result.notes || []).map((note) => hint(note)),
+      // The headline already says when nothing got faster.
+      notes
+        .filter((note) => !/^Your starting settings were already/.test(note))
+        .map((note) => hint(note)),
       hint("The best settings are saved on this computer for this model."),
     ];
   }
@@ -1246,7 +1333,7 @@
           shared.serve = {
             status: "ready",
             info: state.info,
-            reason: done.state === "cancelled" ? null : done.error || "The server did not start.",
+            reason: done.state === "cancelled" ? null : plain(done.error) || "The server did not start.",
           };
         }
       });
@@ -1294,7 +1381,12 @@
         ),
         hint("Paste this address into any app that works with OpenAI. If it asks for a key, type anything. Only apps on this computer can reach it."),
       );
-    } else nodes.push(hint("Starts the model in the background with the settings above. Other apps on this computer can then chat with it."));
+    } else if (info.starting) nodes.push(hint("A model is starting. This can take a minute."));
+    else {
+      nodes.push(hint("Starts the model in the background with the settings above. Other apps on this computer can then chat with it."));
+      // The last server stopped by itself: say why, without file paths.
+      if (info.error) nodes.push(reasonView(`The last server stopped: ${plain(info.error)}`));
+    }
     if (s.reason) nodes.push(reasonView(s.reason));
     if (reason) nodes.push(reasonView(reason));
     else

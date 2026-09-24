@@ -364,7 +364,7 @@ test("compression check defaults to the biggest file and shows plain results", a
     reference: "alpha-q8",
     results: {
       "alpha-q4": { mean_kld: 0.0123, median_kld: 0.004, kld_99: 0.2, same_top_p: 95.9, ppl_base: 7.1, ppl: 7.3, mean_delta_p: -0.5, plain: "Picks a different top word about 4% of the time." },
-      "alpha-q2": { mean_kld: 0.21, same_top_p: 0.82, ppl_base: 7.1, ppl: 9.9, mean_delta_p: null },
+      "alpha-q2": { mean_kld: 0.21, same_top_p: 82, ppl_base: 7.1, ppl: 9.9, mean_delta_p: null },
     },
     notes: ["The temporary file used 1.2 GiB and was deleted."],
   };
@@ -395,7 +395,7 @@ test("compression check defaults to the biggest file and shows plain results", a
   assert.deepEqual(posted, { reference_variant_id: "alpha-q8", variant_ids: ["alpha-q4", "alpha-q2"] });
   const text = panel.textContent;
   assert.match(text, /Picks a different top word about 4% of the time\./);
-  assert.match(text, /Picks a different top word about 18% of the time\./, "fraction converted and phrased");
+  assert.match(text, /Picks a different top word about 18% of the time\./, "percentage (as llama.cpp prints it) phrased");
   assert.match(text, /95\.9%/);
   assert.match(text, /0\.0123/);
   assert.match(text, /7\.10 → 7\.30/);
@@ -537,4 +537,124 @@ test("local models replaces Loading with a message when the list fails", async (
   await until(() => t.$("#l").textContent.includes("Couldn't load the list"), "error state");
   assert.ok(!t.$("#l").textContent.includes("Loading…"));
   assert.match(t.$("#l .qp-status").textContent, /Demo mode has no local files/);
+});
+
+// ---- fix-up round: shapes the server really sends ----
+
+test("blind compare: pinned reveal shape uses friendly labels, 'No preference' sends tie, hostile text stays text", async () => {
+  const evil = '<img src=x onerror="window.pwned=1">';
+  const votes = [];
+  const t = setup(
+    {
+      "POST /api/quality/compare": () => job("cmp", "queued"),
+      "GET /api/quality/compare/cmp-1": {
+        items: [
+          { prompt: evil, outputs: [{ slot: "A", text: evil, ready: true }, { slot: "B", text: "Fine", ready: true }] },
+          { prompt: "Two", outputs: [{ slot: "A", text: "x", ready: true }, { slot: "B", text: "y", ready: false }] },
+        ],
+      },
+      "POST /api/quality/vote": (body) => {
+        votes.push(body);
+        // Older servers only take A/B/C: a tie is refused with 400.
+        if (body.slot === "tie") throw Object.assign(new Error("slot must be A, B or C"), { status: 400 });
+        return { item: body.item, vote: body.slot };
+      },
+      "POST /api/quality/reveal": {
+        mapping: [{ A: "c-mid", B: "c-zzz" }, { A: "c-zzz", B: "c-mid" }],
+        tallies: { "c-mid": 1, "c-zzz": 0 },
+        labels: { "c-mid": "Alpha 8B · Q4_K_M", "c-zzz": "Gamma 1B · Q8_0" },
+      },
+    },
+    { cmp: [job("cmp", "done", { result: { comparison_id: "cmp-1" } })] },
+  );
+  t.w.QualityPanel.mount(t.$("#q"), t.ctx);
+  const panel = tabPanel(t, "Try my prompts");
+  t.$$('fieldset input[type="checkbox"]', panel)[0].click();
+  const area = t.$("textarea", panel);
+  area.value = "Hello";
+  area.dispatchEvent(new t.w.Event("input", { bubbles: true }));
+  t.byText("Run the models", panel).click();
+  await until(() => t.byText("A is best", panel), "blind view");
+  assert.equal(t.w.pwned, undefined);
+  assert.equal(panel.querySelector("img"), null, "model output is never parsed as HTML");
+  assert.match(panel.textContent, /Still writing this answer/);
+  const html = panel.outerHTML;
+  for (const secret of ["c-mid", "c-zzz", "Gamma", "alpha-q4"]) assert.ok(!html.includes(secret), `no ${secret} before reveal`);
+  t.$$("button", panel).filter((b) => b.textContent === "A is best")[0].click();
+  await until(() => votes.length === 1, "first vote");
+  t.$$("button", panel).filter((b) => b.textContent === "No preference")[1].click();
+  await until(() => votes.length === 2, "tie vote");
+  assert.deepEqual(votes[1], { comparison_id: "cmp-1", item: 1, slot: "tie" });
+  const reveal = t.byText("Reveal which model wrote each answer", panel);
+  await until(() => !reveal.disabled, "reveal enabled after a refused tie");
+  reveal.click();
+  await until(() => /Written by/.test(panel.textContent), "revealed");
+  assert.match(panel.textContent, /Written by Gamma 1B · Q8_0/);
+  assert.match(panel.textContent, /Gamma 1B · Q8_0: 0 votes/);
+  assert.ok(!panel.textContent.includes("c-zzz"));
+});
+
+test("compression check maps quant labels to files, shows verdict badges, errors and percentages", async () => {
+  const t = setup(
+    {
+      "POST /api/quality/quant-check": () => job("qc", "queued"),
+    },
+    {
+      qc: [
+        job("qc", "done", {
+          result: {
+            reference: "Q8_0",
+            variant_ids: { Q4_K_M: "alpha-q4", Q2_K: "alpha-q2" },
+            results: {
+              Q4_K_M: { same_top_p: 0.9, mean_kld: 0.5, verdict: "severe", plain: null },
+              Q2_K: { same_top_p: null, verdict: null, error: "<b>The file could not be loaded.</b>" },
+            },
+            notes: [],
+          },
+        }),
+      ],
+    },
+  );
+  t.w.QualityPanel.mount(t.$("#q"), t.ctx);
+  const panel = tabPanel(t, "Compression check");
+  t.$$('input[type="checkbox"]', panel).forEach((b) => b.checked || b.click());
+  t.byText("Run compression check", panel).click();
+  await until(() => /Compared with/.test(panel.textContent), "result");
+  const heads = t.$$("h5", panel).map((x) => x.textContent);
+  assert.ok(heads.some((x) => /Alpha 8B · Q4_K_M · 4\.6 GiB/.test(x)), "full label from variant_ids");
+  assert.match(panel.textContent, /Very large difference/);
+  assert.match(panel.textContent, /0\.9%/, "same_top_p is a percentage, never rescaled");
+  assert.match(panel.textContent, /Picks a different top word about 99% of the time/);
+  assert.match(panel.textContent, /<b>The file could not be loaded\.<\/b>/, "errors shown as text");
+  assert.equal(panel.querySelector("b"), null);
+});
+
+test("local models read filename and folder labels (the server sends no paths)", async () => {
+  const t = setup({
+    "GET /api/local-models": {
+      files: [{ filename: "mystery.gguf", size_bytes: 2e9, source: "lmstudio", variant_id: null, gguf: {}, verified: false, match_note: "Likely the same file as the catalogue model, not yet verified." }],
+      locations: [{ source: "lmstudio", label: "~/.lmstudio/models", exists: true }],
+    },
+  });
+  t.w.LocalModels.mount(t.$("#l"), t.ctx);
+  await until(() => t.$(".qp-file-name"), "list");
+  assert.equal(t.$(".qp-file-name").textContent, "mystery.gguf");
+  assert.match(t.$("#l").textContent, /Likely the same file/);
+  assert.match(t.$("#l").textContent, /~\/\.lmstudio\/models/);
+  assert.ok(!t.$("#l").textContent.includes("undefined"));
+});
+
+test("quiz history falls back to the saved model name", async () => {
+  const t = setup({
+    "GET /api/quality/results": {
+      results: [
+        { kind: "quiz", variant_id: "gone-1", name: "Old Model", quant: "Q5_K_M", workload: "coding", score: 0.9, ci_low: 0.7, ci_high: 0.97, timestamp: "2026-01-02" },
+        { kind: "quiz", variant_id: "alpha-q4", workload: "coding", score: 0.5, ci_low: 0.3, ci_high: 0.7, timestamp: "2026-01-01" },
+      ],
+    },
+  });
+  t.w.QualityPanel.mount(t.$("#q"), t.ctx);
+  await until(() => /Scores so far/.test(t.$("#q").textContent), "history");
+  assert.match(t.$("#q").textContent, /Old Model · Q5_K_M/);
+  assert.ok(!t.$("#q").textContent.includes("gone-1"));
 });
