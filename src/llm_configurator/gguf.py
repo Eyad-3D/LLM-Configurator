@@ -15,7 +15,9 @@ from .domain import ARCHITECTURES, Variant
 MAGIC = b"GGUF"
 MAX_HEADER_BYTES = 64 * 1024 * 1024  # real headers (with a 256k-token vocabulary) stay well below this
 MAX_KV = 100_000
-MAX_TENSORS = 1_000_000
+MAX_TENSORS = 100_000  # the largest real models have a few thousand
+MAX_ITEMS = 2_000_000  # strings and nested lists stepped over, in total (a 262k vocabulary + merges is ~0.5M)
+MAX_KEPT_ITEMS = 262_144  # numbers kept from small arrays, in total (each costs ~40 bytes as a Python int)
 MAX_DIMS = 8
 MAX_STRING = 16 * 1024 * 1024
 MAX_KEPT_STRING = 64 * 1024  # longer strings (for example huge chat templates) are skipped, not stored
@@ -51,10 +53,12 @@ ARCH_MAP = {
     "gemma2": "gemma2", "gemma3": "gemma3", "phi3": "phi3", "granite": "granite", "olmo2": "olmo2",
     "gpt-oss": "gpt_oss", "mistral": "mistral",
 }
-# llama.cpp's built-in sliding-window patterns: every n-th layer uses full attention.
-SWA_PATTERNS = {"gemma2": 2, "gemma3": 6, "gpt-oss": 2}
+# llama.cpp's built-in sliding-window patterns (src/models/<arch>.cpp): every n-th layer uses full attention.
+# phi3 is absent on purpose: llama.cpp disables Phi's sliding window, so every layer keeps full KV.
+SWA_PATTERNS = {"gemma2": 2, "gemma3": 6, "gpt-oss": 2, "olmo2": 4}
+SWA_DEFAULT_WINDOW = {"gemma2": 4096}  # used by llama.cpp when the header has no window
 
-SHARD = re.compile(r"^(?P<prefix>.+)-(?P<index>\d{5})-of-(?P<count>\d{5})\.gguf$", re.IGNORECASE)
+SHARD = re.compile(r"^(?P<prefix>.+)-(?P<index>[0-9]{5})-of-(?P<count>[0-9]{5})\.gguf$", re.IGNORECASE)
 _QUANT_IN_NAME = re.compile(r"(?<![A-Za-z0-9])(" + "|".join(sorted(map(re.escape, set(FILE_TYPES.values()) | {"MXFP4_MOE"}),
                                                                    key=len, reverse=True)) + r")(?![A-Za-z0-9])", re.IGNORECASE)
 
@@ -67,6 +71,17 @@ class _Reader:
     def __init__(self, handle, size, limit):
         self.handle, self.size, self.limit, self.pos = handle, size, min(size, limit), 0
         self.last_count = None  # item count of the last top-level list, kept even when its items are skipped
+        self.items = self.kept = 0
+
+    def spend(self, count, kept=False):
+        """Bounds the work (and memory) a header can cause, not just its bytes: 64 MiB of tiny items is still millions of steps."""
+        if kept:
+            self.kept += count
+            return self.kept <= MAX_KEPT_ITEMS
+        self.items += count
+        if self.items > MAX_ITEMS:
+            raise _bad("the header lists more entries than any real model has")
+        return True
 
     def check(self, count, what="the header is cut off (the file looks truncated)"):
         """Refuses before reading or seeking when `count` more bytes cannot fit in the file or the cap."""
@@ -140,12 +155,13 @@ def _value(reader, kind, depth=0):
         reader.last_count = count
     if item_kind in _SCALARS:
         width = struct.calcsize(_SCALARS[item_kind])
-        if count > MAX_KEPT_ARRAY:
+        if count > MAX_KEPT_ARRAY or not reader.spend(count, kept=True):
             reader.skip(count * width)  # the byte cap rejects absurd counts before any seek happens
             return None
         return list(struct.unpack(f"<{count}{_SCALARS[item_kind]}", reader.read(count * width)))
     smallest = 8 if item_kind == _STRING else 12  # a length prefix, or a nested list's type + count
     reader.check(count * smallest, "a list claims more items than the file could hold")
+    reader.spend(count)
     if item_kind == _STRING:
         reader.skip_strings(count)  # e.g. the token list: stepped over, never kept
         return None
@@ -240,25 +256,36 @@ def quant_name(file_type=None, filename=""):
     return "MXFP4" if name == "MXFP4_MOE" else name
 
 
-def _int(value):
-    return value if type(value) is int and value >= 0 else None
+def _int(value, ceiling=None):
+    """A non-negative int, or None; values above `ceiling` are no real model's and count as unknown."""
+    return value if type(value) is int and value >= 0 and (ceiling is None or value <= ceiling) else None
 
 
-def _peak(value):
+# Far above any real model; a header claiming more is broken or hostile, so the value is treated as unknown.
+CEILINGS = {"block_count": 4096, "attention.head_count": 65536, "attention.head_count_kv": 65536,
+            "attention.key_length": 65536, "embedding_length": 1 << 20, "context_length": 1 << 30,
+            "expert_count": 65536, "expert_used_count": 65536, "attention.sliding_window": 1 << 30, "vocab_size": 1 << 24}
+
+
+def _peak(value, ceiling):
     """Per-layer lists (e.g. KV heads) are summarised by their maximum: a safe upper bound for memory."""
     if isinstance(value, list):
         numbers = [v for v in value if type(v) is int and v > 0]
-        return max(numbers) if numbers else None
-    return _int(value)
+        return _int(max(numbers), ceiling) if numbers else None
+    return _int(value, ceiling)
 
 
 def _sliding_layers(arch, values, layers):
-    window = _int(values.get(f"{arch}.attention.sliding_window"))
-    if not window or not layers:
+    window = _int(values.get(f"{arch}.attention.sliding_window"), CEILINGS["attention.sliding_window"])
+    if window is None:
+        window = SWA_DEFAULT_WINDOW.get(arch)
+    if not window or not layers or arch not in SWA_PATTERNS and f"{arch}.attention.sliding_window_pattern" not in values:
         return window, 0
     pattern = values.get(f"{arch}.attention.sliding_window_pattern", SWA_PATTERNS.get(arch))
     if isinstance(pattern, list):  # one flag per layer
         return window, min(layers, sum(1 for flag in pattern if flag))
+    if type(pattern) is int and pattern == 0:
+        return window, layers  # llama.cpp's set_swa_pattern(0): every layer slides
     if type(pattern) is int and pattern > 0:
         return window, layers - layers // pattern  # layer % n == n - 1 is the full-attention one
     return window, 0  # unknown pattern: count every layer as full attention (never under-estimates memory)
@@ -266,13 +293,19 @@ def _sliding_layers(arch, values, layers):
 
 def _summary(values, filename, lengths=None):
     arch = values.get("general.architecture") if isinstance(values.get("general.architecture"), str) else None
-    get = (lambda key: values.get(f"{arch}.{key}")) if arch else (lambda key: None)
-    layers = _int(get("block_count"))
-    heads = _peak(get("attention.head_count"))
-    kv_heads = _peak(get("attention.head_count_kv")) or heads  # llama.cpp defaults KV heads to attention heads
-    head_dim = _int(get("attention.key_length"))
-    if not head_dim and heads and _int(get("embedding_length")):
-        head_dim = get("embedding_length") // heads
+    raw = (lambda key: values.get(f"{arch}.{key}")) if arch else (lambda key: None)
+    get = lambda key: _int(raw(key), CEILINGS.get(key))
+    layers = get("block_count")
+    heads = _peak(raw("attention.head_count"), CEILINGS["attention.head_count"])
+    kv_heads = _peak(raw("attention.head_count_kv"), CEILINGS["attention.head_count_kv"]) or heads  # llama.cpp's default
+    head_dim = get("attention.key_length")
+    first = raw("attention.head_count")
+    first = _int(first[0] if isinstance(first, list) and first else first, CEILINGS["attention.head_count"])
+    if not head_dim and first and get("embedding_length"):
+        head_dim = get("embedding_length") // first  # llama.cpp: n_embd / n_head(layer 0)
+    value_dim = _int(raw("attention.value_length"), CEILINGS["attention.key_length"])
+    if head_dim and value_dim and value_dim > head_dim:
+        head_dim = value_dim  # one size stands for keys and values: take the larger, never under-estimating memory
     window, sliding = _sliding_layers(arch, values, layers) if arch else (None, 0)
     file_type = _int(values.get("general.file_type"))
     if file_type is not None:
@@ -281,13 +314,13 @@ def _summary(values, filename, lengths=None):
     return {
         "name": values.get("general.name") if isinstance(values.get("general.name"), str) else None,
         "layers": layers, "kv_heads": kv_heads, "head_dim": head_dim or None,
-        "context_length": _int(get("context_length")),
-        "experts": _int(get("expert_count")) or 0, "active_experts": _int(get("expert_used_count")) or 0,
+        "context_length": get("context_length"),
+        "experts": get("expert_count") or 0, "active_experts": get("expert_used_count") or 0,
         "sliding_window": window, "sliding_layers": sliding,
         "file_type": file_type, "quant": quant_name(file_type, filename),
         "split_count": split if split else 1,
         # llama.cpp's n_vocab is the token list's length; the list is stepped over, only its count is kept
-        "vocab_size": (lengths or {}).get("tokenizer.ggml.tokens") or _int(get("vocab_size")) or None,
+        "vocab_size": (lengths or {}).get("tokenizer.ggml.tokens") or get("vocab_size") or None,
     }
 
 
