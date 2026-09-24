@@ -217,6 +217,24 @@ class FakeMatchesRealTests(unittest.TestCase):
         self.assertEqual(done.returncode, 1)
         self.assertEqual(done.stderr, real)
 
+    def test_more_load_failures_like_real(self):
+        # Texts from the real llama-server 4df29be: a later split shard, a directory, an empty chat.
+        with tempfile.TemporaryDirectory() as tmp:
+            shard = Path(tmp) / "m-00002-of-00004.gguf"
+            self.fx.write_fake_gguf(shard, layers=4)
+            done = self.run_fake("server", ["-m", str(shard), "--port", str(free_port())], LOAD_SECONDS="0")
+            self.assertIn("illegal split file idx: 1", done.stderr)
+            self.assertIn("model must be loaded with the first split", done.stderr)
+            done = self.run_fake("server", ["-m", tmp, "--port", str(free_port())], LOAD_SECONDS="0")
+            self.assertEqual(done.returncode, 1)
+            self.assertIn("failed to read magic", done.stderr)
+        process, base = self.start_server([])
+        self.assertEqual(http("POST", base + "/v1/chat/completions", {"messages": []})[0], 200)
+        status, body = http("POST", base + "/v1/chat/completions", {"messages": "x"})
+        self.assertEqual((status, body["error"]["message"]), (400, "Expected 'messages' to be an array"))
+        done = self.run_fake("bench", ["-m", self.model, "-r", "1", "-o", "json", "-p", "8", "-n", "0", "-mmp", "0"])
+        self.assertTrue(done.stderr.startswith("DEPRECATED: -mmp and --mmap are deprecated in favour of --load-mode."))
+
     def test_server_log_lines_like_real(self):
         real = (SAMPLES / "server-log.txt").read_text()
         process, base = self.start_server([])
@@ -248,19 +266,26 @@ class FakeMatchesRealTests(unittest.TestCase):
         real_chunks = [json.loads(line[6:]) for line in (SAMPLES / "server-chat-completions-stream.txt").read_text().splitlines()
                        if line.startswith("data: {")]
         process, base = self.start_server([])
-        request = urllib.request.Request(base + "/v1/chat/completions", method="POST",
-                                         data=json.dumps({"messages": [{"role": "user", "content": "What is 40+2?"}],
-                                                          "stream": True}).encode(),
-                                         headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(request, timeout=30) as response:
-            lines = response.read().decode().splitlines()
-        fake_chunks = [json.loads(line[6:]) for line in lines if line.startswith("data: {")]
-        self.assertEqual([line for line in lines if line.startswith("data: ")][-1], "data: [DONE]")
-        for chunks in (real_chunks, fake_chunks):
+
+        def stream(**extra):
+            body = {"messages": [{"role": "user", "content": "What is 40+2?"}], "stream": True, **extra}
+            request = urllib.request.Request(base + "/v1/chat/completions", method="POST", data=json.dumps(body).encode(),
+                                             headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(request, timeout=30) as response:
+                lines = response.read().decode().splitlines()
+            self.assertEqual([line for line in lines if line.startswith("data: ")][-1], "data: [DONE]")
+            return [json.loads(line[6:]) for line in lines if line.startswith("data: {")]
+        # The real sample was captured with stream_options.include_usage (scripts/capture_llama_facts.py).
+        for chunks in (real_chunks, stream(stream_options={"include_usage": True})):
             self.assertEqual(chunks[-1]["choices"], [])
             self.assertTrue({"usage", "timings"} <= set(chunks[-1]))
             self.assertEqual(chunks[-2]["choices"][0]["finish_reason"], "stop")
             self.assertNotIn("usage", chunks[-2])
+        # Checked on the real server: without include_usage the finish chunk carries the timings, and no usage.
+        plain = stream()
+        self.assertEqual(plain[-1]["choices"][0]["finish_reason"], "stop")
+        self.assertIn("timings", plain[-1])
+        self.assertFalse(any("usage" in chunk for chunk in plain))
         real = json.loads((SAMPLES / "server-models.json").read_text())["response"]
         fake = http("GET", base + "/v1/models")[1]
         self.assertEqual(set(real) - set(fake), set())

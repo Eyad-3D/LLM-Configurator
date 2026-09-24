@@ -155,6 +155,42 @@ class PeakMemoryTests(unittest.TestCase):
             with mock.patch.object(llama_server.subprocess, "run", return_value=done):
                 self.assertIsNone(PeakMemory(os.getpid(), gpu_backend="cuda").start().stop()["peak_vram_bytes"])
 
+    def test_vram_rows_without_numbers_only_affect_their_process(self):
+        other = f"{os.getpid()}, 700\n1, [N/A]\n2, [Insufficient Permissions]\n"
+        ours_na = f"{os.getpid()}, [N/A]\n1, 50\n"
+        for output, expected in [(other, 700 * 1024**2), (ours_na, None)]:
+            done = subprocess.CompletedProcess([], 0, stdout=output, stderr="")
+            with mock.patch.object(llama_server.subprocess, "run", return_value=done):
+                self.assertEqual(PeakMemory(os.getpid(), gpu_backend="cuda").start().stop()["peak_vram_bytes"], expected)
+        timeout = subprocess.TimeoutExpired("nvidia-smi", 5)
+        with mock.patch.object(llama_server.subprocess, "run", side_effect=timeout):
+            monitor = PeakMemory(os.getpid(), gpu_backend="cuda")
+            self.assertIsNone(monitor.start().stop()["peak_vram_bytes"])
+            self.assertTrue(monitor._vram_ok, "a slow nvidia-smi is retried, not given up on")
+
+    @unittest.skipUnless(sys.platform.startswith("linux") or os.name == "nt", "OS keeps a peak RSS")
+    def test_peak_before_sampling_started_is_counted(self):
+        code = ("import sys, time\nx = bytearray(80_000_000)\nx[::4096] = b'1' * len(x[::4096])\ndel x\n"
+                "print('ready', flush=True)\ntime.sleep(10)\n")
+        child = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+        try:
+            child.stdout.readline()
+            result = PeakMemory(child.pid, interval=0.05).start().stop()
+            now_rss = psutil.Process(child.pid).memory_info().rss
+        finally:
+            child.kill()
+            child.wait()
+            child.stdout.close()
+        self.assertGreater(result["peak_ram_bytes"], now_rss + 60_000_000)
+
+    def test_monitor_can_be_restarted(self):
+        monitor = PeakMemory(os.getpid(), interval=0.02)
+        monitor.start().stop()
+        first = monitor.samples
+        monitor.start()
+        time.sleep(0.2)
+        self.assertGreater(monitor.stop()["samples"], first + 2)
+
     def test_gone_process_reports_no_ram(self):
         self.assertIsNone(PeakMemory(99999999).start().stop()["peak_ram_bytes"])
 
@@ -487,6 +523,24 @@ class RealLogTests(unittest.TestCase):
         for name, reason in expected.items():
             with self.subTest(name=name):
                 self.assertIn(reason, failure_from_log(sample_stderr(name), 1))
+
+    def test_more_real_failures(self):
+        # Lines captured from the real llama-server 4df29be (review of the fix-up round).
+        cases = {
+            "E gguf_init_from_file: failed to open GGUF file '/m/noperm.gguf' (Permission denied)": "not allowed to read the model file (noperm.gguf)",
+            "E gguf_init_from_file: failed to open GGUF file '/m/nope-draft.gguf' (No such file or directory)": "missing (nope-draft.gguf)",
+            "E llama_model_load: error loading model: illegal split file idx: 1 (file: /m/x-00002-of-00004.gguf), "
+            "model must be loaded with the first split": "first part of a split model",
+            "/src/llama-context.cpp:123: GGML_ASSERT(n_outputs >= 1) failed\n"
+            "warning: 30 ../sysdeps/unix/sysv/linux/wait4.c: No such file or directory": "crashed",
+        }
+        for text, reason in cases.items():
+            with self.subTest(text=text[:60]):
+                found = failure_from_log(text, 1)
+                self.assertIn(reason, found)
+                self.assertNotIn("/m/", found)
+        self.assertIn("crashed", failure_from_log("nothing useful", -11))
+        self.assertIn("crashed", failure_from_log("nothing useful", 3221225477))
 
     def test_cpu_only_warning_is_not_a_failure(self):
         log = sample_stderr("server-log.txt")

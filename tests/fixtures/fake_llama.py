@@ -90,6 +90,13 @@ def read_gguf(path):
     if not os.path.exists(path):
         return None, [f"gguf_init_from_file: failed to open GGUF file '{path}' (No such file or directory)",
                       f"llama_model_load: error loading model: llama_model_loader: failed to load model from {path}"]
+    split = re.search(r"-(\d{5})-of-\d{5}\.gguf$", path)
+    if split and int(split.group(1)) != 1:
+        return None, [f"llama_model_load: error loading model: illegal split file idx: {int(split.group(1)) - 1} "
+                      f"(file: {path}), model must be loaded with the first split"]
+    if os.path.isdir(path):
+        return None, ["gguf_init_from_file_impl: failed to read magic",
+                      f"llama_model_load: error loading model: llama_model_loader: failed to load model from {path}"]
     with open(path, "rb") as handle:
         head = handle.read(1 << 16)
     info = {"architecture": "llama", "layers": 32, "experts": 0, "name": Path(path).stem, "context_length": 32768}
@@ -657,8 +664,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def chat(self, body):
         messages = body.get("messages")
-        if not isinstance(messages, list) or not messages:
-            raise ValueError("'messages' is required")
+        if not isinstance(messages, list):
+            return self.send_json(*error_body(400, "Expected 'messages' to be an array", "invalid_request_error"))
         kwargs = body.get("chat_template_kwargs") or {}
         thinking_allowed = kwargs.get("enable_thinking", True) is not False
         prompt = template(messages, thinking_allowed)
@@ -682,8 +689,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.stream([{"choices": [{"finish_reason": None, "index": 0, "delta": {"role": "assistant", "content": None}}]},
                                 *({"choices": [{"finish_reason": None, "index": 0, "delta": {"content": piece}}]}
                                   for piece in tokenize(text)[1]),
-                                {"choices": [{"finish_reason": finish, "index": 0, "delta": {}}]},
-                                {"choices": [], "usage": usage, "timings": t}],
+                                *self.stream_end(body, finish, usage, t)],
                                {"created": created, "id": ident, "model": self.state.alias,
                                 "system_fingerprint": f"b{BUILD}-{COMMIT}", "object": "chat.completion.chunk"}, done=True)
         self.send_json(200, {"choices": [{"finish_reason": finish, "index": 0, "message": message}], "created": created,
@@ -714,6 +720,15 @@ class Handler(BaseHTTPRequestHandler):
                                    "tokens_predicted": i + 1, "tokens_evaluated": len(ids)}
                                   for i, piece in enumerate(tokenize(text)[1])), {**result, "content": ""}], {}, done=False)
         self.send_json(200, result)
+
+    @staticmethod
+    def stream_end(body, finish, usage, t):
+        """Real llama-server: with stream_options.include_usage the finish chunk is bare and a last chunk with
+        "choices": [] carries usage and timings; without it the finish chunk carries the timings."""
+        if (body.get("stream_options") or {}).get("include_usage"):
+            return [{"choices": [{"finish_reason": finish, "index": 0, "delta": {}}]},
+                    {"choices": [], "usage": usage, "timings": t}]
+        return [{"choices": [{"finish_reason": finish, "index": 0, "delta": {}}], "timings": t}]
 
     def stream(self, chunks, common, done):
         self.send_response(200)
@@ -821,7 +836,8 @@ BENCH_LISTS = {"-m": "model", "--model": "model", "-p": "n_prompt", "--n-prompt"
                "--ubatch-size": "ubatch", "-fa": "fa", "--flash-attn": "fa", "-ctk": "ctk", "--cache-type-k": "ctk",
                "-ctv": "ctv", "--cache-type-v": "ctv", "-ncmoe": "ncmoe", "--n-cpu-moe": "ncmoe",
                "-sm": "split_mode", "-mg": "main_gpu", "-nkvo": "nkvo", "-dev": "device", "--device": "device",
-               "-mmp": "mmap", "--mmap": "mmap", "-lm": "load_mode", "--load-mode": "load_mode", "-ts": "tensor_split"}
+               "-mmp": "mmap", "--mmap": "mmap", "-lm": "load_mode", "--load-mode": "load_mode", "-ts": "tensor_split",
+               "-ot": "override_tensor", "--override-tensor": "override_tensor"}
 BENCH_SINGLE = {"-r": "reps", "--repetitions": "reps", "-o": "output", "--output": "output", "-oe": "output_err",
                 "--delay": "delay", "--prio": "prio"}
 BENCH_BOOLS = {"-v": "verbose", "--verbose": "verbose", "--progress": "progress", "--no-warmup": "no_warmup",
@@ -887,7 +903,10 @@ def run_bench(args):
             bench_fail(f"error: invalid parameter for argument: {arg}")
         if i + 1 >= len(args):
             bench_fail(f"error: invalid parameter for argument: {arg}")
-        if arg in ("-mmp", "--mmap"):  # deprecated; real llama-bench maps it onto --load-mode
+        if arg in ("-mmp", "--mmap"):  # deprecated; real llama-bench maps it onto --load-mode and warns (no newline)
+            sys.stderr.write("DEPRECATED: -mmp and --mmap are deprecated in favour of --load-mode. "
+                             "Please use --load-mode mmap instead.")
+            sys.stderr.flush()
             lists.setdefault("load_mode", []).extend("none" if v == "0" else "mmap" for v in args[i + 1].split(","))
             i += 2
             continue
@@ -1097,7 +1116,7 @@ def run_perplexity(args):
     ppl = base * (1 + quant_kld(options["model"]))
     stamp("I", f"perplexity: calculating perplexity over {n_chunk} chunks, n_ctx={n_ctx}, batch_size={min(s['batch'], n_ctx)}, n_seq=1")
     eta_line()
-    values = [ppl * (1 + 0.08 / (k + 1)) for k in range(n_chunk)]
+    values = [ppl * (1 + 0.08 / (k + 1) - 0.08 / n_chunk) for k in range(n_chunk)]  # running value, last == final
     sys.stdout.write(",".join(f"[{k + 1}]{v:.4f}" for k, v in enumerate(values)) + ",\n\n")
     sys.stdout.flush()
     if options.get("kld_base"):
