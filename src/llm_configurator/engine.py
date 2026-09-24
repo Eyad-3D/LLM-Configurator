@@ -1,34 +1,122 @@
-"""Conservative memory model and evidence-aware ranking; no invented quality/speed scores."""
+"""Conservative memory model and evidence-aware ranking; no invented quality/speed scores.
+
+Speed evidence is ranked strictly: a local measurement or tuning run is the only thing
+that can say a configuration "runs well". Interpolated, community and estimated speeds are
+shown with their label and can only say "likely", never "verified".
+"""
+from collections import defaultdict
 from dataclasses import asdict
 from datetime import datetime, timezone
 import math
 
-from .domain import GIB, Requirements, Variant
-from .speed import estimate
+from .domain import GIB, KV_BYTES_PER_ELEMENT, Requirements, Variant
+from .learning import fit_efficiency
+from .speed import active_fraction, estimate, kv_bytes, moved_expert_layers
+
+MAX_AGE_DAYS = 30          # local measurements and tune results older than this are ignored
+SLOW_FRACTION = 0.5        # verified speed at or above half the target "runs slowly"; below that "too slow"
+COMFORT_FACTOR = 1.5       # verified speed this far above target is "comfortably above"
+EXTRAPOLATE_LIMIT = 4      # never stretch one test to a context more than 4x longer
+EXTRAPOLATE_MARGIN = 0.9   # single-point scaling is shaded down 10% to stay conservative
+GPU_BACKENDS = {"cuda", "metal", "rocm", "vulkan"}
+KV_TEXT = {"f16": "full precision (f16)",
+           "q8_0": "8-bit compression (q8_0): about half the memory of full precision, usually with no noticeable quality loss",
+           "q4_0": "4-bit compression (q4_0): about a quarter of the memory of full precision, with a small quality cost"}
 
 
-def allocations(variant, context, users, gpu_layers):
-    if not 0 <= gpu_layers <= variant.layers:
+def allocations(variant, context, users, gpu_layers, kv_cache_type="f16", n_cpu_moe=0, unified=False):
+    """Estimated bytes per memory pool.
+
+    Returns {"ram", "vram", "kv_total", "kv_vram", "weights_ram", "weights_vram", "expert_ram",
+    "total", "unified"}. With unified=True (Apple) "ram" is the whole shared pool and "vram" is
+    the part the graphics chip uses *inside* that pool, so it must not be added to "ram" again.
+    """
+    total_layers = variant.layers
+    if not 0 <= gpu_layers <= total_layers:
         raise ValueError("GPU layer allocation out of range")
-    # Full-attention FP16 K + V, per sequence. No assumed prefix sharing.
-    kv = 2 * variant.layers * variant.kv_heads * variant.head_dim * 2 * context * users
-    fraction = gpu_layers / variant.layers
+    if kv_cache_type not in KV_BYTES_PER_ELEMENT:
+        raise ValueError("kv_cache_type must be f16, q8_0 or q4_0")
+    if type(n_cpu_moe) is not int or not 0 <= n_cpu_moe <= total_layers:
+        raise ValueError("n_cpu_moe must be between 0 and the number of layers")
+    # K + V per sequence; no assumed prefix sharing. Sliding-window layers hold at most the window.
+    kv = kv_bytes(variant, context, users, kv_cache_type)
+    fraction = gpu_layers / total_layers
     # Whole-file placement is approximate; 10% placement/metadata margin protects the estimate.
     weights = variant.size_bytes * 1.10
+    # --n-cpu-moe keeps the expert tensors of the affected GPU layers in RAM.
+    expert_ram = weights * variant.expert_fraction * moved_expert_layers(variant, gpu_layers, n_cpu_moe) / total_layers
+    weights_ram = weights * (1 - fraction) + expert_ram
+    weights_vram = weights * fraction - expert_ram
     buffer = (0.75 + users * 0.20) * GIB
-    ram = weights * (1 - fraction) + kv * (1 - fraction) + buffer
+    ram = weights_ram + kv * (1 - fraction) + buffer
     vram = 0
     if gpu_layers:
-        vram = weights * fraction + kv * fraction + buffer
-        ram += 0.5 * GIB  # staging; model files are memory-mapped, not duplicated in full
-    return {"ram": math.ceil(ram), "vram": math.ceil(vram), "kv_total": kv}
+        vram = weights_vram + kv * fraction + buffer
+        if unified:
+            ram += vram  # one physical pool: GPU work lives inside RAM, no staging copy
+        else:
+            ram += 0.5 * GIB  # staging; model files are memory-mapped, not duplicated in full
+    ram, vram = math.ceil(ram), math.ceil(vram)
+    return {"ram": ram, "vram": vram, "kv_total": kv, "kv_vram": math.ceil(kv * fraction),
+            "weights_ram": math.ceil(weights_ram), "weights_vram": math.ceil(weights_vram), "expert_ram": math.ceil(expert_ram),
+            "total": ram if unified else ram + vram, "unified": bool(unified)}
 
 
-def maximum_context(variant, users, layers, ram_budget, vram_budget):
+def _fits(variant, context, users, layers, budget, gpu_budget, kv, moe, unified):
+    memory = allocations(variant, context, users, layers, kv, moe, unified)
+    return memory if memory["ram"] <= budget and memory["vram"] <= gpu_budget else None
+
+
+def _boundary(low, high, ok, largest):
+    """Binary search over a monotone predicate: largest x with ok(x) (True..False) or smallest (False..True)."""
+    best = None
+    while low <= high:
+        middle = (low + high) // 2
+        if ok(middle):
+            best = middle
+            low, high = (middle + 1, high) if largest else (low, middle - 1)
+        else:
+            low, high = (low, middle - 1) if largest else (middle + 1, high)
+    return best
+
+
+def placements(variant, context, users, budget, gpu_budget, has_gpu, kv_cache_type="f16", unified=False):
+    """CPU-only, full GPU, the largest fitting layer split and (MoE) the fewest experts-on-CPU layers.
+
+    Returns [(gpu_layers, n_cpu_moe, memory)]. VRAM grows and RAM shrinks with each GPU layer,
+    so binary search finds the same split an exhaustive scan would, in O(log layers).
+    """
+    total = variant.layers
+    args = (variant, context, users)
+    found = []
+    memory = _fits(*args, 0, budget, gpu_budget, kv_cache_type, 0, unified)
+    if memory:
+        found.append((0, 0, memory))
+    if not has_gpu:
+        return found
+    vram = lambda layers, moe=0: allocations(*args, layers, kv_cache_type, moe, unified)["vram"] <= gpu_budget
+    split = _boundary(1, total - 1, vram, largest=True)
+    if split:
+        memory = _fits(*args, split, budget, gpu_budget, kv_cache_type, 0, unified)
+        if memory:
+            found.append((split, 0, memory))
+    memory = _fits(*args, total, budget, gpu_budget, kv_cache_type, 0, unified)
+    if memory:
+        found.append((total, 0, memory))
+    elif variant.moe:
+        # Keep attention and shared weights on the GPU; park only as many expert layers in RAM as needed.
+        moe = _boundary(1, total, lambda k: vram(total, k), largest=False)
+        memory = moe and _fits(*args, total, budget, gpu_budget, kv_cache_type, moe, unified)
+        if memory:
+            found.append((total, moe, memory))
+    return found
+
+
+def maximum_context(variant, users, layers, ram_budget, vram_budget, kv_cache_type="f16", n_cpu_moe=0, unified=False):
     low, high, best = 256, variant.max_context, 0
     while low <= high:
         context = (low + high) // 2
-        use = allocations(variant, context, users, layers)
+        use = allocations(variant, context, users, layers, kv_cache_type, n_cpu_moe, unified)
         if use["ram"] <= ram_budget and use["vram"] <= vram_budget:
             best, low = context, context + 1
         else:
@@ -36,84 +124,269 @@ def maximum_context(variant, users, layers, ram_budget, vram_budget):
     return best // 256 * 256
 
 
-def matching_speed(records, variant, hardware, context, layers, gpu_uuid, threads):
+def _recent(record, key="timestamp"):
+    try:
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(record[key])).total_seconds()
+        return 0 <= age < MAX_AGE_DAYS * 86400
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _speed(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
+
+
+def _settings(record):
+    """(cache type, n_cpu_moe) of a measurement; v0.3 records without settings ran f16 with no expert offload."""
+    settings = record.get("settings") or {}
+    return settings.get("cache_type_k") or "f16", settings.get("n_cpu_moe") or 0
+
+
+def _same_placement(record, variant, hardware, layers, gpu_uuid, threads, kv_cache_type, n_cpu_moe):
+    return (record.get("variant_id") == variant.id and variant.sha256 and record.get("sha256") == variant.sha256
+            and record.get("fingerprint") == hardware["fingerprint"] and record.get("gpu_layers") == layers
+            and record.get("gpu_uuid") == gpu_uuid and record.get("threads") == threads and record.get("users") == 1
+            and _settings(record) == (kv_cache_type, n_cpu_moe))
+
+
+def matching_speed(records, variant, hardware, context, layers, gpu_uuid, threads, kv_cache_type="f16", n_cpu_moe=0):
     for record in reversed(records):
-        if (record.get("variant_id") != variant.id or not variant.sha256 or record.get("sha256") != variant.sha256
-                or record.get("fingerprint") != hardware["fingerprint"] or record.get("context") != context
-                or record.get("gpu_layers") != layers or record.get("gpu_uuid") != gpu_uuid
-                or record.get("threads") != threads or record.get("users") != 1):
+        if record.get("context") != context or not _same_placement(record, variant, hardware, layers, gpu_uuid, threads, kv_cache_type, n_cpu_moe):
             continue
-        try:
-            age = (datetime.now(timezone.utc) - datetime.fromisoformat(record["timestamp"])).total_seconds()
-            if 0 <= age < 30 * 86400 and math.isfinite(record["tps"]) and record["tps"] > 0:
-                return record
-        except (KeyError, ValueError, TypeError):
-            continue
+        if _recent(record) and _speed(record.get("tps")):
+            return record
     return None
 
 
-def recommend(variants, hardware, requirements, measurements=(), calibration=None):
+def interpolated_speed(records, variant, hardware, context, layers, gpu_uuid, threads, kv_cache_type="f16", n_cpu_moe=0):
+    """Speed at `context` from tests of the same variant, machine and placement at other contexts.
+
+    Between two tests: linear in context. Only shorter tests: scale by the bytes read per token
+    (weights + conversation memory) and shade down 10%, up to 4x the tested length. Only longer
+    tests: the nearest one, because a shorter conversation is not slower. Never "measured".
+    """
+    points = {}
+    for record in records:
+        other = record.get("context")
+        if (type(other) is int and other > 0 and other != context and _recent(record) and _speed(record.get("tps"))
+                and _same_placement(record, variant, hardware, layers, gpu_uuid, threads, kv_cache_type, n_cpu_moe)):
+            points[other] = record  # later records win
+    below = max((c for c in points if c < context), default=None)
+    above = min((c for c in points if c > context), default=None)
+    if below and above:
+        low, high = points[below]["tps"], points[above]["tps"]
+        tps = low + (high - low) * (context - below) / (above - below)
+        used, method = [below, above], f"between tests at {below:,} and {above:,} tokens"
+    elif below and context <= below * EXTRAPOLATE_LIMIT:
+        weights = variant.size_bytes * active_fraction(variant)
+        ratio = (weights + kv_bytes(variant, below, 1, kv_cache_type)) / (weights + kv_bytes(variant, context, 1, kv_cache_type))
+        tps = points[below]["tps"] * ratio * EXTRAPOLATE_MARGIN
+        used, method = [below], f"scaled down from a test at {below:,} tokens"
+    elif above:
+        tps = points[above]["tps"]
+        used, method = [above], f"taken from a test at a longer {above:,} tokens"
+    else:
+        return None
+    return {"tps": round(tps, 2), "contexts": used, "method": method,
+            "measurement_ids": [points[c].get("id") for c in used if points[c].get("id")]}
+
+
+def matching_tuned(tuned, variant, hardware, context, layers, kv_cache_type="f16", n_cpu_moe=0):
+    """Most recent tune result whose best settings use this exact context and placement."""
+    for record in reversed(list(tuned or ())):
+        if not isinstance(record, dict):
+            continue
+        best, result = record.get("best") or {}, record.get("best_result") or {}
+        if (record.get("variant_id") != variant.id or record.get("fingerprint") != hardware.get("fingerprint")
+                or (variant.sha256 and record.get("sha256") not in (None, variant.sha256))
+                or best.get("context") != context or best.get("gpu_layers") != layers or (best.get("parallel") or 1) != 1
+                or (best.get("n_cpu_moe") or 0) != n_cpu_moe or (best.get("cache_type_k") or "f16") != kv_cache_type
+                or not _recent(record) or not _speed(result.get("tps"))):
+            continue
+        return {"tps": result["tps"], "pp_tps": result.get("pp_tps"), "improvement": record.get("improvement"),
+                "timestamp": record["timestamp"], "stopped": record.get("stopped"),
+                "settings": {k: best[k] for k in ["threads", "batch", "ubatch", "flash_attn"] if best.get(k) is not None}}
+    return None
+
+
+def community_speed(records, variant, hardware, config, evidence=None):
+    """community.evidence(...) with a defensive check; None when absent, malformed or not installed."""
+    if not records:
+        return None
+    if evidence is None:
+        try:
+            from .community import evidence
+        except ImportError:
+            return None
+    try:
+        found = evidence(records, variant, hardware, config)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not isinstance(found, dict) or not _speed(found.get("median_tps")) or type(found.get("n")) is not int or found["n"] < 1:
+        return None
+    return {k: found.get(k) for k in ["median_tps", "n", "similar", "range"]}
+
+
+def _tps(value):
+    return f"{value:.0f}" if value >= 10 else f"{value:.1f}"
+
+
+def verdict(evidence, target, tps=None, interpolated=None, community=None, speed_estimate=None, users=1):
+    """(verdict, one plain sentence). Only measured or tuned speed can be runs_well/runs_slowly/too_slow."""
+    goal = f"{target:g}"
+    if evidence in {"measured", "tuned"}:
+        where = "Tuned and tested on this computer" if evidence == "tuned" else "Tested on this computer"
+        head = f"{where}: about {_tps(tps)} tokens per second"
+        if tps >= target:
+            return "runs_well", f"{head} — {'comfortably ' if tps >= target * COMFORT_FACTOR else ''}above your {goal}."
+        if tps >= target * SLOW_FRACTION:
+            return "runs_slowly", f"{head} — a bit below your {goal}."
+        return "too_slow", f"{head} — well below your {goal}."
+    likely = lambda value: "likely fast enough" if value >= target else f"possibly slower than your {goal}"
+    if evidence == "interpolated":
+        return "unknown", (f"Not tested at this length yet; tests at other lengths suggest about {_tps(interpolated['tps'])} "
+                           f"tokens per second — {likely(interpolated['tps'])}.")
+    if evidence == "community":
+        people = "similar computer reports" if community["n"] == 1 else "similar computers report"
+        return "unknown", (f"Not tested on this computer yet; {community['n']} {people} about "
+                           f"{_tps(community['median_tps'])} tokens per second — {likely(community['median_tps'])}.")
+    if evidence == "estimated":
+        e = speed_estimate
+        outlook = {"likely_meets": "likely fast enough", "borderline": f"might reach your {goal}",
+                   "likely_below": f"probably slower than your {goal}"}[e["target_status"]]
+        return "unknown", f"Not tested yet; a rough estimate says {_tps(e['low_tps'])}–{_tps(e['high_tps'])} tokens per second — {outlook}."
+    if users != 1:
+        return "unknown", "Not tested yet: speed with several people at once needs a speed test with that many users."
+    return "unknown", "Not tested yet — run a speed test to find out how fast it is."
+
+
+def _launch(context, users, layers, total, threads, kv, moe, gpu, tuned):
+    """Launch-config fragment for launch.from_candidate (no model_path)."""
+    config = {"context": context, "parallel": users, "gpu_layers": layers, "total_layers": total, "threads": threads,
+              "cache_type_k": kv, "cache_type_v": kv, "n_cpu_moe": moe,
+              "flash_attn": "on" if kv != "f16" else "auto"}  # llama.cpp needs flash attention for a compressed V cache
+    if gpu and gpu.get("backend") in GPU_BACKENDS:
+        config["gpu_backend"] = gpu["backend"]  # also lets CPU-only runs hide the GPU (-dev none)
+        if layers and isinstance(gpu.get("uuid"), str) and gpu["uuid"]:
+            config["gpu_uuid"] = gpu["uuid"]
+    if tuned:
+        settings = dict(tuned["settings"])
+        if kv != "f16" and settings.get("flash_attn") == "off":
+            settings.pop("flash_attn")
+        config.update(settings)
+    return config
+
+
+def recommend(variants, hardware, requirements, measurements=(), calibration=None, community=(), tuned=(),
+              community_evidence=None):
     req = requirements
+    kv = req.kv_cache_type
+    measurements = list(measurements or ())
+    community = community.get("records", []) if isinstance(community, dict) else list(community or ())
+    notes_extra = []
     ram_budget = max(0, hardware["ram_available"] - req.reserve_gib * GIB)
     selected = set(req.reclaim_pids)
     reclaim = sum(p.get("reclaimable") or 0 for p in hardware.get("processes", []) if p["pid"] in selected)
     scenarios = [("now", ram_budget)]
     if reclaim:
         scenarios.append(("after_closing", min(hardware["ram_total"] - req.reserve_gib * GIB, ram_budget + reclaim)))
-    gpu = next((g for g in hardware["gpus"] if g["index"] == req.gpu_index), None)
-    gpu_budget = max(0, gpu["available"] - req.gpu_reserve_gib * GIB) if gpu else 0
+    gpu = next((g for g in hardware["gpus"] if g.get("index") == req.gpu_index), None)
+    if gpu is not None and not _speed(gpu.get("available")):
+        # Free memory unknown (not zero): never guess, fall back to CPU-only placements.
+        notes_extra.append(f"{gpu.get('name') or 'The selected graphics chip'} does not report its free memory, so only CPU options are shown.")
+        gpu = None
+    unified = bool(gpu and gpu.get("unified"))
+    gpu_cap = max(0, gpu["available"] - req.gpu_reserve_gib * GIB) if gpu else 0
+    if unified:
+        # Apple: the GPU working-set limit is a slice of the same RAM; after closing apps it can grow to the wired limit.
+        limit = gpu.get("total") if _speed(gpu.get("total")) else gpu["available"]
+        gpu_budgets = {"now": lambda budget: min(gpu_cap, budget),
+                       "after_closing": lambda budget: min(max(gpu_cap, limit - req.gpu_reserve_gib * GIB), budget)}
+        notes_extra.append("This computer's graphics chip shares main memory, so every byte is counted once, in one pool.")
+    else:
+        gpu_budgets = {"now": lambda budget: gpu_cap, "after_closing": lambda budget: gpu_cap}
     threads = hardware.get("cores") or hardware.get("threads") or 1
+    efficiency = fit_efficiency(measurements, hardware, calibration, variants) if calibration else None
+    by_variant = defaultdict(list)
+    for record in measurements:
+        by_variant[record.get("variant_id")].append(record)
     results, rejected = [], {"context": 0, "memory": 0, "speed": 0}
+    compressible, max_context_cache = [], {}
+    metric = req.workload if req.workload != "documents" else "general"
     for variant in variants:
         if req.context > variant.max_context:
             rejected["context"] += 1
             continue
+        records = by_variant.get(variant.id, [])
+        score = variant.scores.get(metric) if req.include_rankings else None
+        quality = "Base-model reference; this quantisation has not been evaluated" if score is not None else "No mapped workload benchmark"
         contexts = sorted({req.context, *[n for n in [8192, 16384, 32768, 65536] if req.context < n <= variant.max_context]})
+        fitted_any = False
         for scenario, budget in scenarios:
+            gpu_budget = gpu_budgets[scenario](budget)
             for context in contexts:
-                # Enumerate each layer, then retain CPU, maximal fitting split, and full GPU candidates.
-                fits = []
-                for layers in range(variant.layers + 1) if gpu else [0]:
-                    memory = allocations(variant, context, req.users, layers)
-                    if memory["ram"] <= budget and memory["vram"] <= gpu_budget:
-                        fits.append((layers, memory))
+                fits = placements(variant, context, req.users, budget, gpu_budget, gpu is not None, kv, unified)
                 if not fits:
                     rejected["memory"] += 1
                     continue
-                choices = {0, variant.layers, max((l for l, _ in fits if l < variant.layers), default=0)}
-                for layers, memory in fits:
-                    if layers not in choices:
-                        continue
+                fitted_any = True
+                for layers, moe, memory in fits:
                     gpu_uuid = gpu["uuid"] if layers else None
-                    measurement = matching_speed(measurements, variant, hardware, context, layers, gpu_uuid, threads) if req.users == 1 else None
-                    tps = measurement["tps"] if measurement else None
+                    single = req.users == 1
+                    measurement = matching_speed(records, variant, hardware, context, layers, gpu_uuid, threads, kv, moe) if single else None
+                    tune = matching_tuned(tuned, variant, hardware, context, layers, kv, moe) if single else None
+                    launch = _launch(context, req.users, layers, variant.layers, threads, kv, moe, gpu, tune)
+                    tps = measurement["tps"] if measurement else tune["tps"] if tune else None
                     meets_speed = tps >= req.min_tps if tps is not None else None
-                    if meets_speed is False or (req.strict_speed and meets_speed is not True):
+                    if req.strict_speed and meets_speed is not True:
                         rejected["speed"] += 1
                         continue
-                    metric = req.workload if req.workload != "documents" else "general"
-                    score = variant.scores.get(metric) if req.include_rankings else None
-                    quality = "Base-model reference; this quantisation has not been evaluated" if score is not None else "No mapped workload benchmark"
-                    mode = "cpu" if layers == 0 else "gpu" if layers == variant.layers else "split"
-                    results.append({"id": f"{variant.id}|{scenario}|{context}|{layers}", "variant_id": variant.id,
+                    interpolated = crowd = None
+                    if tps is None and single:
+                        interpolated = interpolated_speed(records, variant, hardware, context, layers, gpu_uuid, threads, kv, moe)
+                        crowd = community_speed(community, variant, hardware, launch, community_evidence)
+                    speed_estimate = estimate(variant, hardware, calibration, context, layers, req.users, gpu, req.min_tps,
+                                              kv_cache_type=kv, n_cpu_moe=moe, unified=unified, efficiency=efficiency)
+                    evidence = ("measured" if measurement else "tuned" if tune else "interpolated" if interpolated
+                                else "community" if crowd else "estimated" if speed_estimate.get("available") else "none")
+                    badge, sentence = verdict(evidence, req.min_tps, tps, interpolated, crowd, speed_estimate, req.users)
+                    mode = "cpu" if layers == 0 else "gpu" if layers == variant.layers and not moe else "split"
+                    key = (variant.id, scenario, layers, moe)
+                    if key not in max_context_cache:
+                        max_context_cache[key] = maximum_context(variant, req.users, layers, budget, gpu_budget, kv, moe, unified)
+                    suffix = (f"|kv:{kv}" if kv != "f16" else "") + (f"|moe:{moe}" if moe else "")
+                    placement = "experts on CPU" if moe else f"{mode} execution"
+                    results.append({"id": f"{variant.id}|{scenario}|{context}|{layers}{suffix}", "variant_id": variant.id,
                                     "name": variant.name, "quant": variant.quant, "filename": variant.filename,
                                     "repo": variant.repo, "base_repo": variant.base_repo, "revision": variant.revision, "demo": variant.demo,
                                     "scenario": scenario, "mode": mode, "gpu_layers": layers, "total_layers": variant.layers,
                                     "gpu_index": req.gpu_index if layers else None, "context": context, "users": req.users,
                                     "runtime_gpu_layers": layers + 1 if layers == variant.layers else layers,
-                                    "memory_max_context": maximum_context(variant, req.users, layers, budget, gpu_budget),
+                                    "kv_cache_type": kv, "n_cpu_moe": moe, "unified_memory": unified, "launch": launch,
+                                    "memory_max_context": max_context_cache[key],
                                     "ram_bytes": memory["ram"], "vram_bytes": memory["vram"], "kv_bytes": memory["kv_total"],
+                                    "memory_total_bytes": memory["total"],
                                     "ram_headroom_bytes": int(budget - memory["ram"]), "vram_headroom_bytes": int(gpu_budget - memory["vram"]),
                                     "quality_score": score, "quality_evidence": quality, "quality_metric": metric,
                                     "score_source": variant.score_source if req.include_rankings else None, "score_version": variant.score_version if req.include_rankings else None,
                                     "score_settings": variant.score_settings if req.include_rankings else None, "tps": tps, "speed_meets_target": meets_speed,
-                                    "speed_evidence": "Local synthetic generation benchmark; same context and configuration" if measurement else "Unverified — benchmark this configuration",
-                                    "speed_estimate": estimate(variant, hardware, calibration, context, layers, req.users, gpu, req.min_tps),
-                                    "benchmark": measurement, "threads": threads, "metadata_date": variant.fetched_at,
+                                    "speed_evidence": {"measured": "Local synthetic generation benchmark; same context and configuration",
+                                                       "tuned": "Local tuning run; same context and placement",
+                                                       "interpolated": "Interpolated from local tests at other context lengths; not verified at this length",
+                                                       "community": "Community results from similar computers; not verified on this one"}.get(
+                                                           evidence, "Unverified — benchmark this configuration"),
+                                    "evidence": evidence, "verdict": badge, "verdict_text": sentence,
+                                    "speed_interpolated": interpolated, "community": crowd, "tuned": tune,
+                                    "speed_estimate": speed_estimate,
+                                    "benchmark": measurement, "threads": launch["threads"], "metadata_date": variant.fetched_at,
                                     "file_bytes": variant.size_bytes,
-                                    "explanation": f"Estimated memory fit at {context:,} tokens per user; {mode} execution. " +
-                                    ("Quality ordering uses base-model evidence. " if score is not None else "Quality ranking unavailable. ") +
-                                    ("Speed target met in a local synthetic test." if measurement else "Speed target is not yet verified.")})
+                                    "explanation": f"Estimated memory fit at {context:,} tokens per user; {placement}. " +
+                                    ("Quality ordering uses base-model evidence. " if score is not None else "Quality ranking unavailable. ") + sentence})
+        if not fitted_any and kv == "f16":
+            smaller = next((t for t in ["q8_0", "q4_0"] if any(placements(variant, req.context, req.users, b, gpu_budgets[s](b), gpu is not None, t, unified)
+                                                            for s, b in scenarios)), None)
+            if smaller:
+                compressible.append((variant.name, smaller))
     # Scores from different index versions must never share a numerical ordering.
     versions = {r["score_version"] for r in results if r["quality_score"] is not None}
     comparable = len(versions) <= 1 and None not in versions
@@ -121,10 +394,12 @@ def recommend(variants, hardware, requirements, measurements=(), calibration=Non
     comparable = comparison["comparable"]
     def order(result):
         quality = result["quality_score"] if comparable and result["quality_score"] is not None else -1
-        speed = result["tps"] if result["tps"] is not None else result["speed_estimate"].get("low_tps", -1)
-        primary = (quality, speed) if req.priority == "quality" else (speed, quality) if req.priority == "speed" else (result["speed_meets_target"] is True, quality)
+        speed = next((v for v in [result["tps"], (result["speed_interpolated"] or {}).get("tps"),
+                                  (result["community"] or {}).get("median_tps"), result["speed_estimate"].get("low_tps")] if v is not None), -1)
+        verified = (result["speed_meets_target"] is True, result["speed_meets_target"] is not False)
+        primary = (quality, speed) if req.priority == "quality" else (speed, quality) if req.priority == "speed" else (*verified, quality)
         return (*primary, result["scenario"] == "now", -abs(result["context"] - req.context),
-                -(result["ram_bytes"] + result["vram_bytes"]))
+                -result["memory_total_bytes"])
     results.sort(key=order, reverse=True)
     # Show three distinct models first; fill remaining places with variant trade-offs.
     shortlist, seen = [], set()
@@ -142,13 +417,26 @@ def recommend(variants, hardware, requirements, measurements=(), calibration=Non
         if key not in configurations:
             shortlist.append(result["id"])
             configurations.add(key)
+    notes = ["Memory fit is estimated, not a guarantee; rescan after freeing resources.",
+             "Hardware-calibrated speed ranges are low-confidence estimates; only model benchmarks verify speed. Concurrent speed estimates are unavailable.",
+             "Context includes prompt, conversation, reasoning and generated output. The KV cache (the model's short-term "
+             f"notepad for this conversation) uses {KV_TEXT[kv]}.",
+             "Memory maximum is not a validated usable-context or speed guarantee.",
+             "Document ordering uses general intelligence as a proxy, not a long-context evaluation."]
+    if compressible:
+        names = ", ".join(sorted({name for name, _ in compressible})[:3])
+        notes.append(f"{names} would fit with compressed conversation memory (KV cache q8_0 or q4_0: a smaller notepad "
+                     "with a small quality cost). Turn on compressed notes to see it.")
+    if any(r["n_cpu_moe"] for r in results):
+        notes.append("\"Experts on CPU\" options keep part of a mixture-of-experts model in main memory "
+                     "(llama.cpp --n-cpu-moe): slower than all-GPU, usually much faster than CPU only.")
+    if efficiency:
+        notes.append(f"Speed estimates are {efficiency['label']} on this computer.")
+    notes.extend(notes_extra)
     return {"requirements": asdict(req), "hardware": hardware, "candidates": results, "shortlist": shortlist,
             "rejected": rejected, "quality_comparable": comparable, "quality_comparison": comparison, "reclaim_estimate_bytes": reclaim,
-            "notes": ["Memory fit is estimated, not a guarantee; rescan after freeing resources.",
-                      "Hardware-calibrated speed ranges are low-confidence estimates; only model benchmarks verify speed. Concurrent speed estimates are unavailable.",
-                      "Context includes prompt, conversation, reasoning and generated output. KV cache uses FP16.",
-                      "Memory maximum is not a validated usable-context or speed guarantee.",
-                      "Document ordering uses general intelligence as a proxy, not a long-context evaluation."]}
+            "speed_adjustment": {k: efficiency[k] for k in ["factor", "spread", "n", "label"]} if efficiency else None,
+            "notes": notes}
 
 
 def add_quality_comparison(results, comparable):
