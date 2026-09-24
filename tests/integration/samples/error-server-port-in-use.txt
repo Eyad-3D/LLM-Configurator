@@ -1,0 +1,16 @@
+$ llama-server -m tiny-llama-F16.gguf -c 2048 -np 1 -ngl 0 --host 127.0.0.1 --jinja --port 55735 -t 2 --alias tiny
+# exit code: 1
+# ---- stdout ----
+# ---- stderr ----
+warning: no usable GPU found, --gpu-layers option will be ignored
+warning: one possible reason is that llama.cpp was compiled without GPU support
+warning: consult docs/build.md for compilation instructions
+0.00.003.590 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.004.174 W srv  llama_server: -----------------
+0.00.004.197 W srv  llama_server: CORS is set to allow all origins ('*') and no API key is set
+0.00.004.198 W srv  llama_server: this can be a security risk (cross-origin attacks)
+0.00.004.198 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655
+0.00.004.198 W srv  llama_server: -----------------
+0.00.004.265 E srv         start: couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 55735
+0.00.004.280 I srv    operator(): operator(): cleaning up before exit...
+0.00.004.366 E srv  llama_server: exiting due to HTTP server error

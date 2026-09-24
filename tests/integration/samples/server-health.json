@@ -1,0 +1,17 @@
+[
+  {
+    "t": 0.002,
+    "status": null,
+    "body": "URLError: <urlopen error [Errno 111] Connection refused>"
+  },
+  {
+    "t": 0.023,
+    "status": 503,
+    "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+  },
+  {
+    "t": 0.043,
+    "status": 200,
+    "body": "{\"status\":\"ok\"}"
+  }
+]

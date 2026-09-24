@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Write tiny, deterministic GGUF models for the real-runtime integration tests.
 
-The weights are seeded random numbers, so the models talk nonsense, but real
-llama.cpp loads, serves, benchmarks and quantizes them like any other model.
+Most weights are seeded random numbers, but the embeddings and output layer are
+wired as a "next word" table so greedy decoding always writes plain ASCII:
+a chat answer is "42" (the smoke-test answer), and any other text continues with
+" the quick brown fox." and then stops. Random bytes would otherwise make
+llama-server's reply parser fail with HTTP 500. The random attention/FFN weights
+still give quantization something to lose, so KL divergence is non-zero.
 
 Usage: python3 scripts/make_tiny_models.py OUT_DIR [--bin LLAMA_BIN_DIR]
 
@@ -86,10 +90,30 @@ def bpe_vocab(merges_wanted=200):
     return tokens, merges
 
 
-def write_model(path, arch, *, n_embd=256, n_layer=4, n_head=4, n_head_kv=2, n_ff=512, n_expert=0, n_expert_used=0,
+CHAIN_WORDS = [" the", " quick", " brown", " fox", "."]
+
+
+def next_token_table(tokens):
+    """Greedy continuation: end of prompt -> "4" -> "2" -> end; anything else -> " the quick brown fox." -> end."""
+    table = byte_unicode()
+    ids = {t: i for i, t in enumerate(tokens)}
+    enc = lambda text: ids["".join(table[b] for b in text.encode())]
+    end = ids["<|im_end|>"]
+    chain = [enc(w) for w in CHAIN_WORDS]
+    nxt = {i: chain[0] for i in range(len(tokens))}
+    for a, b in zip(chain, chain[1:] + [end]):
+        nxt[a] = b
+    nxt[enc("\n")], nxt[enc("4")], nxt[enc("2")] = enc("4"), enc("2"), end
+    return nxt
+
+
+def write_model(path, arch, *, n_embd=512, n_layer=4, n_head=8, n_head_kv=4, n_ff=512, n_expert=0, n_expert_used=0,
                 context=4096, arch_name=None):
     rng = np.random.default_rng(SEED)
     tokens, merges = bpe_vocab()
+    table = byte_unicode()
+    tokens += ["".join(table[b] for b in w.encode()) for w in CHAIN_WORDS
+               if "".join(table[b] for b in w.encode()) not in tokens]
     tokens = tokens + SPECIALS
     types = [gguf.TokenType.NORMAL] * (len(tokens) - len(SPECIALS)) + [gguf.TokenType.CONTROL] * len(SPECIALS)
     n_vocab = len(tokens)
@@ -121,16 +145,22 @@ def write_model(path, arch, *, n_embd=256, n_layer=4, n_head=4, n_head_kv=2, n_f
     w.add_add_bos_token(False)
     w.add_chat_template(CHATML)
 
-    def weight(*shape):  # numpy shape is ggml's dimensions reversed
-        return (rng.standard_normal(shape) * 0.05).astype(np.float16)
+    def weight(*shape, scale=0.02):  # numpy shape is ggml's dimensions reversed
+        return (rng.standard_normal(shape) * scale).astype(np.float16)
 
     def norm(n):
         return np.ones(n, dtype=np.float32)
 
     head = n_embd // n_head
-    w.add_tensor("token_embd.weight", weight(n_vocab, n_embd))
+    assert n_vocab <= n_embd, "one-hot embeddings need n_embd >= vocabulary size"
+    embd = rng.standard_normal((n_vocab, n_embd)) * 0.02
+    embd[np.arange(n_vocab), np.arange(n_vocab)] = 100.0  # the residual stream stays dominated by the current token
+    out = rng.standard_normal((n_vocab, n_embd)) * 0.01
+    for current, following in next_token_table(tokens).items():
+        out[following, current] += 0.5
+    w.add_tensor("token_embd.weight", embd.astype(np.float16))
     w.add_tensor("output_norm.weight", norm(n_embd))
-    w.add_tensor("output.weight", weight(n_vocab, n_embd))
+    w.add_tensor("output.weight", out.astype(np.float16))
     for i in range(n_layer):
         p = f"blk.{i}."
         w.add_tensor(p + "attn_norm.weight", norm(n_embd))

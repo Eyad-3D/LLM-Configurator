@@ -1,0 +1,6 @@
+$ llama-bench -m unknown-arch.gguf -o json -p 8 -n 4
+# exit code: 1
+# ---- stdout ----
+[
+# ---- stderr ----
+llama_bench: error: failed to load model '/opt/llama-work/models/unknown-arch.gguf'
