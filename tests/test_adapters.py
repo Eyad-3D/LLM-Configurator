@@ -23,8 +23,9 @@ class AdapterTests(unittest.TestCase):
                  patch("llm_configurator.catalogue.fetch_scores", side_effect=ValueError("key unavailable")):
                 refresh(Store(directory), progress=updates.append)
         self.assertEqual(updates[0]["models_done"], 0)
-        self.assertEqual(updates[-1], {"models_done": 2, "models_total": 2,
-                                      "models_failed": 1, "scores": "failed"})
+        self.assertEqual(updates[-1], {"models_done": 2, "models_total": 2, "models_failed": 1, "scores": "failed",
+                                      "stage": "metadata", "done": 3, "total": 3,
+                                      "message": "Checked 2 of 2 model sources"})
         self.assertEqual(len(updates), 4)
 
     def test_model_and_score_requests_overlap(self):

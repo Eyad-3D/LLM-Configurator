@@ -134,7 +134,10 @@ class FetchVariantsTests(unittest.TestCase):
         [model], _ = fetch({"base_repo": "openai/gpt-oss-20b", "gguf_repo": "ggml-org/gpt-oss-20b-GGUF"}, models,
                            {"openai/gpt-oss-20b": GPT_OSS_20B})
         self.assertAlmostEqual(model.parameters / 1e9, 20.9, delta=0.3)
-        self.assertAlmostEqual(model.expert_fraction, 0.914, places=2)
+        # Expert share of the file's BYTES (contract §2.1): 19.11e9 expert weights x 17/32 bytes / 12.11e9 bytes.
+        # By parameters it would be 0.914, which would leave ~0.9 GB of non-expert weights uncounted on the GPU.
+        self.assertAlmostEqual(model.expert_fraction, 19_110_297_600 * 17 / 32 / 12_109_566_560, places=3)
+        self.assertAlmostEqual(model.expert_fraction, 0.838, places=2)
         self.assertEqual(model.sliding_layers, 12)
 
     def test_mixtral_like(self):
@@ -201,6 +204,15 @@ class FetchVariantsTests(unittest.TestCase):
         self.assertEqual([v.quant for v in variants], ["Q4_K_M"])
         variants, _ = fetch({"base_repo": "t/b", "gguf_repo": "t/g", "quants": ["Q2_K"]}, models, {"t/b": QWEN3_8B})
         self.assertEqual([v.quant for v in variants], ["Q2_K"])
+        # F16 and BF16 are the same weights; only one 16-bit file is offered.
+        both = {"t/b": {"sha": "b"}, "t/g": {"sha": "g", "siblings": files + [sibling("m-BF16.gguf", 3 * GB)]}}
+        variants, _ = fetch({"base_repo": "t/b", "gguf_repo": "t/g"}, both, {"t/b": small})
+        self.assertEqual([v.quant for v in variants], ["Q4_K_M", "F16"])
+
+    def test_config_that_is_not_an_object_is_a_plain_error(self):
+        models = {"t/b": {"sha": "b"}, "t/g": {"sha": "g", "siblings": [sibling("m-Q4_K_M.gguf", GB)]}}
+        with self.assertRaisesRegex(ValueError, "config.json"):
+            fetch({"base_repo": "t/b", "gguf_repo": "t/g"}, models, {"t/b": [1, 2]})
 
     def test_gemma3_text_config_defaults_and_sliding_pattern(self):
         models = {"google/gemma-3-4b-it": {"sha": "b", "gated": "manual"}, "mirror/gemma-3-4b-it": {"sha": "m"},
@@ -345,6 +357,41 @@ class UserEntryTests(unittest.TestCase):
         self.assertEqual(entries["Qwen/Qwen3-8B"]["aa_slug"], "qwen3-8b")
         self.assertTrue(entries["hand/edited"]["user"])
 
+    def test_damaged_user_copy_does_not_break_the_app(self):
+        path = Path(self.folder.name) / "catalogue.json"
+        path.write_text("{not json", encoding="utf-8")
+        self.assertEqual(len(definitions(self.store)), len(self.shipped))
+        self.assertFalse(path.exists())
+        self.assertEqual(len(list(Path(self.folder.name).glob("catalogue.json.damaged-*"))), 1)  # kept, not deleted
+        path.write_text(json.dumps([{"base_repo": "bad name", "gguf_repo": "x/y"},
+                                    {"base_repo": "me/ok", "gguf_repo": "me/ok-GGUF"}]), encoding="utf-8")
+        names = [e["base_repo"] for e in definitions(self.store)]
+        self.assertIn("me/ok", names)
+        self.assertNotIn("bad name", names)
+
+    def test_dropped_shipped_model_does_not_return_as_custom(self):
+        add_entry(self.store, "me/Model-7B", "me/Model-7B-GGUF")  # writes the merged list, shipped entries included
+        fewer = [e for e in catalogue.packaged_entries() if e["base_repo"] != "Qwen/Qwen3-8B"]
+        with patch("llm_configurator.catalogue.packaged_entries", return_value=fewer):
+            names = {e["base_repo"]: e for e in definitions(self.store)}
+        self.assertNotIn("Qwen/Qwen3-8B", names)
+        self.assertTrue(names["me/Model-7B"]["user"])
+
+    def test_names_are_ascii_and_duplicates_ignore_case(self):
+        with self.assertRaisesRegex(ValueError, "Invalid Hugging Face repository"):
+            add_entry(self.store, "m\u00e9/model", "me/gguf")
+        with self.assertRaisesRegex(ValueError, "already"):
+            add_entry(self.store, self.shipped[0]["base_repo"].lower(), "other/gguf")
+
+    def test_set_slug_keeps_user_entries(self):
+        add_entry(self.store, "me/Model-7B", "me/Model-7B-GGUF")
+        catalogue.set_slug(self.store, "Qwen/Qwen3-8B", "qwen3-8b")
+        entries = {e["base_repo"]: e for e in definitions(self.store)}
+        self.assertEqual(entries["Qwen/Qwen3-8B"]["aa_slug"], "qwen3-8b")
+        self.assertIn("me/Model-7B", entries)
+        with self.assertRaisesRegex(ValueError, "not in the configured catalogue"):
+            catalogue.set_slug(self.store, "no/such", "x")
+
     def test_benchmark_mapping_keeps_user_entries(self):
         from llm_configurator.app import map_benchmark
         add_entry(self.store, "me/Model-7B", "me/Model-7B-GGUF")
@@ -384,6 +431,50 @@ class RefreshTests(unittest.TestCase):
                  patch("llm_configurator.catalogue.fetch_scores", side_effect=ValueError("no key")):
                 with self.assertRaises(Cancelled):
                     refresh(Store(folder), cancel=cancel)
+
+    def test_cancel_does_not_wait_for_slow_requests(self):
+        import time
+        cancel, release = threading.Event(), threading.Event()
+        started = threading.Event()
+
+        def slow(entry, cancel=None):
+            started.set()
+            release.wait(10)
+            return []
+        entries = [{"base_repo": f"t/{i}", "gguf_repo": f"t/{i}-g"} for i in range(3)]
+        threading.Thread(target=lambda: (started.wait(5), cancel.set()), daemon=True).start()
+        began = time.monotonic()
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                with patch("llm_configurator.catalogue.definitions", return_value=entries), \
+                     patch("llm_configurator.catalogue.fetch_variants", side_effect=slow):
+                    with self.assertRaises(Cancelled):
+                        refresh(Store(folder), include_scores=False, cancel=cancel)
+            self.assertLess(time.monotonic() - began, 3)
+        finally:
+            release.set()
+
+    @staticmethod
+    def odd_reply_for_b(entry):
+        if entry["base_repo"] == "t/b":
+            raise AttributeError("odd reply")
+        return []
+
+    def test_unexpected_error_keeps_other_models(self):
+        entries = [{"base_repo": "t/a", "gguf_repo": "t/a-g"}, {"base_repo": "t/b", "gguf_repo": "t/b-g", "user": True}]
+        cached = {"id": "t/b-g@old:b.gguf", "name": "b", "base_repo": "t/b", "repo": "t/b-g", "revision": "old",
+                  "base_revision": "old", "filename": "b.gguf", "sha256": None, "quant": "Q4_K_M", "size_bytes": GB,
+                  "layers": 1, "kv_heads": 1, "head_dim": 1, "max_context": 1, "architecture": "qwen3",
+                  "source": "catalogue"}  # a v0.3-era cache of a user's own repo
+        with tempfile.TemporaryDirectory() as folder:
+            store = Store(folder)
+            store.put("variants", [cached])
+            with patch("llm_configurator.catalogue.definitions", return_value=entries), \
+                 patch("llm_configurator.catalogue.fetch_variants", side_effect=self.odd_reply_for_b):
+                status = refresh(store, include_scores=False)
+            self.assertIn("t/b: unexpected reply", status["warnings"][0])
+            [kept] = store.get("variants")
+            self.assertEqual(kept["source"], "custom")  # privacy rule for sharing relies on this
 
     def test_one_failure_keeps_other_models_and_cached_copy(self):
         entries = [{"base_repo": "t/a", "gguf_repo": "t/a-g"}, {"base_repo": "t/b", "gguf_repo": "t/b-g"}]
