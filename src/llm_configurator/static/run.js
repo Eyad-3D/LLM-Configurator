@@ -333,7 +333,11 @@
     if (id === "use" && state === "done") return "Server running";
     if (id === "runtime" && state === "ready") return "Not installed";
     if (id === "download" && state === "ready")
-      return mem.download.plan?.local_copy ? "Found on your disk" : "Not downloaded";
+      return mem.download.plan?.local_copy
+        ? "Found on your disk"
+        : mem.download.plan?.local === true
+          ? "Your file is missing"
+          : "Not downloaded";
     return STATE_LABELS[state];
   }
   function expand(id, toggleOpen = false) {
@@ -685,6 +689,14 @@
               button("Check again", () => planDownload(), "secondary"),
             ),
       ];
+    // The person's own file (not from the catalogue) can only be reused, never downloaded.
+    if (plan.local === true && !plan.local_copy)
+      return [
+        reasonView(
+          "This model is a file from your computer, and it isn’t where it was found any more. Put it back, or close this panel, open “Model files already on this computer” and scan again.",
+        ),
+        el("div", { class: "step-actions" }, button("Check again", () => planDownload(), "secondary")),
+      ];
     const partial =
       plan.total_bytes && plan.remaining_bytes < plan.total_bytes
         ? plan.total_bytes - plan.remaining_bytes
@@ -883,6 +895,17 @@
       box.append(el("p", { class: "step-note", text: share.error }));
       return box;
     }
+    if (share.records === 0) {
+      box.append(
+        el("p", {
+          class: "step-note",
+          text: Number(share.skipped) > 0
+            ? "There is nothing to share: every result was measured on different hardware (or before a hardware or driver change), so all were left out."
+            : "There is nothing to share yet.",
+        }),
+      );
+      return box;
+    }
     const text = typeof share.json === "string" ? share.json : "";
     const url = safeIssueUrl(share.issue_url);
     const copyStatus = el("span", { class: "copy-status", role: "status" });
@@ -895,6 +918,12 @@
         el("span", {}, copyStatus, button("Copy", () => copy(text, copyStatus), "secondary small", { "data-copy": "share" })),
       ),
       el("pre", { class: "export-content share-json", tabindex: "0" }, el("code", { text })),
+      Number(share.skipped) > 0
+        ? el("p", {
+            class: "step-note",
+            text: `${share.skipped} result${Number(share.skipped) === 1 ? " was" : "s were"} measured on different hardware and ${Number(share.skipped) === 1 ? "was" : "were"} left out (this includes results from before a hardware or driver change).`,
+          })
+        : null,
       share.fits_in_url === false
         ? el("p", { class: "step-note", text: "This is too long to fit in a link. Press Copy first, then paste it into the GitHub page that opens." })
         : null,
@@ -1000,15 +1029,8 @@
     const tried = (result.trials || []).filter(
       (t) => t.status === "ok" && t.step !== "baseline" && t.step !== "confirm",
     ).length;
+    // The tuner's notes already say why it stopped, so the page adds no stop sentence of its own.
     const notes = (result.notes || []).map(plain);
-    // Newer results already say why tuning stopped in notes; add ours only for older ones.
-    const stopped = notes.some((n) => /^Stopped\b/.test(n))
-      ? null
-      : {
-          budget: "Stopped when the time ran out.",
-          converged: "Stopped early: nothing faster left to try.",
-          cancelled: "Stopped because you cancelled.",
-        }[result.stopped];
     return [
       el("p", { class: "step-done", text: headline }),
       el(
@@ -1028,12 +1050,15 @@
             ),
           )
         : null,
-      hint([`Tried ${tried} setting${tried === 1 ? "" : "s"}.`, stopped].filter(Boolean).join(" ")),
+      hint(`Tried ${tried} setting${tried === 1 ? "" : "s"}.`),
       // The headline already says when nothing got faster.
       notes
         .filter((note) => !/^Your starting settings were already/.test(note))
         .map((note) => hint(note)),
-      hint("The best settings are saved on this computer for this model."),
+      // A cancelled tune (or a server that couldn't save) says saved: false.
+      result.saved === false
+        ? hint("These settings were not saved, so the model keeps using its earlier settings.")
+        : hint("The best settings are saved on this computer for this model."),
     ];
   }
   function tuneView(reason) {
