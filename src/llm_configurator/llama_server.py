@@ -37,7 +37,7 @@ FAILURES = [
      "or fewer GPU layers, and close other programs."),
     (re.compile(r"unknown model architecture: '([^']*)'", re.I),
      "This llama.cpp version does not know this model's design ({0}). Update llama.cpp or pick another model."),
-    (re.compile(r"No such file or directory|failed to open GGUF file|failed to load model from", re.I),
+    (re.compile(r"No such file or directory|failed to open GGUF file", re.I),
      "The model file is missing. Download it again."),
     (re.compile(r"invalid magic|failed to read magic|failed to read key-value|corrupt|not within the file bounds"
                 r"|failed to read tensor|invalid split|gguf_init_from_\w+: failed", re.I),
