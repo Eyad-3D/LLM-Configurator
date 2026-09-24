@@ -46,7 +46,12 @@ _FRACTION = re.compile(r"([-+]?)(?:(\d+) )?(\d+)/(\d+)")
 _VULGAR = {"½": " 1/2", "¼": " 1/4", "¾": " 3/4", "⅓": " 1/3", "⅔": " 2/3"}
 _UNIT_POWER = re.compile(r"(?<=[a-z])(?:\^[23]|[23])(?![\w.])")  # the 2 in "cm²" ("cm2" after NFKC) is not an answer
 _NEGATION = re.compile(r"\b(?:not|no|never|none|neither|nor)\b|n't\b")
-_HEDGE = re.compile(r"\b(?:or|maybe|possibly|perhaps|unsure)\b")
+_HEDGE = re.compile(r"\?|\b(?:or|maybe|possibly|perhaps|probably|likely|unsure|sure|think|guess|could|might|may|either|"
+                    r"alternatively|otherwise|unless|if|depend\w*|though|although|but|vs|versus|unclear|uncertain)\b")
+_LONE_VALUE = re.compile(r"[-+]?\.?\d[\d.,:]*(?:[ -]\d[\d.,:]*)*( ?[ap]m)?|yes|no|true|false|\d{1,2}(st|nd|rd|th)? (jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*|(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]* \d{1,2}(st|nd|rd|th)?")
+_QUALIFIED = re.compile(r"\b(?:minus|negative|below|thousand|million|billion|trillion|hundred|dozen|half|halves|thirds?|"
+                        r"quarters?|at (?:least|most)|up to|more than|less than|fewer than|over|under|maybe|or so)\b|[<>≤≥]|"
+                        r"\d\s*(?:k|bn)\b|(?:^|\s)[–—]\s*\d")
 _CHOICE = re.compile(r"\(?([a-e])\)")  # "(b)" or "b)" for a multiple-choice letter
 _OUTER = " \t\n.,;:!?\"'`*“”‘’"
 _LEFT_OUTER = re.compile("^[" + re.escape(_OUTER) + "]*")
@@ -91,6 +96,7 @@ def normalize(text, case=False):
     for symbol, spelled in _VULGAR.items():
         text = text.replace(symbol, spelled)
     text = unicodedata.normalize("NFKC", text).replace("\u2212", "-").replace("\u2044", "/")
+    text = re.sub(r"(^|[\s(=])[–—](?=\d)", r"\1-", text)  # "–3" typed with a dash is minus three
     text = _strip_outer(re.sub(r"\s+", " ", text if case else text.lower()))
     return re.sub(r"\b([ap])\.m\b\.?", r"\1m", text).strip()
 
@@ -152,15 +158,25 @@ def _squeeze(text):
     return re.sub(r"\s*([^\w\s])\s*", r"\1", text)
 
 
-def _readings(got, strict):
+def _readings(got, strict, kind=""):
     """The answer as written, plus the result after a last '=' and the part before a trailing '(...)' note,
     so '40 x 12 = 480' and '20.2 (60.6 / 3)' still count. Program output is only read as written."""
     readings = [got]
+    line = re.match(r"(?:line\s*)?(\d+)\s*(?:$|[:(–—-]|is\b)", got.strip(), re.I)  # not "4 or 5"
+    if kind == "find_bug_line" and line:  # "Line 4: counts[w] = ..." quotes code full of other numbers
+        return [got, line.group(1)]
     if not strict:
-        if "=" in got:
+        if "=" in got and not re.search(r"[,;](?!\d{3})|\band\b", got):  # "x = 5, y = 4" is not an answer of 4
             readings.append(got.rsplit("=", 1)[1])
+            if got.count("=") == 1:  # "2.4 hours = 144 minutes"
+                readings.append(got.split("=", 1)[0])
         note = re.fullmatch(r"(.+?)\s*\(([^()]*)\)", got.strip())
-        if note and not _HEDGE.search(note.group(2).lower()):
+        inside = normalize(note.group(2)) if note else ""
+        negated = _NEGATION.search(inside)  # "(not 5)" names a rival value; "(not the right number)" retracts
+        rival = re.fullmatch(r"(?:not|no) (.+)", inside)
+        if negated and not (rival and _LONE_VALUE.fullmatch(rival.group(1))):
+            note = None
+        if note and not _HEDGE.search(note.group(2).lower()) and not _LONE_VALUE.fullmatch(inside):
             readings.append(note.group(1))
     return readings
 
@@ -181,7 +197,7 @@ def _matches(item, reply, strict):
     if expected is None:
         return False
     value = _number(said)
-    if value is None and not _NEGATION.search(said):  # "42 apples" answers 42; "not 42" does not
+    if value is None and not (_NEGATION.search(said) or _QUALIFIED.search(said) or _HEDGE.search(said)):  # "42 apples" answers 42; "not 42" does not
         found = _numbers_in(said)
         value = found[0] if len(found) == 1 else None
     return value is not None and _close(value, expected)
@@ -190,9 +206,12 @@ def _matches(item, reply, strict):
 def check_text(item, reply_text):
     """(ok, extracted answer). Exact after normalising; numbers compared by value unless the item is strict."""
     got = final_answer(reply_text)
+    if got and not item.get("strict", str(item.get("kind", "")).endswith("_output")) and re.search(
+            re.escape(got) + r"[\s.*_`'\"”’]*\?", visible_text(reply_text)):
+        return False, got  # "12:05?" is a guess, not an answer
     # Program output must match exactly ("1.0" is not "1", "HOP" is not "hop"); elsewhere "42 apples" answers "42".
     strict = item.get("strict", str(item.get("kind", "")).endswith("_output"))
-    return any(_matches(item, reading, strict) for reading in _readings(got, strict)), got
+    return any(_matches(item, reading, strict) for reading in _readings(got, strict, item.get("kind", ""))), got
 
 
 def parse_tool_call(text):
@@ -263,6 +282,9 @@ def _tool_name(name):
     return name.split(".", 1)[1] if name.startswith(("functions.", "tools.")) else name
 
 
+ABSENT = {"$absent": True}  # an optional argument the request rules out (e.g. "no due date though")
+
+
 def check_tool_call(item, reply_text):
     """(ok, what the model called). Right tool, every expected argument equal, no invented argument names."""
     call = parse_tool_call(reply_text)
@@ -277,8 +299,9 @@ def check_tool_call(item, reply_text):
     tool = next((t for t in item.get("tools", ()) if t["name"] == expected["name"]), {})
     allowed = set((tool.get("parameters") or {}).get("properties", {})) | set(expected["arguments"])
     arguments = call["arguments"]
-    ok = (set(arguments) <= allowed
-          and all(key in arguments and _same(value, arguments[key]) for key, value in expected["arguments"].items()))
+    ok = set(arguments) <= allowed and all(
+        key not in arguments if value == ABSENT else key in arguments and _same(value, arguments[key])
+        for key, value in expected["arguments"].items())
     return ok, got
 
 
@@ -360,7 +383,7 @@ def _example(value):
     if isinstance(value, dict):
         if "$unordered" in value:
             return [_example(v) for v in reversed(value["$unordered"])]  # reversed: proves order is ignored
-        return value.get("example") if "$regex" in value else {k: _example(v) for k, v in value.items()}
+        return value.get("example") if "$regex" in value else {k: _example(v) for k, v in value.items() if v != ABSENT}
     return [_example(v) for v in value] if isinstance(value, list) else value
 
 
@@ -383,7 +406,8 @@ def _tool_item_problems(item):
     schema = tool.get("parameters") or {}
     properties = schema.get("properties", {})
     problems += [f"argument {k} is not in the schema" for k in answer["arguments"] if k not in properties]
-    problems += [f"required argument {k} missing" for k in schema.get("required", ()) if k not in answer["arguments"]]
+    problems += [f"required argument {k} missing" for k in schema.get("required", ())
+                 if answer["arguments"].get(k, ABSENT) == ABSENT]
     return problems + [f"a $regex value needs an 'example' matching it: {p}" for p in _regex_problems(answer["arguments"])]
 
 

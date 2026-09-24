@@ -36,6 +36,15 @@ Owner files: `src/llm_configurator/evals.py`, `src/llm_configurator/evals/*.json
 | cod-031 | accept Firefox's `Array(3) [ 1, 10, 9 ]` | correct reply failed |
 | cod-053 | accept "the stack", "stack data structure" | correct reply failed |
 | cod-054 | accept LaTeX `O(\log n)`, `$O(\log n)$`, `O(log_2 n)`, "O(log n) time", Θ | correct replies failed |
+| gen-003, gen-014 (pass 2) | accept "Tōkyō", "Iron, Fe" | correct replies failed |
+| gen-037 (pass 2) | accept "No — not necessarily" / "No: …" | correct replies failed |
+| doc-015 (pass 2) | dropped the `( \(.*\))?` tail, allow "Saltmarsh Travel 24-hour line: …" | the tail accepted "0161 550 3020 (or 0770 214 889)" |
+| doc-046 (pass 2) | accept "Ines Carvalho, Head of People" | correct reply failed |
+| agt-005 (pass 2) | brackets must balance | "(4817*36" passed |
+| agt-018 (pass 2) | `due_date` must be absent (`$absent`) | "no due date though", yet a due date passed |
+| agt-019 (pass 2) | narrower query pattern (album + artist forms only) | "Glass Orchard by Coldplay" passed |
+| agt-037 (pass 2) | `min_rating` must be absent; "$60" accepted | an invented rating filter passed; "$60" failed |
+| agt-038 (pass 2) | line items in any order (`$unordered`) | the order of invoice lines is not part of the answer |
 | cod-024 | no item change: now wrong-case replies fail (see checker) | `hop-3` passed for `HOP-3` |
 
 ## Checker fixes (`evals.py`)
@@ -47,6 +56,14 @@ Owner files: `src/llm_configurator/evals.py`, `src/llm_configurator/evals/*.json
 - Numbers: fractions and mixed numbers (`12/5`, `2 2/5`, `16½`), number words up to ninety-nine ("forty-two", "one year"), `€`/`£`, and unit powers (`cm²`, `m^2` no longer count as an extra number).
 - `a.m.`/`p.m.` normalise to `am`/`pm`. Multiple-choice replies `(b)` and `b)` read as `b`.
 - Tool calls: `{"$unordered": [...]}` for set-like list arguments (the validator checks these too), and a `functions.`/`tools.` name prefix is accepted. A plain-text "no tool fits" still **fails** a `none` item: the prompt asks for `{"name": "none", …}`, and following the format is part of what the agentic quiz tests.
+- **Second-pass fixes** (the adversarial reviewer's patch plus follow-ups):
+  - A bracketed note is dropped only when it is harmless. A note with a hedge word or "?" ("4 (I think)", "4 (?)"), a bare rival value ("12:05 (11:20)", "No (yes)") or a retraction ("(not the right number)") keeps the whole answer, which then fails. "4 (not 5)" and "20.2 (60.6/3)" still count.
+  - The "=" reading is skipped when the line lists several things ("Omar = 21, Priya = 17"). With exactly one "=", the left side is read too ("2.4 hours = 144 minutes").
+  - The single-number fallback refuses bounds, magnitudes and hedges: "at least 4", "<4", "4 thousand", "4k", "one hundred", "one half", "minus 4", "maybe 4", "4 or so", "4 (I think)".
+  - An en or em dash before a number is a minus sign ("–3").
+  - A final answer followed by "?" is a guess and fails ("12:05 p.m.?").
+  - `find_bug_line`: "Line 10: hi = mid + 1" reads as 10, but "Line 10 or 11" does not.
+  - Tool items can mark an optional argument the request rules out as `{"$absent": true}`.
 - `truncated` now counts only wrong answers that hit the length limit.
 
 ## Seams
@@ -62,6 +79,13 @@ Owner files: `src/llm_configurator/evals.py`, `src/llm_configurator/evals/*.json
 - **Reveal shape**: each `mapping` row now also carries the slot letters at top level (`{"A": label, "B": label, "item", "slots", "vote", "winner"}`), and the response has `"labels": {label: friendly name}`, as pinned in FIXUPS.md. `start_comparison`/`run_comparison` take an optional `names={label: friendly}`. Labels may now be up to 600 characters, to fit candidate ids.
 - **Store record shapes**: evals takes no store for quizzes. The pinned quiz record is written by `app.py` (see Requests).
 
+## Known, accepted leniency
+
+- A wrong unit after the right number still passes ("2.4 days" for 2.4 hours, "25,000 mm²"). This is the same design choice that lets "42 apples" answer 42. A per-item reject list was tried, but it rejected correct conversions such as "2.5 m² = 25,000 cm²".
+- A note that is neither a hedge nor a bare value is dropped. So "0161 550 3020 (Joaquim's mobile)", "bird (with consent)", "2026-03-06 (Thursday)" (right date, wrong weekday) and "2.4 hours (2 hours 40 minutes)" pass. Telling a contradicting note from shown working ("20.2 (60.6/3)") would take reading comprehension.
+- Loose tool arguments: agt-029 text "Plumber", agt-019 volume "30%", agt-038 "sack of flour sacks". The reviewer also flagged cod-054 "O(log2n)" and agt-005 "4817 X 36", but those are correct.
+- "5 = 4" passes for a key of 4. It is nonsensical, and no model was seen writing it.
+
 ## Requests
 
 - **api-cli (`app.py`)**
@@ -75,7 +99,7 @@ Owner files: `src/llm_configurator/evals.py`, `src/llm_configurator/evals/*.json
 
 ## Test evidence
 
-- `python3 -m unittest tests.test_evals`: 39 tests, OK (28 before). The new tests cover:
+- `python3 -m unittest tests.test_evals`: 41 tests, OK (28 before). The pass-2 probe scripts (about 400 replies) were re-run after the fixes: the false positives on changed items dropped from 27 to 22. Every remaining one is listed under "Known, accepted leniency" (two of them are actually correct). The new tests cover:
   - tricky replies ("14"/"-4"/".4"/"4 or 5"/"not 4"/"12 = 3 x 4" for key 4, `.7`, `16½`, `25,000 cm²`, the unicode minus, "forty-two", `(b)`)
   - case and spacing in program output
   - reasoning tags and template tokens

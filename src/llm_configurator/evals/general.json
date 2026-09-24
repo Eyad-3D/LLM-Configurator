@@ -24,7 +24,7 @@
       "prompt": "What is the capital city of Japan? Reply with the city name only.",
       "answer": "tokyo",
       "accept": [
-        "tokyo(,? japan)?"
+        "t[oō]ky[oō](,? japan)?"
       ]
     },
     {
@@ -112,7 +112,7 @@
       "prompt": "Which chemical element has the symbol Fe? Reply with the element name only.",
       "answer": "iron",
       "accept": [
-        "iron( \\(fe\\))?"
+        "iron(,? \\(?fe\\)?)?"
       ]
     },
     {
@@ -283,7 +283,7 @@
       "prompt": "All blickets are green. Some green things are round. Jojo is a blicket. Must Jojo be round? Reply with yes or no.",
       "answer": "no",
       "accept": [
-        "no,? (not necessarily|it need not be|jojo need not be round)"
+        "no( ?[,;:—–-] ?| )(not necessarily|it need not be|jojo need not be round|jojo is not necessarily round)"
       ]
     },
     {

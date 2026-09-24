@@ -150,7 +150,7 @@
       "prompt": "What phone number should be called if the tour leader cannot be reached in an emergency? Give the number.",
       "answer": "0161 550 3020",
       "accept": [
-        "(the )?(saltmarsh travel[^0-9]*)?\\(?0161\\)?[ -]?550[ -]?3020( \\(.*\\))?"
+        "(the )?(saltmarsh travel( 24-hour)?( line| number| helpline)?( on|:|,| -)? )?\\(?0161\\)?[ -]?550[ -]?3020"
       ]
     },
     {
@@ -434,7 +434,7 @@
       "prompt": "Who approved this policy? Give the full name.",
       "answer": "Ines Carvalho",
       "accept": [
-        "in[eéê]s carvalho"
+        "in[eéê]s carvalho(,? (head of people|\\(head of people\\)))?"
       ]
     },
     {

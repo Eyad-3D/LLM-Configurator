@@ -177,6 +177,31 @@ class TrickyReplyTests(unittest.TestCase):
         self.assertTrue(self.check("1", "Answer: one year"))
         self.assertTrue(self.check("12:05", "Answer: 12:05 p.m.", accept=["12[:.]05( ?pm)?"]))
 
+    def test_hedges_bounds_and_magnitudes_are_not_the_answer(self):
+        for reply in ("4 (not sure)", "4 (I think)", "4 (?)", "4 (5?)", "4 (5)", "4 (vs 5)", "4 (could be 5)",
+                      "x = 5, y = 4", "Alice = 12, Bob = 4", "4 thousand", "4k", "4 dozen", "minus 4", "–4", "<4",
+                      "at least 4", "maybe 4", "4 or so", "4 (maybe more)"):
+            self.assertFalse(self.check("4", "Answer: " + reply), reply)
+        for reply in ("one hundred", "one third", "one half"):
+            self.assertFalse(self.check("1", "Answer: " + reply), reply)
+        self.assertTrue(self.check("-3", "Answer: –3"))  # en dash typed as minus
+        self.assertTrue(self.check("20.2", "Answer: 20.2 (60.6/3)"))
+        self.assertTrue(self.check("20.2", "Answer: 20.2 (60.6 / 3)"))
+        for reply in ("4 (not 5)", "4 = 2 + 2", "4 (2 + 2)", "3 + 1 = 4"):
+            self.assertTrue(self.check("4", "Answer: " + reply), reply)
+        self.assertFalse(self.check("12:05", "Answer: 12:05 (11:20)", accept=["12[:.]05( ?pm)?"]))
+        self.assertFalse(self.check("no", "Answer: No (yes)"))
+        self.assertFalse(self.check("12:05", "Answer: 12:05 p.m.?", accept=["12[:.]05( ?pm)?"]))
+        self.assertFalse(self.check("4", "Answer: **4?**"))
+        self.assertFalse(self.check("0161 550 3020", "Answer: 0161 550 3020 (not the right number)"))
+        self.assertTrue(self.check("0161 550 3020", "Answer: 0161 550 3020 (not 0770 214 889)"))
+
+    def test_bug_line_answers_may_quote_the_line(self):
+        for reply in ("Line 10: hi = mid + 1", "line 10 (hi = mid + 1)", "10 - the loop never ends", "Line 10"):
+            self.assertTrue(self.check("10", "Answer: " + reply, kind="find_bug_line"), reply)
+        for reply in ("Line 10 or 11", "Line 9: x = 10", "11"):
+            self.assertFalse(self.check("10", "Answer: " + reply, kind="find_bug_line"), reply)
+
     def test_letters_and_answer_markers(self):
         for reply in ("Answer: B", "Answer: (b)", "Answer: b)", "The answer is:\n**B**"):
             self.assertTrue(self.check("b", reply, kind="choice"), reply)
@@ -216,6 +241,11 @@ class TrickyReplyTests(unittest.TestCase):
                       '{"name": "create_event", "arguments": {"title": "Sync", "attendees": "ana@x.test, raj@x.test"}}',
                       '{"name": "other.create_event", "arguments": {"title": "Sync", "attendees": ["ana@x.test", "raj@x.test"]}}'):
             self.assertFalse(evals.check_tool_call(item, reply)[0], reply)
+        ruled_out = {**item, "answer": {"name": "create_event", "arguments": {"title": "Sync", "attendees": {"$absent": True}}}}
+        self.assertEqual(evals.validate_quiz({"version": 1, "items": [ruled_out]}), [])
+        self.assertTrue(evals.check_tool_call(ruled_out, '{"name": "create_event", "arguments": {"title": "Sync"}}')[0])
+        self.assertFalse(evals.check_tool_call(
+            ruled_out, '{"name": "create_event", "arguments": {"title": "Sync", "attendees": []}}')[0])
         none_item = {**item, "answer": {"name": "none", "arguments": {}}}
         self.assertFalse(evals.check_tool_call(none_item, "No tool fits this request.")[0])  # format is part of the test
         bad = {**item, "answer": {"name": "create_event", "arguments": {"attendees": {"$unordered": [{"$regex": "a+"}]}}}}

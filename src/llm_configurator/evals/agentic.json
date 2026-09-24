@@ -88,7 +88,7 @@
         "name": "get_weather",
         "arguments": {
           "city": {
-            "$regex": "(lisbon|lisboa)(,? (portugal|pt))?",
+            "$regex": "(lisbon|lisboa)(,? ?(portugal|pt))?",
             "example": "Lisbon"
           }
         }
@@ -397,7 +397,7 @@
         "name": "calculator",
         "arguments": {
           "expression": {
-            "$regex": "\\(?\\s*(4817\\s*[*x×·]\\s*36|36\\s*[*x×·]\\s*4817)\\s*\\)?",
+            "$regex": "4817\\s*[*x×·]\\s*36|36\\s*[*x×·]\\s*4817|\\(\\s*(4817\\s*[*x×·]\\s*36|36\\s*[*x×·]\\s*4817)\\s*\\)",
             "example": "4817*36"
           }
         }
@@ -1236,11 +1236,11 @@
         "name": "get_distance",
         "arguments": {
           "origin": {
-            "$regex": "lyon(,? (france|fr))?",
+            "$regex": "lyon(,? ?(france|fr))?",
             "example": "Lyon"
           },
           "destination": {
-            "$regex": "grenoble(,? (france|fr))?",
+            "$regex": "grenoble(,? ?(france|fr))?",
             "example": "Grenoble"
           },
           "unit": "km"
@@ -1349,7 +1349,10 @@
             "$regex": "(renew( the| my)? (car|auto|vehicle) insurance( policy)?|(car|auto|vehicle) insurance( policy)? renewal|renew( the| my)? insurance (for|on) (the|my) car)",
             "example": "renew car insurance"
           },
-          "priority": "high"
+          "priority": "high",
+          "due_date": {
+            "$absent": true
+          }
         }
       }
     },
@@ -1389,7 +1392,7 @@
         "name": "play_music",
         "arguments": {
           "query": {
-            "$regex": ".*\\bglass orchard\\b.*",
+            "$regex": "(the )?'?glass orchard'?( album)?(,? ?(by|-|–|—|:) ?(the )?velvet mile)?|(the )?velvet mile ?(-|–|—|:|,)? ?'?glass orchard'?( album)?|(album:? ?)?'?glass orchard'?,? (artist:? ?)?(by )?(the )?velvet mile",
             "example": "Glass Orchard by the Velvet Mile"
           },
           "shuffle": true,
@@ -2295,7 +2298,7 @@
             "example": "backpacks"
           },
           "max_price": {
-            "$regex": "60(\\.0+)?|59\\.99",
+            "$regex": "\\$?60(\\.0+)?|\\$?59\\.99",
             "example": "60"
           },
           "colors": {
@@ -2304,7 +2307,10 @@
               "green"
             ]
           },
-          "in_stock": true
+          "in_stock": true,
+          "min_rating": {
+            "$absent": true
+          }
         }
       }
     },
@@ -2360,24 +2366,26 @@
         "arguments": {
           "customer": "Harbor Bakery",
           "currency": "EUR",
-          "line_items": [
-            {
-              "description": {
-                "$regex": "(sacks? of )?flour( sacks?)?",
-                "example": "flour sacks"
+          "line_items": {
+            "$unordered": [
+              {
+                "description": {
+                  "$regex": "(sacks? of )?flour( sacks?)?",
+                  "example": "flour sacks"
+                },
+                "quantity": 3,
+                "unit_price": 18.5
               },
-              "quantity": 3,
-              "unit_price": 18.5
-            },
-            {
-              "description": {
-                "$regex": "delivery( fee| charge)?",
-                "example": "delivery fee"
-              },
-              "quantity": 1,
-              "unit_price": 12
-            }
-          ]
+              {
+                "description": {
+                  "$regex": "delivery( fee| charge)?",
+                  "example": "delivery fee"
+                },
+                "quantity": 1,
+                "unit_price": 12
+              }
+            ]
+          }
         }
       }
     },
