@@ -26,6 +26,8 @@ MAX_PASSES = 3
 CONFIRM_REPETITIONS = 5
 DEFAULT_TIMEOUT = 900
 BATCH_PAIRS = [(512, 512), (1024, 256), (2048, 512)]
+MAX_BENCH_DEPTH = 32768  # same cap as testing.MAX_BENCH_DEPTH: deeper costs hours on a CPU
+SETTINGS_KEYS = ["flash_attn", "cache_type_k", "cache_type_v", "batch", "ubatch", "n_cpu_moe"]  # as in speed tests
 OOM_TEXT = re.compile(r"out of memory|failed to allocate|cudaMalloc failed|ErrorOutOfDeviceMemory|"
                       r"unable to allocate|not enough memory|insufficient memory", re.IGNORECASE)
 
@@ -199,23 +201,40 @@ def score(tps, pp_tps, goal):
 _PATH = re.compile(r"'[^']*[/\\\\][^']*'|\"[^\"]*[/\\\\][^\"]*\"|(?:[A-Za-z]:)?[/\\\\][^\s'\"]+")
 
 
+NO_CAUSE = ("llama.cpp could not load the model with these settings and gave no reason. They may need more memory "
+            "than is free, or the file may be damaged.")
+PROBABLY_MEMORY = ("Probably not enough memory: a lighter setting of the same model worked just before, and llama.cpp "
+                   "gave no other reason for this one.")
+# Lines that mention memory without being the failure (e.g. CUDA's "failed to allocate … pinned memory", which
+# falls back and carries on), so they never decide the reason.
+_NOT_FATAL = re.compile(r"warning|falling back|DEPRECATED", re.I)
+
+
 def bench_failure(stderr, stdout="", returncode=None, timed_out=False):
-    """One plain sentence for a failed llama-bench run, without file paths (they stay on this computer)."""
-    text = (stderr or "") + "\n" + (stdout or "")
+    """One plain sentence for a failed llama-bench run, without file paths (they stay on this computer).
+
+    Only stderr is read: with `-o json` stdout holds just the opening "[" of the array. A reason is given only
+    when llama.cpp printed one (it does with `-v`); "failed to load model" alone says nothing about the cause."""
     if timed_out:
         return "The test ran out of time."
-    if OOM_TEXT.search(text):
-        return "Ran out of memory with these settings."
+    # "DEPRECATED: … instead." is written without a newline, so it can be glued to the front of the next line.
+    text = re.sub(r"(DEPRECATED:[^\n]*? instead\.)", r"\1\n", stderr or "")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    fatal = [line for line in lines if not _NOT_FATAL.search(line)]
     if re.search(r"unknown argument|invalid parameter|error: invalid|invalid device", text, re.I):
         return "This llama.cpp version does not support one of these settings."
-    cause = re.search(r"error loading model: (.+)", text)
+    cause = next((m.group(1).strip() for line in reversed(fatal)
+                  if (m := re.search(r"error loading model: (.+)", line))), None)
+    if cause and OOM_TEXT.search(cause):
+        return "Ran out of memory with these settings."
     if cause:
-        return f"llama.cpp could not load the model: {_PATH.sub('<file>', cause.group(1).strip())[:200]}"
+        return f"llama.cpp could not load the model: {_PATH.sub('<file>', cause)[:200]}"
+    if any(OOM_TEXT.search(line) for line in fatal):
+        return "Ran out of memory with these settings."
+    if re.search(r"quantized V cache requires flash.?attn|V cache quantization requires flash.?attn", text, re.I):
+        return "A compressed notepad (KV cache) needs flash attention turned on."
     if "failed to load model" in text or "failed to create context" in text:
-        # llama-bench prints no reason (out of memory looks the same as a damaged file).
-        return ("llama.cpp could not load the model with these settings. They may need more memory than is free, "
-                "or the file may be damaged.")
-    lines = [line.strip() for line in (stderr or "").splitlines() if line.strip()]
+        return NO_CAUSE
     tail = next((line for line in reversed(lines) if "error" in line.lower()), lines[-1] if lines else "no error output")
     return f"llama-bench stopped with an error ({returncode}): {_PATH.sub('<file>', tail)[:200]}"
 
@@ -296,7 +315,7 @@ def _gain_text(new, old, goal):
 def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal="generation", memory_check=None,
          progress=None, cancel=None, allow_kv_compression=False, run_bench=None, clock=time.monotonic,
          n_prompt=512, n_gen=128, depth=None, repetitions=2, confirm_repetitions=CONFIRM_REPETITIONS,
-         min_gain=MIN_GAIN, timeout=DEFAULT_TIMEOUT):
+         min_gain=MIN_GAIN, timeout=DEFAULT_TIMEOUT, verify_full_depth=True):
     """Coordinate search over llama.cpp settings; returns the fastest safe configuration found."""
     if goal not in GOALS:
         raise ValueError("goal must be generation, balanced or prompt")
@@ -336,10 +355,12 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
     def changes_of(config):
         return {k: v for k, v in config.items() if base.get(k) != v}
 
-    def measure(configs, step, reps):
-        """Run candidate configs (one process when they form a comma-list product); returns results per config."""
+    def measure(configs, step, reps, at_depth=None, deadline=None):
+        """Run candidate configs (one process when they form a comma-list product); returns results per config.
+        `at_depth`/`deadline` are for the final full-length check, whose cost says nothing about a search trial."""
+        at_depth = depth if at_depth is None else at_depth
         results = [None] * len(configs)
-        runnable = []
+        runnable, worked = [], []  # worked: risk keys of the settings that ran in this step
         for i, config in enumerate(configs):
             if safe(config):
                 runnable.append(i)
@@ -357,13 +378,14 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
             sweep = {k: list(dict.fromkeys(c[k] for c in group_configs)) for k in FLAGS
                      if len({c[k] for c in group_configs}) > 1}
             head = group_configs[0]
-            argv = prefix + bench_args(head, n_prompt, n_gen, depth, reps, sweep or None)
+            argv = prefix + bench_args(head, n_prompt, n_gen, at_depth, reps, sweep or None)
             # Nothing is known about the model's speed before the baseline, so it gets the full timeout.
-            deadline = timeout if step == "baseline" else min(timeout, max(remaining() + per_combo(reps), 5))
-            outcome = run_bench(argv, launch.server_env(head), deadline, cancel)
+            limit = deadline() if deadline else (timeout if step == "baseline" else min(timeout, max(remaining() + per_combo(reps), 5)))
+            outcome = run_bench(argv, launch.server_env(head), limit, cancel)
             rows = parse_rows(outcome.get("stdout") or "")
             seconds = float(outcome.get("seconds") or 0) / len(indexes)
-            costs.append(seconds * (repetitions + 1) / (reps + 1))
+            if deadline is None:
+                costs.append(seconds * (repetitions + 1) / (reps + 1))
             failure = _plain_failure(outcome) if outcome.get("returncode") or outcome.get("timed_out") else None
             blamed = False
             for i in indexes:
@@ -379,9 +401,15 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
                           "row": tg_row or next((r for r in mine if _speed(r)), None),
                           "timed_out": bool(outcome.get("timed_out")) and not ok}
                 if not ok:
+                    reason = failure
+                    if reason == NO_CAUSE and any(risk < _risk(config) for risk in worked):
+                        # A lighter setting just loaded the same file (a run goes from least to most memory-hungry).
+                        reason = PROBABLY_MEMORY
                     result["error"] = ("Not tested: an earlier setting in the same run stopped llama-bench."
-                                       if blamed else failure or "llama-bench gave no usable result for these settings.")
+                                       if blamed else reason or "llama-bench gave no usable result for these settings.")
                     blamed = blamed or bool(failure)
+                if ok:
+                    worked.append(_risk(config))
                 results[i] = result
                 trials.append({"changes": changes_of(config), "tps": result["tps"], "pp_tps": result["pp_tps"],
                                "seconds": round(seconds, 2), "status": result["status"], "step": step,
@@ -482,10 +510,60 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
             best = base
     if best == base:
         best_result, best_row = dict(baseline), first["row"]
+    search = {"depth": depth, "baseline": dict(baseline), "best_result": dict(best_result),
+              "improvement": round(score(best_result["tps"], best_result["pp_tps"], goal) /
+                                   score(baseline["tps"], baseline["pp_tps"], goal), 4)}
+    measured_depth, depth_notes = depth, []
+    full = min(max(0, base["context"] - n_prompt - n_gen), MAX_BENCH_DEPTH)
+    if verify_full_depth and stopped != "cancelled" and full > depth:
+        # The search ran with a short conversation in memory to save time. The start and the winner are measured
+        # once more at the user's own length (-d context-640, like the speed test), so the saved speed is real there.
+        configs = [base] if best == base else [base, best]
+        pp_speeds = [r["pp_tps"] for r in (baseline, best_result) if r.get("pp_tps")]
+        # llama-bench re-reads the whole depth, untimed, before every repetition (plus a warm-up) of both tests.
+        # Reading slows down as the conversation grows; 1.5x is a rough allowance for that.
+        cost = (len(configs) * ((repetitions + 1) * 2 * full / min(pp_speeds) * 1.5 + (per_combo(repetitions) or 0))
+                if pp_speeds else None)
+        if cost is not None and cost <= max(remaining(), 0) + (per_combo(repetitions) or 0):
+            report(f"Measuring again with {full:,} tokens of conversation in memory")
+            try:
+                long = measure(configs, "full_depth", repetitions, at_depth=full,
+                               deadline=lambda: min(timeout, max(remaining() + (per_combo(repetitions) or 0), 5)))
+            except Cancelled:
+                stopped, long = "cancelled", None
+            if long is not None:
+                long_base, long_best = long[0], long[-1]
+                base_ok = long_base["status"] == "ok" and score(long_base["tps"], long_base["pp_tps"], goal)
+                best_ok = long_best["status"] == "ok" and score(long_best["tps"], long_best["pp_tps"], goal)
+                if not base_ok:
+                    depth_notes.append("The check with your full conversation length did not work for your starting "
+                                       f"settings ({long_base.get('error') or 'no speed was measured'}), so the speeds "
+                                       f"come from a shorter test with {depth:,} tokens in memory.")
+                else:
+                    if best != base and not best_ok:
+                        depth_notes.append("The tuned settings did not work with your full conversation length "
+                                           f"({long_best.get('error') or 'no speed was measured'}), so your starting "
+                                           "settings are kept.")
+                        best, long_best = base, long_base
+                    elif best != base and best_ok <= base_ok:
+                        depth_notes.append("With your full conversation length in memory the tuned settings were not "
+                                           "faster, so your starting settings are kept.")
+                        best, long_best = base, long_base
+                    baseline = {"tps": long_base["tps"], "pp_tps": long_base["pp_tps"]}
+                    best_result = {"tps": long_best["tps"], "pp_tps": long_best["pp_tps"]}
+                    best_row, measured_depth = long_best["row"] or best_row, full
+        elif stopped != "cancelled":
+            depth_notes.append(f"There was no time left to measure with your full conversation length, so the speeds "
+                               f"come from a shorter test with {depth:,} tokens in memory.")
+    if best == base:
         notes.insert(0, "Your starting settings were already the fastest we found.")
     else:
         notes[:0] = [f"Overall, the tuned settings made {_gain_text(best_result, baseline, goal)} than where we started."] + \
             step_notes
+    if measured_depth == full and full > depth:
+        notes.append(f"These speeds were measured with {full:,} tokens of conversation already in memory, "
+                     "as in a long chat at your chosen length.")
+    notes += depth_notes
     improvement = score(best_result["tps"], best_result["pp_tps"], goal) / score(baseline["tps"], baseline["pp_tps"], goal)
     failed = sum(t["status"] == "failed" for t in trials)
     skipped = sum(t["status"] == "skipped_memory" for t in trials)
@@ -500,9 +578,14 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
     return {"best": best, "baseline": baseline, "best_result": best_result, "improvement": round(improvement, 4),
             "trials": trials, "stopped": stopped, "notes": notes, "goal": goal, "seconds": round(clock() - started, 1),
             "confirmed": confirmed is not None and best != base,
-            # How the speeds were measured. Not §2.3 `settings` (those are the llama.cpp settings in `best`).
+            # How the search trials were measured (a short conversation, to save time) and what they found.
             "bench": {"n_prompt": n_prompt, "n_gen": n_gen, "depth": depth, "repetitions": repetitions},
-            "depth": depth, "drift": round(drift, 4), **_row_facts(best_row, best)}
+            "search": search,
+            # §2.3 fields: `depth` is the conversation length best_result/baseline were measured at, repeated in
+            # `settings.depth` next to the llama.cpp settings of `best` (engine.matching_tuned reads it there).
+            "depth": measured_depth,
+            "settings": {**{k: best[k] for k in SETTINGS_KEYS}, "depth": measured_depth},
+            "drift": round(drift, 4), **_row_facts(best_row, best)}
 
 
 def _row_facts(row, config):
