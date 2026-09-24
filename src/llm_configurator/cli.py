@@ -7,7 +7,10 @@ started llama.cpp processes are stopped.
 import argparse
 from dataclasses import fields
 import json
+import os
 from pathlib import Path
+import secrets
+import shutil
 import sys
 import time
 
@@ -23,6 +26,9 @@ from .server import serve
 from .storage import Store, models_dir
 
 RUN_POLL_SECONDS = 1.0
+# Stages that report elapsed time against a timeout, not real progress: show seconds, never a percentage.
+OPEN_ENDED = {"loading", "starting", "scanning"}
+PAUSED = "Paused. Run the same command again to resume."
 
 
 def parser():
@@ -32,7 +38,7 @@ def parser():
     commands = root.add_subparsers(dest="command", required=True, metavar="COMMAND")
     commands.add_parser("calibrate", help="Measure synthetic hardware speed and cache it locally; no model download")
     commands.add_parser("scan", help="Print current hardware and process memory as JSON")
-    commands.add_parser("refresh", help="Fetch model metadata and optional AA scores; no weight downloads")
+    commands.add_parser("refresh", help="Fetch model metadata and optional AA scores; no weight downloads (Ctrl+C stops it)")
     models = commands.add_parser("models", help="List cached variants and their exact IDs, or add/remove your own repos",
                                  description="Without a subcommand, lists every model variant and its exact ID.")
     model_actions = models.add_subparsers(dest="models_action", metavar="ACTION")
@@ -86,7 +92,7 @@ def parser():
     local = commands.add_parser("local", help="List, find or register model files already on this computer")
     local.add_argument("--scan", action="store_true", help="Look in Hugging Face, LM Studio, Ollama and the models folder")
     local.add_argument("--dir", dest="dirs", type=Path, action="append", default=[], help="Also look in this folder (repeatable)")
-    local.add_argument("--add", type=Path, help="Register one GGUF file so you can test and run it")
+    local.add_argument("--add", type=Path, help="Register one GGUF file (any part of a split model) so you can test and run it")
     local.add_argument("--json", action="store_true")
 
     def model_options(command, context=True):
@@ -103,6 +109,8 @@ def parser():
     test.add_argument("--kind", choices=list(app.TEST_KINDS), default="full",
                       help="smoke: one question; speed: reading/writing speed and memory; full: both")
     test.add_argument("--tuned", action="store_true", help="Use the best saved tune")
+    test.add_argument("--min-tps", type=float, default=15,
+                      help="Writing speed you need, in tokens/s; slower results say 'works, but slowly' (default 15, 0 to skip)")
     tune = commands.add_parser("tune", help="Try settings automatically to find the fastest ones for this computer")
     model_options(tune)
     tune.add_argument("--budget", type=int, default=300, help="Time limit in seconds, 60 to 1800 (default 300)")
@@ -141,7 +149,7 @@ def parser():
     benchmark = commands.add_parser("bench", help="Run llama-bench on an existing GGUF; consumes local compute")
     benchmark.add_argument("variant_id")
     benchmark.add_argument("--model", required=True, type=Path)
-    benchmark.add_argument("--executable", default="llama-bench")
+    benchmark.add_argument("--executable", help="llama-bench to use (default: the one from 'llm-config runtime status')")
     benchmark.add_argument("--context", type=int, default=8192)
     benchmark.add_argument("--gpu-layers", type=int, default=0)
     benchmark.add_argument("--gpu-index", type=int, default=0)
@@ -154,7 +162,9 @@ def print_json(value):
 
 
 def size(value):
-    return f"{value / GIB:.2f} GiB" if value is not None else "unknown size"
+    if value is None:
+        return "unknown size"
+    return f"{value / GIB:.2f} GiB" if value >= GIB / 2 else f"{value / 1024**2:.1f} MB"
 
 
 def duration(seconds):
@@ -171,10 +181,15 @@ class ProgressBar:
         self.width, self.last, self.drawn, self.shown = width, None, 0, 0.0
 
     def describe(self, value):
+        """Plain words first (the job's own message, else its stage), then the numbers."""
         done, total = value.get("done") or 0, value.get("total")
-        stage = value.get("step") or value.get("stage") or "working"
-        parts = [str(stage)]
-        in_bytes = "bytes_per_second" in value or (total or 0) > 10 * 1024**2
+        stage = str(value.get("stage") or value.get("step") or "working")
+        parts = [str(value.get("message") or stage.replace("_", " ").capitalize())]
+        if stage in OPEN_ENDED:
+            total = None  # a load timeout is not a finish line
+            if done:
+                parts.append(f"{duration(done)} so far")
+        in_bytes = "bytes_per_second" in value or value.get("unit") == "bytes" or (total or 0) > 1024**2
         if total:
             fraction = max(0.0, min(1.0, done / total))
             parts.append(f"{fraction * 100:3.0f}%")
@@ -183,9 +198,7 @@ class ProgressBar:
             parts.append(f"{value['bytes_per_second'] / 1024**2:.1f} MB/s")
         if value.get("eta_seconds") is not None:
             parts.append(f"about {duration(value['eta_seconds'])} left")
-        if value.get("message"):
-            parts.append(str(value["message"]))
-        return parts, (done / total if total else None)
+        return parts, (max(0.0, min(1.0, done / total)) if total else None)
 
     def update(self, value):
         if not value:
@@ -196,12 +209,14 @@ class ProgressBar:
                 return
             filled = int(round((fraction or 0) * self.width))
             bar = f"[{'#' * filled}{'-' * (self.width - filled)}] " if fraction is not None else ""
-            line = (bar + " · ".join(parts))[:max(20, 118)]
+            width = shutil.get_terminal_size((80, 20)).columns - 1  # one short of the edge, so it never wraps
+            line = (bar + " · ".join(parts))[:max(20, width)]
             self.stream.write("\r" + line + " " * max(0, self.drawn - len(line)))
             self.stream.flush()
             self.drawn, self.shown = len(line), time.monotonic()
             return
-        key = (parts[0], None if fraction is None else int(fraction * 10), value.get("message") if fraction is None else None)
+        stage = value.get("stage") or value.get("step")
+        key = (stage, None if fraction is None else int(fraction * 10), parts[0] if fraction is None else None)
         if key != self.last:
             self.stream.write(" · ".join(parts) + "\n")
             self.stream.flush()
@@ -257,6 +272,8 @@ def show_runtime(info):
             print(f"  Folder: {info['directory']}")
         for name, command in (info.get("binaries") or {}).items():
             print(f"  {name}: {'ready' if command else 'missing'}")
+    if info.get("reason"):
+        print(f"  Why this build: {info['reason']}")
     for warning in info.get("warnings") or []:
         print(f"  Note: {warning}")
 
@@ -276,19 +293,50 @@ def show_test(result):
         print(f"  Memory: {memory['note']}")
 
 
+SETTING_WORDS = {"gpu_layers": "layers on the GPU", "threads": "CPU threads", "batch": "batch size",
+                 "ubatch": "micro-batch size", "flash_attn": "flash attention", "cache_type_k": "notepad format (keys)",
+                 "cache_type_v": "notepad format (values)", "n_cpu_moe": "expert layers kept on the CPU"}
+
+
 def show_tune(result):
+    """Both measured speeds with their own ratios; the tuner's `improvement` mixes them for goal=balanced/prompt."""
     baseline, best = result.get("baseline") or {}, result.get("best_result") or {}
-    if baseline.get("tps") and best.get("tps"):
-        print(f"Writing speed: {baseline['tps']:.1f} → {best['tps']:.1f} tokens/s ({(result.get('improvement') or 1):.2f}× as fast)")
-    changed = {k: v for k, v in (result.get("best") or {}).items() if k in app.TUNABLE}
-    if changed:
-        print("Best settings: " + ", ".join(f"{k}={v}" for k, v in changed.items()))
+    for key, label in (("tps", "Writing speed"), ("pp_tps", "Reading speed")):
+        before, after = baseline.get(key), best.get(key)
+        if before and after:
+            print(f"{label}: {before:.1f} -> {after:.1f} tokens/s ({after / before:.2f}x)")
+    changes = result.get("changes")
+    if changes is None:  # results from before `changes` existed
+        changes = {k: v for k, v in (result.get("best") or {}).items() if k in app.TUNABLE and v is not None}
+    changes = {k: v for k, v in changes.items() if v is not None}
+    if changes:
+        print("Changed settings: " + ", ".join(f"{SETTING_WORDS.get(k, k)} = {v}" for k, v in changes.items()))
     for note in result.get("notes") or []:
         print(f"  {note}")
-    print("Use them with --tuned on test, export or run.")
+    if changes and result.get("stopped") != "cancelled":
+        print("Use them with --tuned on test, export or run.")
+
+
+def _refresh_progress(progress):
+    """catalogue.refresh reports model counts, not the usual stage/done/total keys."""
+    def report(value):
+        done, total = value.get("models_done"), value.get("models_total")
+        progress({"stage": "refresh", "done": done or 0, "total": total or None,
+                  "message": f"Model {done} of {total}" if total else "Fetching benchmark scores", **value})
+    return report
+
+
+def _safe_streams():
+    """Redirected output on Windows uses the ANSI code page; never crash on a symbol it lacks."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
 
 
 def main(argv=None):
+    _safe_streams()
     args = parser().parse_args(argv)
     try:
         store = Store(args.data_dir)
@@ -300,11 +348,20 @@ def main(argv=None):
             store.put("calibration", result)
             print_json(result)
         elif command == "refresh":
-            print_json(refresh(store))
+            print_json(run_job(lambda progress, cancel: refresh(store, progress=_refresh_progress(progress), cancel=cancel),
+                               "Fetching model metadata"))
         elif command == "models":
             from . import catalogue
             if args.models_action == "add":
-                print_json(catalogue.add_entry(store, args.base_repo, args.gguf_repo))
+                catalogue.add_entry(store, args.base_repo, args.gguf_repo)
+                try:
+                    fetched = run_job(lambda progress, cancel: catalogue.refresh_entry(store, args.base_repo),
+                                      f"Fetching the file list for {args.base_repo}")
+                    print(f"Added {args.base_repo}: {fetched.get('variants', 0)} downloadable versions. "
+                          "See their IDs with: llm-config models")
+                except ValueError as error:
+                    print(f"Added {args.base_repo}, but its files could not be fetched yet ({error}). "
+                          "Try again later with: llm-config refresh")
             elif args.models_action == "remove":
                 print_json(catalogue.remove_entry(store, args.base_repo))
             else:
@@ -365,12 +422,13 @@ def main(argv=None):
             others = [app.find_variant(store, v) for v in dict.fromkeys(args.variant_ids)]
             if reference.id in {v.id for v in others}:
                 raise ValueError("Pick a different reference than the models you check")
-            result = run_job(app.quant_check_job(store, reference, others), f"Compression check against {reference.name} {reference.quant}")
+            result = run_job(app.quant_check_job(store, reference, others, scan(False)),
+                             f"Compression check against {reference.name} {reference.quant}")
             if args.json:
                 print_json(result)
             else:
                 for label, value in (result.get("results") or {}).items():
-                    print(f"{label}: {value.get('plain') or value}")
+                    print(f"{label}: {value.get('plain') if isinstance(value, dict) and value.get('plain') else value}")
                 for note in result.get("notes") or []:
                     print(f"  {note}")
         elif command == "download":
@@ -378,7 +436,10 @@ def main(argv=None):
         elif command == "bench":
             variant = app.find_variant(store, args.variant_id)
             print("Validating file and memory, then running a local generation benchmark…", file=sys.stderr, flush=True)
-            measurement = bench(variant, args.model, args.executable, args.context, args.gpu_layers, args.gpu_index, args.timeout)
+            executable = args.executable or app.binary(store, "llama-bench")[0]
+            measurement = bench(variant, args.model, executable, args.context, args.gpu_layers, args.gpu_index, args.timeout)
+            measurement.setdefault("id", secrets.token_hex(6))  # so `community share ID` can pick it
+            measurement.setdefault("kind", "bench")
             store.append("measurements", measurement)
             print_json(measurement)
         else:
@@ -400,6 +461,10 @@ def runtime_command(store, args):
         return 0
     if args.runtime_action == "install":
         info = run_job(app.runtime_install_job(store, args.allow_unverified), "Installing llama.cpp")
+        if (store.get("settings") or {}).get("runtime_dir"):
+            # `runtime use DIR` wins over the managed install in detect(); the user just asked for this one.
+            store.update("settings", lambda saved: {k: v for k, v in (saved or {}).items() if k != "runtime_dir"}, {})
+            info = {**runtime_install.detect(store), "reason": info.get("reason"), "warnings": info.get("warnings") or []}
     elif args.runtime_action == "install-archive":
         info = run_job(lambda progress, cancel: runtime_install.install_archive(store, args.path, progress=progress, cancel=cancel),
                        "Installing llama.cpp from the archive")
@@ -410,54 +475,84 @@ def runtime_command(store, args):
 
 
 def download_command(store, args):
-    from . import downloads
+    from . import discover, downloads
     variant = app.find_variant(store, args.variant_id)
-    directory = args.directory or models_dir(store)
-    if not args.directory:
-        existing = app.local_model(store, variant)
-        if existing:
-            print(f"Already on this computer: {existing}")
-            return 0
+    if variant.source == "local":
+        raise ValueError("This model is a file on your computer, so there is nothing to download.")
+    directory = (args.directory.expanduser().resolve() if args.directory else models_dir(store))
+    existing = run_job(lambda progress, cancel: app.local_model(store, variant, progress=progress, cancel=cancel),
+                       "Looking for a copy already on this computer")
+    if existing:
+        print(f"Already on this computer: {existing}")
+        return 0
     plan = downloads.plan(variant, directory)
     print(f"Download {variant.name} {variant.quant}: {size(plan['total_bytes'])} "
           f"({size(plan['remaining_bytes'])} still to fetch) into {directory}", file=sys.stderr, flush=True)
     if not plan.get("enough_space"):
         raise ValueError(f"Not enough disk space: {size(plan['remaining_bytes'])} needed plus 1 GiB spare, "
                          f"{size(plan.get('disk_free'))} free. Free some space or choose --directory.")
-    if not args.yes and input("Download this model? [y/N] ").strip().lower() != "y":
-        return 0
-    path = run_job(lambda progress, cancel: downloads.download_variant(variant, directory, progress=progress, cancel=cancel),
-                   f"Downloading {variant.name} {variant.quant}")
+    if not args.yes:
+        if not sys.stdin or not sys.stdin.isatty():
+            raise ValueError("Add --yes to download without a question (there is no keyboard input here).")
+        try:
+            answer = input("Download this model? [y/N] ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() != "y":
+            return 0
+    try:
+        path = run_job(lambda progress, cancel: downloads.download_variant(variant, directory, progress=progress, cancel=cancel),
+                       f"Downloading {variant.name} {variant.quant}")
+    except KeyboardInterrupt:
+        print(PAUSED, file=sys.stderr)
+        return 130
+    if args.directory:
+        try:  # outside the models folder, other commands only find it once it is registered
+            discover.add_file(store, path)
+        except ValueError as error:
+            print(f"Note: {error} Run: llm-config local --scan --dir \"{directory}\"", file=sys.stderr)
     print(path)
     return 0
 
 
+def _model_id(record):
+    return record.get("variant_id") or record.get("local_variant_id")
+
+
 def local_command(store, args):
+    from . import discover
     if args.add:
         record = run_job(app.add_local_job(store, args.add), f"Checking {args.add.name}")
-        variant = record["variant"]
         if args.json:
             print_json(record)
         else:
-            print(f"Registered {variant['name']} {variant['quant']}. Model ID: {variant['id']}")
+            label = "Matches a catalogue model" if record.get("variant_id") else "Registered as your own model"
+            print(f"{label}: {record.get('filename')}. Model ID: {record.get('model_id') or _model_id(record)}")
+            print("Use that ID with recommend, test, tune, quiz, export or run.")
         return 0
-    if args.scan or args.dirs:
-        files = run_job(app.scan_job(store, args.dirs), "Looking for model files")
+    dirs = [d.expanduser().resolve() for d in args.dirs]  # saved paths must work from any folder
+    if args.scan or dirs:
+        files = run_job(app.scan_job(store, dirs), "Looking for model files")
     else:
         files = store.get("local_files", [])
-    from . import discover
+    locations = discover.locations(store, dirs)
     if args.json:
-        print_json({"files": files, "locations": discover.locations(), "registered": store.get("local_variants", [])})
+        print_json({"files": files, "locations": locations, "registered": store.get("local_variants", [])})
         return 0
-    for location in discover.locations():
-        print(f"{'✓' if location.get('exists') else '·'} {location.get('source')}: {location.get('path')}")
+    for location in locations:
+        print(f"{'[x]' if location.get('exists') else '[ ]'} {location.get('source')}: {location.get('path')}")
     if not files:
         print("No model files found yet. Run: llm-config local --scan")
     for record in files:
-        match = record.get("variant_id") or "not in the catalogue"
-        print(f"{record.get('path')} ({size(record.get('size_bytes'))}) — {match}{'' if record.get('verified') else ', not verified'}")
+        if record.get("variant_id"):
+            match = f"Model ID: {record['variant_id']}{'' if record.get('verified') else ' (not verified yet)'}"
+        elif record.get("local_variant_id"):
+            match = f"not in the catalogue; your own Model ID: {record['local_variant_id']}"
+        else:
+            match = f"cannot be used: {record.get('gguf_error') or record.get('local_error') or 'incomplete'}"
+        print(f"{record.get('path')} ({size(record.get('size_bytes'))}) - {match}")
     for record in store.get("local_variants", []):
-        print(f"Registered: {record['path']} — Model ID: {record['variant']['id']}")
+        print(f"Registered: {record['path']} - Model ID: {record['variant']['id']}")
     return 0
 
 
@@ -482,7 +577,8 @@ def community_command(store, args):
 def model_command(store, args):
     variant, candidate, hardware = model_launch(store, args)
     if args.command == "test":
-        result = run_job(app.test_job(store, variant, candidate, hardware, args.kind, args.tuned), f"Testing {variant.name} {variant.quant}")
+        result = run_job(app.test_job(store, variant, candidate, hardware, args.kind, args.tuned, min_tps=args.min_tps or None),
+                         f"Testing {variant.name} {variant.quant}")
         print_json(result) if args.json else show_test(result)
         return 0 if result.get("verdict") != "failed" else 1
     if args.command == "tune":
@@ -500,23 +596,41 @@ def model_command(store, args):
                   f"likely between {(quiz.get('ci_low') or 0) * 100:.0f}% and {(quiz.get('ci_high') or 0) * 100:.0f}%)")
             if quiz.get("note"):
                 print(f"  {quiz['note']}")
-            if result.get("needle"):
-                print(f"Long-document recall: {result['needle'].get('plain') or result['needle'].get('summary') or 'see --json'}")
+            needle = result.get("needle")
+            if needle:
+                print(f"Long-document recall: {needle.get('found')} of {needle.get('total')} hidden facts found")
+                if needle.get("note"):
+                    print(f"  {needle['note']}")
         return 0
     if args.command == "export":
         result = app.export_config(store, variant, candidate, hardware, args.format, args.platform, args.tuned)
         if args.json:
             print_json(result)
             return 0
+        notes = result.get("notes") or []
         if args.output:
-            args.output.write_text(result["content"], encoding="utf-8")
+            write_export(args.output, result)
+            notes = [n for n in notes if "UTF-8 with BOM" not in n]  # write_export already did it
             print(f"Saved {args.output}", file=sys.stderr)
         else:
             print(result["content"])
-        for line in (result.get("instructions") or []) + (result.get("notes") or []):
+        for line in (result.get("instructions") or []) + notes:
             print(f"  {line}", file=sys.stderr)
         return 0
     return run_command(store, args, variant, candidate, hardware)
+
+
+def write_export(path, result):
+    """Bytes, not text mode, so Windows never turns a bash script's \n into \r\n.
+
+    PowerShell scripts get a BOM so Windows PowerShell 5.1 reads non-English paths correctly;
+    shell scripts become executable.
+    """
+    names = {str(path).lower(), str(result.get("filename") or "").lower()}
+    powershell = any(n.endswith(".ps1") for n in names)
+    path.write_bytes(result["content"].encode("utf-8-sig" if powershell else "utf-8"))
+    if os.name != "nt" and (any(n.endswith(".sh") for n in names) or result["content"].startswith("#!")):
+        path.chmod(path.stat().st_mode | 0o755)
 
 
 def run_command(store, args, variant, candidate, hardware):
