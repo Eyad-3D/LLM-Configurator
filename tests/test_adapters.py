@@ -75,7 +75,7 @@ class AdapterTests(unittest.TestCase):
     def test_hf_uses_real_file_size_and_skips_shards(self):
         responses = [{"sha": "base123"}, {"model_type": "qwen3", "num_hidden_layers": 32, "num_key_value_heads": 8,
                      "head_dim": 128, "max_position_embeddings": 32768}, {"sha": "gguf123", "siblings": [
-                         {"rfilename": "Model-Q4_K_M.gguf", "size": 12345, "lfs": {"sha256": "hash"}},
+                         {"rfilename": "Model-Q4_K_M.gguf", "size": 12345, "lfs": {"sha256": "ab" * 32}},
                          {"rfilename": "Model-Q8_0-00001-of-00002.gguf", "size": 12345}]}]
         with patch("llm_configurator.catalogue.get_json", side_effect=responses):
             variants = fetch_variants({"base_repo": "test/base", "gguf_repo": "test/gguf"})

@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -14,8 +15,12 @@ from llm_configurator.storage import Store
 GB = 10**9
 
 
+def digest(label):
+    return hashlib.sha256(label.encode()).hexdigest()
+
+
 def sibling(name, size, sha=None):
-    return {"rfilename": name, "size": size, "lfs": {"sha256": sha or f"sha-{name}", "size": size}}
+    return {"rfilename": name, "size": size, "lfs": {"sha256": digest(sha or name), "size": size}}
 
 
 class FakeHub:
@@ -83,7 +88,7 @@ class FetchVariantsTests(unittest.TestCase):
         self.assertEqual((model.parameters, model.active_parameters), (8_190_735_360, 8_190_735_360))
         self.assertEqual((model.experts, model.expert_fraction, model.sliding_layers), (0, 0.0, 0))
         self.assertEqual((model.family, model.license, model.source, model.files), ("qwen3", "apache-2.0", "catalogue", []))
-        self.assertEqual(model.sha256, "sha-Qwen3-8B-Q4_K_M.gguf")
+        self.assertEqual(model.sha256, digest("Qwen3-8B-Q4_K_M.gguf"))
 
     def test_qwen3_moe_expert_fields(self):
         models = {"Qwen/Qwen3-30B-A3B": {"sha": "b", "safetensors": {"total": 30_532_122_624}},
@@ -162,9 +167,20 @@ class FetchVariantsTests(unittest.TestCase):
         self.assertEqual(sorted(artifacts), ["Q4_K_M", "Q5_K_M"])
         big = artifacts["Q4_K_M"]
         self.assertEqual(big["filename"], "Q4_K_M/Big-Q4_K_M-00001-of-00003.gguf")
-        self.assertEqual([f["sha256"] for f in big["files"]], ["s1", "s2", "s3"])
+        self.assertEqual([f["sha256"] for f in big["files"]], [digest("s1"), digest("s2"), digest("s3")])
         self.assertEqual(big["size_bytes"], 142 * GB)
         self.assertEqual((artifacts["Q5_K_M"]["filename"], artifacts["Q5_K_M"]["files"]), ("big-q5_k_m.gguf", []))
+
+    def test_files_without_a_checksum_are_not_offered(self):
+        # Downloads refuse a file without sha256, and discover cannot verify one, so it must never become a variant.
+        files = [{"rfilename": "m-Q4_K_M.gguf", "size": GB},  # not stored in LFS: no sha256
+                 {"rfilename": "m-Q8_0.gguf", "size": GB, "lfs": {"oid": "not-a-sha", "size": GB}},
+                 sibling("m-Q6_K-00001-of-00002.gguf", GB),
+                 {"rfilename": "m-Q6_K-00002-of-00002.gguf", "size": GB},  # one shard lacks its checksum
+                 {"rfilename": "m-Q5_K_M.gguf", "size": GB, "lfs": {"oid": digest("x").upper(), "size": GB}}]
+        artifacts = gguf_artifacts(files)
+        self.assertEqual([a["quant"] for a in artifacts], ["Q5_K_M"])
+        self.assertEqual(artifacts[0]["sha256"], digest("x"))
 
     def test_quant_names(self):
         cases = {"Phi-4-mini-instruct.Q8_0.gguf": "Q8_0", "qwen2.5-coder-7b-instruct-q4_k_m.gguf": "Q4_K_M",

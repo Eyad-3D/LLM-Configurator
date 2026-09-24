@@ -29,6 +29,7 @@ SCORE_FIELDS = {"general": "artificial_analysis_intelligence_index", "coding": "
                 "agentic": "artificial_analysis_agentic_index"}
 SHARD = re.compile(r"^(?P<stem>.+)-(?P<index>\d{5})-of-(?P<total>\d{5})\.gguf$", re.I)
 SKIP_FILE = re.compile(r"mmproj|imatrix", re.I)  # vision add-ons and calibration data are not models
+SHA256 = re.compile(r"[0-9a-f]{64}")
 MAX_WORKERS = 6  # polite to Hugging Face with ~40 entries; the score request shares the pool
 MAX_USER_ENTRIES = 200
 REMOVED_KEY = "catalogue_removed"
@@ -301,16 +302,18 @@ def gguf_artifacts(siblings):
             continue
         lfs = file.get("lfs") or {}
         size = file.get("size") or lfs.get("size")
-        record = {"filename": name, "size_bytes": size, "sha256": lfs.get("sha256") or lfs.get("oid")}
+        # An LFS oid is the file's sha256. Without one a file can be neither downloaded safely nor recognised.
+        sha = str(lfs.get("sha256") or lfs.get("oid") or "").lower()
+        record = {"filename": name, "size_bytes": size, "sha256": sha if SHA256.fullmatch(sha) else None}
         match = SHARD.match(name)
         if match:
             shard_sets.setdefault((match["stem"], int(match["total"])), {})[int(match["index"])] = record
-        elif type(size) is int and size > 0:
+        elif type(size) is int and size > 0 and record["sha256"]:
             singles.append({**record, "files": [], "quant": quant_of(name)})
     for (stem, total), parts in shard_sets.items():
-        # Never count a partial set as a model: every shard must be listed with its size.
+        # Never count a partial set as a model: every shard must be listed with its size and checksum.
         if total < 1 or sorted(parts) != list(range(1, total + 1)) or \
-                any(type(p["size_bytes"]) is not int or p["size_bytes"] <= 0 for p in parts.values()):
+                any(type(p["size_bytes"]) is not int or p["size_bytes"] <= 0 or not p["sha256"] for p in parts.values()):
             continue
         files = [parts[i] for i in range(1, total + 1)]
         singles.append({"filename": files[0]["filename"], "size_bytes": sum(f["size_bytes"] for f in files),
