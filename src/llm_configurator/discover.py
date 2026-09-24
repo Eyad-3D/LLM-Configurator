@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import stat
 
 from . import gguf
 from .domain import Variant, check_cancel
@@ -44,7 +45,7 @@ def _expand(text):
 
 def _env_path(name):
     value = os.environ.get(name)
-    return _expand(value) if value else None
+    return _expand(os.path.expandvars(value)) if value else None  # like huggingface_hub, $VAR inside is expanded
 
 
 def _read_small(path):
@@ -109,7 +110,17 @@ def locations(store=None, extra_dirs=()):
     return result
 
 
+def _resolve(path):
+    """The real path behind links, or None for a link loop (Python < 3.13 raises RuntimeError) or unreadable link."""
+    try:
+        return Path(path).resolve()
+    except (OSError, RuntimeError):
+        return None
+
+
 def _inside(path, root):
+    if path is None or root is None:
+        return False
     try:
         return path.is_relative_to(root)
     except (OSError, ValueError):
@@ -143,10 +154,12 @@ def _walk(root, cancel, counter, pattern=lambda name: name.lower().endswith(".gg
 
 
 def _scan_plain(root, source, cancel, counter):
-    real_root = root.resolve()
+    real_root = _resolve(root)
+    if real_root is None:
+        return
     for path in _walk(root, cancel, counter):
-        real = path.resolve() if path.is_symlink() else path
-        if path.is_symlink() and not _inside(real, real_root):
+        real = _resolve(path) if path.is_symlink() else path
+        if real is None or path.is_symlink() and not _inside(real, real_root):
             continue  # a link pointing outside the scanned folder is never followed
         entry = _stat_entry(path, real, source=source, filename=path.name)
         if entry:
@@ -160,16 +173,16 @@ def _scan_hf(root, cancel, counter):
         return
     for repo_dir in repos:
         repo = repo_dir.name[len("models--"):].replace("--", "/")
-        blobs = (repo_dir / "blobs").resolve()
-        snapshots = repo_dir / "snapshots"
-        if not snapshots.is_dir():
-            continue
+        blobs, snapshots = repo_dir / "blobs", repo_dir / "snapshots"
+        if blobs.is_symlink() or snapshots.is_symlink() or not snapshots.is_dir():
+            continue  # the cache never links these folders; a link could lead the scan anywhere
+        blobs = _resolve(blobs)
         for path in _walk(snapshots, cancel, counter):
             snapshot = path.relative_to(snapshots).parts[0]
             filename = path.relative_to(snapshots / snapshot).as_posix()
             if path.is_symlink():
-                real = path.resolve()
-                if real.parent != blobs:
+                real = _resolve(path)
+                if real is None or blobs is None or real.parent != blobs:
                     continue  # only the snapshot -> own blobs/ pattern is trusted
                 entry = _stat_entry(path, real, source="hf_cache", filename=filename, repo=repo)
                 if entry and HEX64.match(real.name):
@@ -189,9 +202,9 @@ def _ollama_name(parts):
 
 def _scan_ollama(root, cancel, counter):
     manifests, blobs = root / "manifests", root / "blobs"
-    if not manifests.is_dir() or not blobs.is_dir():
-        return
-    real_blobs = blobs.resolve()
+    if manifests.is_symlink() or blobs.is_symlink() or not manifests.is_dir() or not blobs.is_dir():
+        return  # Ollama never links these folders; a link could lead the scan anywhere
+    real_blobs = _resolve(blobs)
     found = {}
     for manifest in _walk(manifests, cancel, counter, pattern=lambda name: True):
         if manifest.is_symlink():
@@ -212,8 +225,8 @@ def _scan_ollama(root, cancel, counter):
                 found[hexdigest]["names"].append(name)
                 continue
             path = blobs / f"sha256-{hexdigest}"
-            real = path.resolve() if path.is_symlink() else path
-            if path.is_symlink() and not _inside(real, real_blobs):
+            real = _resolve(path) if path.is_symlink() else path
+            if real is None or path.is_symlink() and not _inside(real, real_blobs):
                 continue
             entry = _stat_entry(path, real, source="ollama", filename=path.name, names=[name])
             if entry:
@@ -296,7 +309,7 @@ def _match(record, index):
 def _record(parts, complete, cache, index):
     first = parts[0]
     for part in parts:
-        cached = cache.get(str(part["real"].resolve()))
+        cached = cache.get(str(_resolve(part["real"]) or part["real"]))
         if not part["sha256"] and cached and cached.get("size") == part["size"] and cached.get("mtime") == part["mtime"]:
             part.update(sha256=cached["sha256"], hash_source="hashed")
     record = {
@@ -388,25 +401,30 @@ def add_file(store, path):
 def hash_cached(store, path, progress=None, cancel=None):
     """SHA-256 of a file, reusing an earlier result while its size and modification time are unchanged."""
     path = Path(path)
-    key = str(path.resolve())
     try:
+        key = str(path.resolve())
         before = path.stat()
-    except OSError as exc:
-        raise ValueError(f"Could not read {path.name}: {exc.strerror or exc}.") from None
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"Could not read {path.name}: {getattr(exc, 'strerror', None) or exc}.") from None
+    if not stat.S_ISREG(before.st_mode):  # a pipe or device never ends (or never starts)
+        raise ValueError(f"{path.name} is not a regular file, so it cannot be checked.")
     entry = (store.get("hash_cache") or {}).get(key)
     if entry and entry.get("size") == before.st_size and entry.get("mtime") == before.st_mtime:
         return entry["sha256"]
     digest, done, reported = hashlib.sha256(), 0, 0
-    with path.open("rb") as handle:
-        while chunk := handle.read(HASH_CHUNK):
-            check_cancel(cancel)
-            digest.update(chunk)
-            done += len(chunk)
-            if progress and (done - reported >= 64 * 1024 * 1024 or done == before.st_size):
-                reported = done
-                progress({"stage": "verifying", "done": done, "total": before.st_size,
-                          "message": f"Checking {path.name} is complete and unchanged…"})
-    after = path.stat()
+    try:
+        with path.open("rb") as handle:
+            while chunk := handle.read(HASH_CHUNK):
+                check_cancel(cancel)
+                digest.update(chunk)
+                done += len(chunk)
+                if progress and (done - reported >= 64 * 1024 * 1024 or done == before.st_size):
+                    reported = done
+                    progress({"stage": "verifying", "done": done, "total": before.st_size,
+                              "message": f"Checking {path.name} is complete and unchanged…"})
+        after = path.stat()
+    except OSError as exc:
+        raise ValueError(f"Could not read {path.name}: {exc.strerror or exc}. Check the disk and try again.") from None
     if (after.st_size, after.st_mtime) != (before.st_size, before.st_mtime):
         raise ValueError(f"{path.name} changed while it was being checked. Wait for any copy or download to finish, then try again.")
     result = digest.hexdigest()
@@ -422,10 +440,10 @@ def hash_cached(store, path, progress=None, cancel=None):
 def _candidates(store, variant, wanted):
     from .storage import models_dir
     base = models_dir(store)
-    real_base = base.resolve()
+    real_base = _resolve(base)
     direct = [base / f["filename"] for f in wanted]
     # a local model is one particular file: a same-named file in the models folder is not it
-    if variant.source != "local" and all(_inside(p.resolve(), real_base) for p in direct):  # catalogue file names never lead out of the folder
+    if variant.source != "local" and real_base and all(_inside(_resolve(p), real_base) for p in direct):  # catalogue file names never lead out of the folder
         yield [{"path": str(p), "filename": Path(f["filename"]).name, "size_bytes": f["size_bytes"], "sha256": None}
                for p, f in zip(direct, wanted)], None
     for record in store.get("local_files") or []:
@@ -443,8 +461,8 @@ def _blob_hash_holds(item, expected):
     """A borrowed blob-name hash counts only while the file still resolves to the blob named by that hash."""
     if item.get("hash_source") != "blob_name" or (item.get("sha256") or "").lower() != expected:
         return False
-    name = Path(item["path"]).resolve().name
-    return name in {expected, f"sha256-{expected}"}
+    real = _resolve(item["path"])
+    return real is not None and real.name in {expected, f"sha256-{expected}"}
 
 
 def find_for_variant(store, variant, verify=True, progress=None, cancel=None):

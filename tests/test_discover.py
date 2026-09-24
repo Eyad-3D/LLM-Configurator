@@ -179,6 +179,34 @@ class DiscoverTest(unittest.TestCase):
         self.assertEqual(len(records), 1)  # the in-folder alias and the file itself count once
         self.assertIn(records[0]["filename"], {"alias.gguf", "inside.gguf"})
 
+    def test_link_loops_and_linked_cache_folders_are_skipped(self):
+        outside = self.write(self.root / "outside/secret.gguf", model_bytes("x"))
+        lm = self.home / ".lmstudio/models"
+        lm.mkdir(parents=True)
+        (lm / "a.gguf").symlink_to(lm / "b.gguf")  # a loop: Python < 3.13 raises RuntimeError on resolve()
+        (lm / "b.gguf").symlink_to(lm / "a.gguf")
+        hub = self.home / ".cache/huggingface/hub"
+        (hub / "models--o--snap").mkdir(parents=True)
+        (hub / "models--o--snap/snapshots").symlink_to(outside.parent, target_is_directory=True)
+        blobs_repo = hub / "models--o--blobs"
+        (blobs_repo / "snapshots/r").mkdir(parents=True)
+        (blobs_repo / "blobs").symlink_to(outside.parent, target_is_directory=True)
+        (blobs_repo / "snapshots/r/evil.gguf").symlink_to("../../blobs/secret.gguf")
+        ollama = self.home / ".ollama/models"
+        ollama.mkdir(parents=True)
+        (ollama / "manifests").symlink_to(self.root, target_is_directory=True)
+        (ollama / "blobs").mkdir()
+        self.assertEqual(discover.scan(self.store), [])
+        with self.assertRaisesRegex(ValueError, "Could not read"):
+            discover.hash_cached(self.store, lm / "a.gguf")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs named pipes")
+    def test_hash_cached_refuses_a_pipe(self):
+        fifo = self.root / "pipe.gguf"
+        os.mkfifo(fifo)
+        with self.assertRaisesRegex(ValueError, "not a regular file"):
+            discover.hash_cached(self.store, fifo)
+
     def test_hf_copies_without_symlinks_match_on_name_and_size(self):
         data = model_bytes("win")
         self.write(self.home / ".cache/huggingface/hub/models--org--repo/snapshots/s/m-Q4_K_M.gguf", data)
