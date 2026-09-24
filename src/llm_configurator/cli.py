@@ -48,8 +48,8 @@ def parser():
     add = model_actions.add_parser("add", help="Add a Hugging Face model and its GGUF repo to your catalogue")
     add.add_argument("base_repo", help="Original model repo, for example Qwen/Qwen3-8B")
     add.add_argument("gguf_repo", help="Repo holding the GGUF files, for example Qwen/Qwen3-8B-GGUF")
-    add.add_argument("--config-repo", help="Repo to read the model's config.json from, when the original repo needs a "
-                                           "login (for example an ungated copy of a gated model)")
+    add.add_argument("--config-repo", help="Repo to read the model's config.json from, when the original repo asks you "
+                                           "to log in or accept its terms first (for example a public copy of it)")
     remove = model_actions.add_parser("remove", help="Remove a model you added")
     remove.add_argument("base_repo")
     commands.add_parser("benchmarks", help="List AA names/slugs to explicitly map to local models")
@@ -249,9 +249,10 @@ def run_job(fn, title):
             bar.update(job["progress"])
             if job["state"] in {"done", "failed", "cancelled"}:
                 break
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit) as stop:  # Ctrl+C, or a closed terminal / kill (exit handlers)
         bar.close()
-        print("Stopping… (press Ctrl+C again to quit immediately)", file=sys.stderr, flush=True)
+        if isinstance(stop, KeyboardInterrupt):
+            print("Stopping… (press Ctrl+C again to quit immediately)", file=sys.stderr, flush=True)
         jobs.cancel(job["id"])
         # Poll the state: a Thread.join() interrupted by Ctrl+C can return at once while the job still runs,
         # and exiting then would leave llama-bench or llama-server running on its own.
@@ -589,8 +590,8 @@ def community_command(store, args):
         print(payload["json"])
         if payload.get("skipped"):
             count = payload["skipped"]
-            print(f"\n{count} result{'s were' if count != 1 else ' was'} measured on different hardware and "
-                  f"{'were' if count != 1 else 'was'} left out.", file=sys.stderr)
+            print(f"\n{count} result{'s' if count != 1 else ''} could not be shared (measured on different hardware, "
+                  "or incomplete) and {} left out.".format("were" if count != 1 else "was"), file=sys.stderr)
         print("\nNothing has been sent. Review the data above, then open this link to post it yourself:", file=sys.stderr)
         print(payload["issue_url"])
         if payload.get("fits_in_url") is False:
@@ -643,7 +644,7 @@ def model_command(store, args):
             notes = [n for n in notes if "UTF-8 with BOM" not in n]
             instructions = [line.replace(result.get("filename") or "\0", args.output.name) for line in instructions
                             if not line.startswith("Save this as") and not (executable and "chmod +x" in line)]
-            print(f"Saved {args.output}", file=sys.stderr)
+            print(f"Saved {shown(args.output)}", file=sys.stderr)
         else:
             print(result["content"])
         for line in instructions + notes:

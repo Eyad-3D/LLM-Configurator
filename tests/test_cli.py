@@ -158,6 +158,20 @@ class ProgressTests(unittest.TestCase):
             cli.run_job(job, "Tuning")
         self.assertTrue(stopped.is_set())
 
+    def test_a_kill_signal_also_stops_the_job_first(self):
+        import threading
+        stopped = threading.Event()
+        def job(progress, cancel):
+            progress({"stage": "tune", "done": 1, "total": 60})
+            cancel.wait(5)
+            stopped.set()
+        def killed(bar, value):
+            if value:
+                raise SystemExit(143)  # what llama_server's exit handler raises on SIGTERM
+        with patch.object(cli.ProgressBar, "update", killed), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            cli.run_job(job, "Tuning")
+        self.assertTrue(stopped.is_set())
+
     def test_terminal_line_fits_the_terminal_width(self):
         class Terminal(io.StringIO):
             def isatty(self):
@@ -428,11 +442,15 @@ class ModelCommandTests(CliCase):
         self.assertEqual(code, 0, err)
         config = self.fakes.calls[-1][2]
         self.assertEqual((config["threads"], config["batch"], config["gpu_layers"]), (5, 1024, 0))
-        # The tuner moved work onto a GPU this CPU-only candidate does not use: keep the placement, use the rest.
+        # The tuner moved work onto a GPU this CPU-only candidate does not use: its settings belong to that
+        # placement, so none of them is applied here.
         self.store.put("tuned", [{**base, "best": {**base["best"], "gpu_layers": 7}}])
-        self.run_cli("test", self.variant.id, "--kind", "smoke", "--tuned")
-        config = self.fakes.calls[-1][2]
-        self.assertEqual((config["threads"], config["gpu_layers"]), (5, 0))
+        code, _, err = self.run_cli("test", self.variant.id, "--kind", "smoke", "--tuned")
+        self.assertEqual(code, 1)
+        self.assertIn("Run a new tune", err)
+        # Tunes are for one user; several users get a plain reason.
+        with self.assertRaisesRegex(ValueError, "one user at a time"):
+            app.tuned_changes(self.store, {"variant_id": self.variant.id, "users": 4, "context": 8192, "gpu_layers": 0}, HARDWARE)
 
     def test_quiz_and_quant_check(self):
         self.downloaded()
@@ -592,7 +610,7 @@ class LocalAndCommunityTests(CliCase):
             "json": "{}", "issue_url": "https://github.com/x/issues/new", "skipped": 2, "fits_in_url": False}
         code, out, err = self.run_cli("community", "share", "a1b2c3", "d4e5f6")
         self.assertEqual(code, 0)
-        self.assertIn("2 results were measured on different hardware and were left out.", err)
+        self.assertIn("2 results could not be shared (measured on different hardware, or incomplete) and were left out.", err)
         self.assertIn("paste it into the form", err)
 
     def test_paths_that_are_not_valid_text_still_print(self):
@@ -672,6 +690,14 @@ class AppTests(unittest.TestCase):
             self.assertEqual(app.launch_config(self.store, candidate, hardware, "m.gguf")["gpu_backend"], "vulkan")
         with patch.object(runtime_install, "detect", side_effect=OSError("unreadable")):
             self.assertEqual(app.launch_config(self.store, candidate, hardware, "m.gguf")["gpu_backend"], "cuda")
+        # A cached detect() result is reused while its llama-server still exists: no process per launch.
+        server = Path(self.temp.name) / "llama-server"
+        server.write_bytes(b"")
+        self.store.put("runtime", {"installed": True, "backend": "vulkan", "binaries": {"llama-server": [str(server)]}})
+        with patch.object(runtime_install, "detect", side_effect=AssertionError("detect ran")):
+            self.assertEqual(app.launch_config(self.store, candidate, hardware, "m.gguf")["gpu_backend"], "vulkan")
+        # The server may pass the backend it already knows.
+        self.assertEqual(app.launch_config(self.store, candidate, hardware, "m.gguf", runtime_backend="cuda")["gpu_backend"], "cuda")
 
     def test_a_finished_download_remembers_its_fingerprint(self):
         from llm_configurator import discover, downloads

@@ -173,7 +173,7 @@ def remember_download(store, variant, directory):
         if f.get("sha256") and remember:
             try:
                 remember(store, Path(directory) / Path(f["filename"]).name, f["sha256"])
-            except ValueError:
+            except (ValueError, OSError):
                 pass  # only a speed-up: the file is simply checked again before its first use
 
 
@@ -190,11 +190,16 @@ def placement(candidate):
     return candidate.get("mode") or ("cpu" if not layers else "gpu" if layers == total else "split")
 
 
-def runtime_backend(store):
+def installed_backend(store):
     """The installed llama.cpp build's backend (cuda, vulkan, metal, cpu…), or None when unknown.
 
-    It decides the GPU settings: a Vulkan build on an NVIDIA card must not get CUDA's."""
+    It decides the GPU settings: a Vulkan build on an NVIDIA card must not get CUDA's. The last detect() result
+    is reused while its llama-server still exists, like runtime_install.binary, so no process starts per launch."""
     try:
+        cached = store.get("runtime") or {}
+        server = (cached.get("binaries") or {}).get("llama-server") if cached.get("installed") else None
+        if server and Path(server[0]).is_file():
+            return cached.get("backend")
         from . import runtime_install
         return (runtime_install.detect(store) or {}).get("backend")
     except Exception:  # noqa: BLE001 - no runtime yet, or an unreadable one: fall back to the hardware's backend
@@ -204,53 +209,60 @@ def runtime_backend(store):
 def _gpu_uuid(candidate, hardware):
     if not candidate.get("gpu_layers") or candidate.get("gpu_index") is None:
         return None
-    gpu = next((g for g in (hardware or {}).get("gpus") or [] if g.get("index") == candidate["gpu_index"]), None)
+    gpu = next((g for g in (hardware or {}).get("gpus") or [] if isinstance(g, dict) and g.get("index") == candidate["gpu_index"]), None)
     return gpu.get("uuid") if gpu else None
 
 
 def _fits_now(store, variant, candidate, hardware, layers, moe):
     """True when the engine lists this placement as fitting in memory now, at the candidate's context."""
     kv = candidate.get("kv_cache_type") or "f16"
-    requirements = Requirements(context=candidate["context"], min_tps=0, include_rankings=False, kv_cache_type=kv)
+    requirements = Requirements(context=candidate["context"], min_tps=0, include_rankings=False, kv_cache_type=kv,
+                                gpu_index=candidate.get("gpu_index") or 0)
     try:
         report = recommend([variant], hardware, requirements, store.get("measurements", []), store.get("calibration"))
-    except (ValueError, KeyError, TypeError):
+    except Exception:  # noqa: BLE001 - unreadable hardware: treat the moved placement as not fitting
         return False
     return any(c["context"] == candidate["context"] and c["scenario"] == "now" and c["gpu_layers"] == layers
                and (c.get("n_cpu_moe") or 0) == moe for c in report["candidates"])
 
 
-def tuned_changes(store, candidate, hardware):
+def tuned_changes(store, candidate, hardware, variant=None):
     """Launch settings from the saved tune that started from this candidate (engine.matching_tuned).
 
     The tune is matched on the candidate's own model, context, GPU layers, expert offload and notepad
-    format, so a tune of another placement is never applied. When the tuner moved layers or experts,
-    that placement is used only if it still fits in memory now. Raises ValueError when there is no tune.
+    format, so a tune of another placement is never applied. When the tuner moved layers or experts, its
+    settings belong to that new placement: they are used only together with it, and only if it still fits in
+    memory now. Raises ValueError when there is no usable tune.
     """
     from .engine import matching_tuned
-    variant = find_variant(store, candidate["variant_id"])
+    if (candidate.get("users") or 1) != 1:
+        raise ValueError("Tunes are made for one user at a time, so there is no saved tune for several users.")
+    variant = variant or find_variant(store, candidate["variant_id"])
     kv, moe = candidate.get("kv_cache_type") or "f16", candidate.get("n_cpu_moe") or 0
-    tune = None
-    if (candidate.get("users") or 1) == 1:
-        tune = matching_tuned(store.get("tuned", []), variant, hardware or {}, candidate["context"], candidate["gpu_layers"],
-                              kv, moe, _gpu_uuid(candidate, hardware))
+    tune = matching_tuned(store.get("tuned", []), variant, hardware or {}, candidate["context"], candidate["gpu_layers"],
+                          kv, moe, _gpu_uuid(candidate, hardware))
     if not tune:
         raise ValueError("No saved tune for this model, context, placement and notepad format yet. Run a tune first.")
     changes = dict(tune["settings"])
     if kv != "f16" and changes.get("flash_attn") == "off":
         changes.pop("flash_attn")  # llama.cpp needs flash attention for a compressed notepad
-    moved = tune["best_placement"]
-    on_gpu = bool(candidate["gpu_layers"])
-    if not tune["same_placement"] and moved["cache_type_k"] == kv and bool(moved["gpu_layers"]) == on_gpu \
-            and 0 <= (moved["gpu_layers"] or 0) <= variant.layers and _fits_now(store, variant, candidate, hardware or {}, moved["gpu_layers"] or 0, moved["n_cpu_moe"]):
-        changes.update(gpu_layers=moved["gpu_layers"] or 0, n_cpu_moe=moved["n_cpu_moe"])
-    return changes
+    if tune["same_placement"]:
+        return changes
+    moved, on_gpu = tune["best_placement"], bool(candidate["gpu_layers"])
+    if moved["cache_type_k"] == kv and bool(moved["gpu_layers"]) == on_gpu and 0 <= (moved["gpu_layers"] or 0) <= variant.layers \
+            and _fits_now(store, variant, candidate, hardware or {}, moved["gpu_layers"] or 0, moved["n_cpu_moe"]):
+        return {**changes, "gpu_layers": moved["gpu_layers"] or 0, "n_cpu_moe": moved["n_cpu_moe"]}
+    raise ValueError("The saved tune moved the model to a different split between the graphics chip and the processor, "
+                     "and that no longer fits in free memory. Run a new tune.")
 
 
-def launch_config(store, candidate, hardware, model_path=None, tuned=False, **overrides):
-    """Launch settings for a candidate. tuned=True adds the saved tune's settings (see tuned_changes)."""
+def launch_config(store, candidate, hardware, model_path=None, tuned=False, runtime_backend=None, **overrides):
+    """Launch settings for a candidate. tuned=True adds the saved tune's settings (see tuned_changes).
+
+    runtime_backend: the installed build's backend when the caller already knows it; otherwise it is looked up."""
     changes = tuned_changes(store, candidate, hardware) if tuned else {}
-    return from_candidate(candidate, model_path, hardware, runtime_backend=runtime_backend(store), **{**changes, **overrides})
+    backend = runtime_backend or installed_backend(store)
+    return from_candidate(candidate, model_path, hardware, runtime_backend=backend, **{**changes, **overrides})
 
 
 def candidate_for(store, variant, hardware, context=None, gpu_layers=None, kv_cache_type="f16"):
@@ -318,7 +330,6 @@ def tune_job(store, variant, candidate, hardware, budget_seconds=300, goal="gene
         from . import tuner
         path = require_model(store, variant, _stage(progress, "verify"), cancel)
         base = launch_config(store, candidate, hardware, path)
-        kv = candidate.get("kv_cache_type") or "f16"
         result = _call(tuner.tune, binary(store, "llama-bench"), variant, base, hardware, budget_seconds=budget_seconds,
                        goal=goal, progress=progress, cancel=cancel, allow_kv_compression=False)
         # Paths stay on this computer: the page and the store get the tuned settings, not the model's folder.
@@ -344,7 +355,11 @@ def tune_records(result, best, variant, candidate, hardware, goal=None, budget_s
     """
     settings = result.get("settings") if isinstance(result.get("settings"), dict) else {}
     depth = settings.get("depth") if type(settings.get("depth")) is int else result.get("depth")
-    record = {**result, "best": best, "id": secrets.token_hex(6), "variant_id": variant.id, "sha256": variant.sha256,
+    if type(depth) is int:
+        # engine.matching_tuned reads the depth from `settings`; tuners that only report it at the top level
+        # measured best_result at that depth.
+        settings = {**settings, "depth": depth}
+    record = {**result, "settings": settings, "best": best, "id": secrets.token_hex(6), "variant_id": variant.id, "sha256": variant.sha256,
               "fingerprint": hardware.get("fingerprint"), "context": candidate["context"],
               "gpu_layers": candidate["gpu_layers"], "n_cpu_moe": candidate.get("n_cpu_moe") or 0,
               "kv_cache_type": candidate.get("kv_cache_type") or "f16", "depth": depth,
@@ -505,7 +520,7 @@ def quant_check_job(store, reference, others, hardware=None):
         for variant in others:
             path = require_model(store, variant, _stage(progress, "verify"), cancel)
             label = variant.quant or quantcheck.quant_label(path)
-            label = label if label not in labels else variant.id
+            label = label if label not in labels and label != (reference.quant or quantcheck.quant_label(reference_path)) else variant.id
             labels[label], paths[label] = variant, str(path)
         reference_label = reference.quant or quantcheck.quant_label(reference_path)
         config = _check_config(store, reference, hardware or scan(False), reference_path)
@@ -534,7 +549,7 @@ def export_config(store, variant, candidate, hardware, fmt, platform="posix", tu
         raise ValueError("Platform must be posix or windows")
     path = local_model(store, variant, verify=False)
     config = launch_config(store, candidate, hardware, path or models_dir(store) / Path(variant.all_files()[0]["filename"]).name, tuned,
-                           **({"port": port} if port else {}))
+                           **({"port": port} if port is not None else {}))
     try:
         command = binary(store, "llama-server")
     except ValueError:
