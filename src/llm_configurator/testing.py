@@ -214,8 +214,9 @@ def bench_args(config, n_prompt, n_gen, depth, repetitions=BENCH_REPETITIONS):
     c = launch.normalize(config)
     if not c["model_path"]:
         raise ValueError("A downloaded model file is required")
+    # -v: without it llama-bench hides llama.cpp's own log, so an out-of-memory load reads only "failed to load model".
     args = ["-m", c["model_path"], "-p", str(n_prompt), "-n", str(n_gen), "-d", str(depth),
-            "-r", str(repetitions), "-o", "json",
+            "-r", str(repetitions), "-o", "json", "-v",
             "-ngl", str(launch.runtime_gpu_layers(c["gpu_layers"], c["total_layers"])),
             "-ctk", c["cache_type_k"], "-ctv", c["cache_type_v"]]
     for flag, name in [("-t", "threads"), ("-b", "batch"), ("-ub", "ubatch")]:
@@ -313,12 +314,13 @@ def run_bench(bench_command, config, plan, repetitions=BENCH_REPETITIONS, timeou
         bench_args(config, plan["n_prompt"], plan["n_gen"], plan["depth"], repetitions)
     code, stdout, stderr = run_process(argv, timeout, env=launch.server_env(config), cancel=cancel)
     if code:
-        detail = stderr.strip()[-600:]
-        if any(hint in detail.lower() for hint in OOM_HINTS):
+        from .tuner import bench_failure
+        reason = bench_failure(stderr, stdout, code)
+        if reason.startswith("Ran out of memory"):
             raise ValueError("The speed test ran out of memory. Try fewer GPU layers, a shorter context or a smaller file.")
-        if re.search(r"invalid parameter|unknown argument|error: invalid", detail, re.I):
+        if reason.startswith("This llama.cpp version"):
             raise ValueError("This llama.cpp version does not support the speed test settings. Update llama.cpp and try again.")
-        raise ValueError(f"The speed test failed (exit code {code}). {detail}".strip())
+        raise ValueError(f"The speed test failed. {reason}")
     rows = parse_bench_json(stdout)
     pp = next((r for r in rows if r.get("n_prompt") == plan["n_prompt"] and r.get("n_gen") == 0
                and r.get("n_depth", 0) == plan["depth"]), None)

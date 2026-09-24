@@ -94,7 +94,7 @@ def run(base=None, v=None, budget=600, hardware=HARDWARE, **kwargs):
 class BenchArgsTests(unittest.TestCase):
     def test_plain_config(self):
         self.assertEqual(tuner.bench_args(config()), [
-            "-m", "/models/m.gguf", "-p", "512", "-n", "128", "-ngl", "0", "-r", "2", "-o", "json"])
+            "-m", "/models/m.gguf", "-p", "512", "-n", "128", "-ngl", "0", "-r", "2", "-o", "json", "-v"])
 
     def test_every_setting(self):
         args = tuner.bench_args(config(gpu_layers=32, total_layers=32, threads=6, batch=1024, ubatch=256,
@@ -102,13 +102,13 @@ class BenchArgsTests(unittest.TestCase):
                                        mmap=False, device="CUDA0"), n_prompt=256, n_gen=64, depth=2048, repetitions=3)
         self.assertEqual(args, ["-m", "/models/m.gguf", "-p", "256", "-n", "64", "-d", "2048", "-ngl", "33",
                                 "-ncmoe", "4", "-t", "6", "-b", "1024", "-ub", "256", "-fa", "on", "-ctk", "q8_0",
-                                "-ctv", "q8_0", "-dev", "CUDA0", "-lm", "none", "-r", "3", "-o", "json"])
+                                "-ctv", "q8_0", "-dev", "CUDA0", "-lm", "none", "-r", "3", "-o", "json", "-v"])
 
     def test_sweep_uses_comma_lists(self):
         args = tuner.bench_args(config(gpu_layers=20, total_layers=32), sweep={
             "threads": [8, 7, 4], "flash_attn": ["on", "off"], "gpu_layers": [20, 32], "cache_type_k": ["f16", "q8_0"]})
         self.assertEqual(args, ["-m", "/models/m.gguf", "-p", "512", "-n", "128", "-ngl", "20,33", "-t", "8,7,4",
-                                "-fa", "on,off", "-ctk", "f16,q8_0", "-r", "2", "-o", "json"])
+                                "-fa", "on,off", "-ctk", "f16,q8_0", "-r", "2", "-o", "json", "-v"])
 
     def test_flash_attn_auto_is_not_passed_and_cpu_only_hides_gpu(self):
         args = tuner.bench_args(config(flash_attn="auto", gpu_backend="cuda"))
@@ -341,6 +341,74 @@ class TuneTests(unittest.TestCase):
         self.assertEqual(result["improvement"], 1.0)
         self.assertTrue(any("did not hold up" in n for n in result["notes"]))
 
+    def test_confirmation_needs_the_noise_margin_too(self):
+        clock = Clock()
+        # The short runs say 7 threads + flash attention is much faster; the long check says only 1% faster.
+        def speed(s, reps, tg, pp):
+            return (tg if reps != 5 else 50 * (1 - 0.04 * 9) * 1.01, pp)
+        result, _, _ = run(clock=clock, bench=FakeBench(clock, speed=speed))
+        self.assertIsNone(result["best"]["threads"])
+        self.assertFalse(result["confirmed"])
+        # The step notes that claimed gains are gone; only the fallback explanation stays.
+        self.assertFalse(any(" made " in n for n in result["notes"]))
+        self.assertTrue(any("did not hold up" in n for n in result["notes"]))
+
+    def test_drift_between_runs_raises_the_bar(self):
+        clock = Clock()
+        calls = {"n": 0}
+
+        # Every process is 8% faster than the one before (machine warming up), whatever the settings.
+        def speed(s, reps, tg, pp):
+            return (50 * 1.08 ** calls["n"], pp)
+
+        class Drifting(FakeBench):
+            def __call__(self, argv, env, timeout, cancel):
+                out = super().__call__(argv, env, timeout, cancel)
+                calls["n"] += 1
+                return out
+        result, _, _ = run(clock=clock, bench=Drifting(clock, speed=speed), confirm_repetitions=2)
+        self.assertGreater(result["drift"], 0.05)
+        # Only the first step can be fooled by drift nobody has seen yet; after that the bar includes it.
+        self.assertLessEqual(sum(1 for n in result["notes"] if "made" in n and "Overall" not in n), 1)
+
+    def test_negative_room_never_runs_more_trials(self):
+        clock = Clock()
+        # Baseline costs 14 s of a 40 s budget and the double-check needs more than what is left: stop, don't run.
+        result, bench, clock = run(budget=40, clock=clock, bench=FakeBench(clock, load=10.0))
+        self.assertEqual(result["stopped"], "budget")
+        self.assertEqual(len(bench.calls), 1)
+
+    def test_zero_second_runs_do_not_divide_by_zero(self):
+        clock = Clock()
+        bench = FakeBench(clock)
+
+        def instant(argv, env, timeout, cancel):
+            out = bench(argv, env, timeout, cancel)
+            return {**out, "seconds": 0}
+        result, _, _ = run(clock=clock, bench=instant)
+        self.assertIn(result["stopped"], {"converged", "budget"})
+
+    def test_baseline_gets_the_full_timeout_and_a_plain_message(self):
+        seen = []
+
+        def slow(argv, env, timeout, cancel):
+            seen.append(timeout)
+            return {"returncode": -9, "stdout": "[", "stderr": "", "seconds": timeout, "timed_out": True}
+        with self.assertRaisesRegex(ValueError, "too slow to tune"):
+            tuner.tune(["llama-bench"], variant(), config(), HARDWARE, budget_seconds=60, memory_check=lambda c: True,
+                       run_bench=slow, timeout=900)
+        self.assertEqual(seen, [900])
+
+    def test_result_carries_what_a_tune_measurement_needs(self):
+        result, _, _ = run()
+        self.assertEqual(result["runtime"], {"version": "b6000", "backend": "cpu"})
+        self.assertEqual(result["runtime_build"], "abc123")
+        self.assertEqual(result["threads"], 7)
+        self.assertEqual(result["bench"], {"n_prompt": 512, "n_gen": 128, "depth": 1024, "repetitions": 2})
+        self.assertEqual(result["depth"], 1024)
+        self.assertNotIn("settings", result)  # §2.3 `settings` means llama.cpp settings; these were bench sizes
+        json.dumps(result)
+
     def test_progress_reports(self):
         events = []
         run(progress=events.append)
@@ -413,6 +481,36 @@ class ProcessTests(unittest.TestCase):
                                    timeout=0.5)
         self.assertTrue(result["timed_out"])
         self.assertIn("ran out of time", tuner._plain_failure(result))
+
+    def test_run_process_kills_the_whole_tree(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            pidfile = os.path.join(tmp, "child.pid")
+            code = ("import subprocess, sys, time; "
+                    f"p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+                    f"open({pidfile!r}, 'w').write(str(p.pid)); time.sleep(60)")
+            result = tuner.run_process([sys.executable, "-c", code], timeout=1.5)
+            self.assertTrue(result["timed_out"])
+            import psutil
+            child = int(open(pidfile).read())
+            deadline = __import__("time").monotonic() + 5
+            while psutil.pid_exists(child) and psutil.Process(child).status() != psutil.STATUS_ZOMBIE \
+                    and __import__("time").monotonic() < deadline:
+                __import__("time").sleep(0.05)
+            self.assertFalse(psutil.pid_exists(child) and psutil.Process(child).status() != psutil.STATUS_ZOMBIE)
+
+    def test_failure_text_comes_from_stderr_without_paths(self):
+        # Real llama-bench: stdout is just "[", stderr names the model file.
+        text = tuner.bench_failure("llama_bench: error: failed to load model '/home/me/models/x.gguf'\n", "[\n", 1)
+        self.assertIn("could not load the model", text)
+        self.assertNotIn("/home/me", text)
+        cause = ("llama_model_load: error loading model: tensor 'blk.1.ffn_down.weight' data is not within the file "
+                 "bounds, model is corrupted or incomplete\nllama_bench: error: failed to load model '/m/x.gguf'")
+        self.assertIn("data is not within the file bounds", tuner.bench_failure(cause, "[", 1))
+        other = tuner.bench_failure("something odd happened at C:\\Users\\me\\m.gguf\n", "[", 2)
+        self.assertNotIn("Users", other)
+        self.assertNotIn("[", other.split(":", 1)[1])
 
     def test_no_shell(self):
         with mock.patch("subprocess.Popen", side_effect=OSError("nope")) as popen:

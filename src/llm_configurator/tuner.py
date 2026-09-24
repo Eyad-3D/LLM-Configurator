@@ -87,7 +87,8 @@ def bench_args(config, n_prompt=512, n_gen=128, depth=0, repetitions=2, sweep=No
         args += ["-dev", device]
     if not c["mmap"]:
         args += ["-lm", "none"]  # llama-server's --no-mmap; -mmp 0 is deprecated in favour of --load-mode
-    return args + ["-r", str(repetitions), "-o", "json"]
+    # -v: without it llama-bench hides llama.cpp's own log, so an out-of-memory load reads only "failed to load model".
+    return args + ["-r", str(repetitions), "-o", "json", "-v"]
 
 
 def _kill_tree(process):
@@ -207,6 +208,9 @@ def bench_failure(stderr, stdout="", returncode=None, timed_out=False):
         return "Ran out of memory with these settings."
     if re.search(r"unknown argument|invalid parameter|error: invalid|invalid device", text, re.I):
         return "This llama.cpp version does not support one of these settings."
+    cause = re.search(r"error loading model: (.+)", text)
+    if cause:
+        return f"llama.cpp could not load the model: {_PATH.sub('<file>', cause.group(1).strip())[:200]}"
     if "failed to load model" in text or "failed to create context" in text:
         # llama-bench prints no reason (out of memory looks the same as a damaged file).
         return ("llama.cpp could not load the model with these settings. They may need more memory than is free, "
@@ -399,6 +403,9 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
     baseline = {"tps": first["tps"], "pp_tps": first["pp_tps"]}
     best, best_result, best_noise, best_row = base, dict(baseline), first["noise"], first["row"]
     baseline_noise, step_notes = first["noise"], []
+    # llama-bench's stddev only covers the repetitions inside one process. The same settings re-measured in a later
+    # process show how much the machine drifts between runs; a "gain" must beat that too.
+    drift = 0.0
     stopped = None
 
     try:
@@ -427,12 +434,14 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
                 current = next((r for c, r in zip(candidates, results) if c == best and r["status"] == "ok"), None)
                 if current and score(current["tps"], current["pp_tps"], goal):
                     # A fresh number from the same run is the fairest thing to compare against.
+                    drift = max(drift, abs(score(current["tps"], current["pp_tps"], goal) /
+                                           score(best_result["tps"], best_result["pp_tps"], goal) - 1))
                     best_result, best_noise = {"tps": current["tps"], "pp_tps": current["pp_tps"]}, current["noise"]
                     best_row = current["row"] or best_row
                 ref, winner = score(best_result["tps"], best_result["pp_tps"], goal), None
                 for config, result in zip(candidates, results):
                     s = result["status"] == "ok" and score(result["tps"], result["pp_tps"], goal)
-                    if s and config != best and s > ref * (1 + max(min_gain, result["noise"] + best_noise)) \
+                    if s and config != best and s > ref * (1 + max(min_gain, result["noise"] + best_noise, drift)) \
                             and (winner is None or s > winner[2]):
                         winner = (config, result, s)
                 if winner:
@@ -464,7 +473,8 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
     if confirmed is not None:
         s = confirmed["status"] == "ok" and score(confirmed["tps"], confirmed["pp_tps"], goal)
         # The longer check must still beat the start by more than the noise, like every step did.
-        if s and s > score(baseline["tps"], baseline["pp_tps"], goal) * (1 + max(min_gain, confirmed["noise"] + baseline_noise)):
+        if s and s > score(baseline["tps"], baseline["pp_tps"], goal) * \
+                (1 + max(min_gain, confirmed["noise"] + baseline_noise, drift)):
             best_result = {"tps": confirmed["tps"], "pp_tps": confirmed["pp_tps"]}
             best_row = confirmed["row"] or best_row
         else:
@@ -492,7 +502,7 @@ def tune(bench_command, variant, base_config, hardware, budget_seconds=300, goal
             "confirmed": confirmed is not None and best != base,
             # How the speeds were measured. Not §2.3 `settings` (those are the llama.cpp settings in `best`).
             "bench": {"n_prompt": n_prompt, "n_gen": n_gen, "depth": depth, "repetitions": repetitions},
-            "depth": depth, **_row_facts(best_row, best)}
+            "depth": depth, "drift": round(drift, 4), **_row_facts(best_row, best)}
 
 
 def _row_facts(row, config):

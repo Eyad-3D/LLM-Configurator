@@ -22,6 +22,10 @@ def get(flag, default=None):
 if os.environ.get("FAKE_BENCH_SLEEP"):
     open(os.environ["FAKE_BENCH_STARTED"], "w").close()
     time.sleep(float(os.environ["FAKE_BENCH_SLEEP"]))
+if os.environ.get("FAKE_BENCH_FAIL") == "load":
+    print("[")
+    sys.stderr.write("llama_bench: error: failed to load model '%s'\n" % get("-m"))
+    sys.exit(1)
 if os.environ.get("FAKE_BENCH_FAIL") == "oom":
     sys.stderr.write("ggml_backend_cuda_buffer_type_alloc_buffer: allocating 9000 MiB on device 0: cudaMalloc failed: out of memory\n")
     sys.exit(1)
@@ -218,6 +222,8 @@ class BenchTests(TestingBase):
             plan = testing.bench_plan(context)
             self.assertLessEqual(plan["depth"] + plan["n_prompt"] + plan["n_gen"], context)
             self.assertGreaterEqual(plan["depth"], 0)
+        # Very long contexts are measured at a capped depth (and the record says which depth).
+        self.assertEqual(testing.bench_plan(131072)["depth"], testing.MAX_BENCH_DEPTH)
 
     def test_bench_args_mirror_launch_settings(self):
         config = dict(self.config, gpu_layers=self.variant.layers, flash_attn="on", cache_type_k="q8_0",
@@ -232,6 +238,23 @@ class BenchTests(TestingBase):
         self.assertEqual(len(testing.parse_bench_json('log line\n[{"a": 1}, {"b": 2}]\ntrailer')), 2)
         self.assertEqual(len(testing.parse_bench_json('{"a": 1}\nnoise\n{"b": 2}\n')), 2)
         self.assertEqual(testing.parse_bench_json("nothing here"), [])
+        # A crash leaves the array open; rows with their own [lists] must still come back whole.
+        rows = [{"n_prompt": 32, "n_gen": 0, "avg_ts": 1.5, "samples_ts": [1.5]}, {"n_prompt": 0, "n_gen": 8, "avg_ts": 2.0}]
+        cut = json.dumps(rows, indent=2)[:-3]
+        self.assertEqual(testing.parse_bench_json(cut), rows[:1])
+        self.assertEqual(testing.parse_bench_json("[\n"), [])
+
+    def test_mmap_off_is_passed_as_load_mode(self):
+        args = testing.bench_args(dict(self.config, mmap=False), 512, 128, 0)
+        self.assertEqual(args[args.index("-lm") + 1], "none")
+        self.assertIn("-v", args)  # llama.cpp's own reason for a failed load only shows with -v
+
+    def test_failed_load_is_plain_and_has_no_paths(self):
+        self.env(FAKE_BENCH_FAIL="load")
+        with self.assertRaises(ValueError) as caught:
+            testing.run_bench(self.bench, self.config, testing.bench_plan(4096))
+        self.assertIn("could not load the model", str(caught.exception))
+        self.assertNotIn(self.tmp.name, str(caught.exception))
 
     def test_run_bench_reads_both_speeds(self):
         result = testing.run_bench(self.bench, self.config, testing.bench_plan(4096))
@@ -348,6 +371,14 @@ class SpeedTests(TestingBase):
         record = self.run_speed()["measurement"]
         match = matching_speed([record], self.variant, hardware(), 4096, 0, None, 8)
         self.assertIs(match, record)
+
+    def test_record_survives_community_sharing(self):
+        from llm_configurator.community import anonymize
+        record = self.run_speed()["measurement"]
+        shared = anonymize(record, hardware(), self.variant)
+        self.assertEqual(shared["runtime"], {"version": "b6500", "backend": "cpu"})
+        self.assertEqual(shared["settings"]["cache_type_k"], "f16")
+        self.assertEqual(shared["settings"]["n_cpu_moe"], 0)
 
     def test_memory_over_estimate_is_reported(self):
         estimate = allocations(self.variant, 4096, 1, 0)["ram"]
