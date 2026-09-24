@@ -518,6 +518,33 @@ class DownloadTests(Base):
         with mock.patch.object(ri, "_open", FakeNet({self.record["name"]: self.data})):
             self.assertEqual(ri._download(self.record, self.folder).read_bytes(), self.data)
 
+    def test_complete_partial_needs_no_network(self):
+        self.folder.mkdir()
+        partial = self.folder / (self.record["sha256"][:16] + "-" + self.record["name"] + ".part")
+        partial.write_bytes(self.data)
+        with mock.patch.object(ri, "_open", side_effect=OSError("offline")):
+            self.assertEqual(ri._download(self.record, self.folder).read_bytes(), self.data)
+
+    def test_unverified_leftover_is_never_reused(self):
+        self.folder.mkdir()
+        record = dict(self.record, sha256=None)
+        (self.folder / ("unverified-" + record["name"])).write_bytes(b"\0" * len(self.data))  # same size, wrong bytes
+        with mock.patch.object(ri, "_open", FakeNet({record["name"]: self.data})):
+            self.assertEqual(ri._download(record, self.folder).read_bytes(), self.data)
+
+    def test_bytes_on_disk_are_what_gets_verified(self):
+        def lossy_stream(response, part, have, size, hasher, *rest):
+            # The right bytes arrive (and are hashed) but different bytes end up on disk, as with a
+            # failed flush or a second writer.
+            hasher.update(response.read())
+            part.write_bytes(b"\0" * size)
+
+        with mock.patch.object(ri, "_open", FakeNet({self.record["name"]: self.data})), \
+                mock.patch.object(ri, "_stream", lossy_stream):
+            with self.assertRaisesRegex(ValueError, "checksum"):
+                ri._download(self.record, self.folder)
+        self.assertEqual(list(self.folder.iterdir()), [])
+
     def test_dropped_connection_is_plain_and_keeps_partial(self):
         class Dropping(FakeResponse):
             def read(self, n=-1):
@@ -592,6 +619,28 @@ class InstallTests(Base):
         self.assertEqual(result["backend"], "cuda")
         self.assertTrue((Path(result["directory"]) / "libcudart.so.13").is_file())
         self.assertTrue(Path(result["directory"]).as_posix().endswith("b11158-cuda/build/bin"))
+
+    def test_runtime_companion_cannot_plant_links(self):
+        deep = "/".join(f"d{i}" for i in range(6))
+        companion = tar_bytes({f"{deep}/libcudart.so.13": ("cuda", 0o644), f"{deep}/libcublas.so.13": ("blas", 0o644),
+                               "etc/passwd": ("x", 0o644)},
+                              links=[(f"{deep}/libggml-evil.so", "../" * 6 + "etc/passwd", tarfile.SYMTYPE)])
+        blobs = {"llama-b11158-bin-ubuntu-cuda-13.4-x64.tar.gz": tar_bytes(server_tree("build/bin/")),
+                 "cudart-llama-b11158-bin-ubuntu-cuda-13.4-x64.tar.gz": companion}
+        result = self.run_install(blobs, nvidia("580.95.05"))
+        folder = Path(result["directory"])
+        self.assertTrue((folder / "libcudart.so.13").is_file())
+        self.assertFalse((folder / "libggml-evil.so").exists() or (folder / "libggml-evil.so").is_symlink())
+
+    def test_damaged_archive_is_a_plain_error(self):
+        archive = self.root / "llama-b1-bin-ubuntu-x64.tar.gz"
+        archive.write_bytes(tar_bytes(server_tree())[:200])
+        with self.assertRaisesRegex(ValueError, "damaged"):
+            ri.install_archive(self.store, archive)
+        clash = self.root / "clash.tar.gz"
+        clash.write_bytes(tar_bytes({"a": ("file", 0o644), "a/b": ("x", 0o644)}))
+        with self.assertRaises(ValueError):
+            ri.safe_extract(clash, self.root / "out")
 
     def test_macos_install(self):
         blobs = {"llama-b11158-bin-macos-arm64.tar.gz": tar_bytes(server_tree("llama-b11158/"))}

@@ -18,6 +18,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 import zipfile
+import zlib
 
 from .domain import GIB, check_cancel, now
 from .storage import runtime_dir
@@ -273,6 +274,7 @@ def _download(record, folder, progress=None, cancel=None, done_before=0, grand_t
     part = final.with_name(final.name + ".part")
     if not expected:
         part.unlink(missing_ok=True)
+        final.unlink(missing_ok=True)     # nothing to check a leftover against: always fetch it fresh
     if final.exists() and final.stat().st_size == size and (not expected or _sha256(final) == expected):
         return final
     if shutil.disk_usage(folder).free < size - (part.stat().st_size if part.exists() else 0) + GIB:
@@ -286,7 +288,10 @@ def _download(record, folder, progress=None, cancel=None, done_before=0, grand_t
         if have:
             with part.open("rb") as stream:
                 for chunk in iter(lambda: stream.read(CHUNK), b""):
+                    check_cancel(cancel)
                     hasher.update(chunk)
+        if have == size:
+            break              # already complete (e.g. cancelled while verifying); checked below, no network needed
         headers = {"User-Agent": "llm-configurator", "Accept": "application/octet-stream"}
         if have:
             headers["Range"] = f"bytes={have}-"
@@ -320,7 +325,8 @@ def _download(record, folder, progress=None, cancel=None, done_before=0, grand_t
         break
     if part.stat().st_size != size:
         raise ValueError(f"The download of {record['name']} stopped early. Try again; it will continue where it stopped.")
-    if expected and hasher.hexdigest() != expected:
+    # Check what is on disk, not only what came over the wire (a failed flush or a second writer would differ).
+    if expected and (hasher.hexdigest() != expected or _sha256(part) != expected):
         part.unlink(missing_ok=True)
         raise ValueError(f"{record['name']} failed its checksum check (it may be damaged or tampered with) and was "
                          "deleted. Try again.")
@@ -381,7 +387,14 @@ def _within(root, path):
 
 def safe_extract(archive, target, cancel=None):
     """Unpack a .zip or .tar.gz into `target`. Symlinks are allowed only if they stay inside `target`;
-    hard links only to files already unpacked; device files never."""
+    hard links only to files already unpacked; device files never. Every failure is a plain ValueError."""
+    try:
+        return _extract(archive, target, cancel)
+    except (OSError, EOFError, zlib.error, zipfile.BadZipFile, zipfile.LargeZipFile, tarfile.TarError) as error:
+        raise ValueError(f"The llama.cpp archive is damaged or unusual and could not be unpacked ({error}).") from None
+
+
+def _extract(archive, target, cancel):
     target = Path(target).resolve()
     target.mkdir(parents=True, exist_ok=True)
     name = str(archive).lower()
@@ -796,8 +809,11 @@ def _merge_companion(archive, bin_dir, cancel):
         libs = lambda f: sum(1 for p in f.iterdir() if re.search(r"\.(dll|so(\.\d+)*|dylib)$", p.name.lower()))
         source = max(folders, key=libs)
         for path in source.iterdir():
-            if not path.is_dir() and not (bin_dir / path.name).exists():
-                os.replace(path, bin_dir / path.name)
+            # Only plain files: a relative link checked where it was unpacked would point somewhere else
+            # once moved to bin_dir, so links are never carried over.
+            if path.is_symlink() or not path.is_file() or (bin_dir / path.name).exists():
+                continue
+            os.replace(path, bin_dir / path.name)
 
 
 def _tag_from(name):

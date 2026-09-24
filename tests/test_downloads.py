@@ -232,6 +232,55 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual((self.dir / "m.gguf.part").stat().st_size, 14)
         self.assertEqual(len(hub.requests), 1 + downloads.RETRIES)
 
+    def test_server_ignoring_range_and_dropping_does_not_retry_forever(self):
+        body = bytes(range(100))
+        variant = make_variant({"m.gguf": body})
+        hub = Hub({"m.gguf": body}, ignore_range=True)
+        hub.script = [lambda h, r: h.reply(r, fail_after=14)] * 50
+        with self.assertRaisesRegex(ValueError, "network kept failing"):
+            self.run_download(variant, hub)
+        # Re-downloading the same first bytes again and again is not progress.
+        self.assertEqual(len(hub.requests), 1 + downloads.RETRIES)
+
+    def test_shorter_206_range_keeps_part_and_asks_for_the_rest(self):
+        body = bytes(range(100))
+        variant = make_variant({"m.gguf": body})
+        (self.dir / "m.gguf.part").write_bytes(body[:10])
+        hub = Hub({"m.gguf": body})
+        hub.script = [lambda h, r: Response(body[10:50], 206, {"Content-Range": "bytes 10-49/100"})]
+        self.run_download(variant, hub)
+        self.assertEqual((self.dir / "m.gguf").read_bytes(), body)
+        self.assertEqual([r.get_header("Range") for r in hub.requests], ["bytes=10-", "bytes=50-"])
+
+    def test_write_failing_at_close_never_installs_a_short_file(self):
+        body = bytes(range(100))
+        variant = make_variant({"m.gguf": body})
+
+        class DiskFull:
+            """Like a buffered file on a full disk: the last bytes are lost when it is closed."""
+            def __init__(self, path, mode):
+                self.real = open(path, mode)
+            def write(self, chunk):
+                return self.real.write(chunk)
+            def close(self):
+                self.real.truncate(max(0, self.real.tell() - 5))
+                self.real.close()
+                raise OSError(28, "No space left on device")
+
+        with patch.object(downloads, "_open_partial", lambda path, mode, name: DiskFull(path, mode)):
+            with self.assertRaisesRegex(ValueError, "Could not save m.gguf"):
+                self.run_download(variant, Hub({"m.gguf": body}))
+        self.assertFalse((self.dir / "m.gguf").exists())
+        # The next run resumes from what really reached the disk.
+        self.run_download(variant, Hub({"m.gguf": body}))
+        self.assertEqual((self.dir / "m.gguf").read_bytes(), body)
+
+    def test_unsafe_or_colliding_local_names_are_refused(self):
+        for names in (["m.gguf:stream"], ["a.gguf", "a.gguf.part"], ["C:m.gguf"]):
+            variant = make_variant({n: b"x" * (i + 1) for i, n in enumerate(names)})
+            with self.assertRaisesRegex(ValueError, "Unsafe or duplicate"):
+                downloads.plan(variant, self.dir)
+
     def test_access_denied_has_plain_message(self):
         body = b"a" * 10
         hub = Hub({})
