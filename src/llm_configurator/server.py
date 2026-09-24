@@ -189,7 +189,7 @@ class AppServer(ThreadingHTTPServer):
         """
         try:
             if getattr(self, "refresh_cancel", None) is not None:
-                self.refresh_cancel.set()  # a model list refresh must not keep fetching after the app closes
+                self.refresh_cancel["event"].set()  # a model list refresh must not keep fetching after the app closes
             jobs = getattr(self, "jobs", None)
             cancelled = []
             for job in jobs.list() if jobs else []:
@@ -221,7 +221,9 @@ def make_server(store, port=8765, demo=False):
     served = {"variant_id": None, "candidate_id": None}
     comparisons = {}  # comparison_id -> {label: candidate_id}, so reveal can name candidates
     catalogue_lock = threading.Lock()
-    refresh_cancel = threading.Event()  # set by POST /api/refresh/cancel and at shutdown
+    # One Event per refresh, so a late cancel of the previous refresh can't stop the next one. Set by
+    # POST /api/refresh/cancel and at shutdown.
+    refresh_cancel = {"event": threading.Event()}
 
     def roots():
         # Discovered folders and settings can change while the app runs; refresh the list now and then.
@@ -287,7 +289,7 @@ def make_server(store, port=8765, demo=False):
         """Backend of the installed llama.cpp build ("cuda", "vulkan", ...), so a Vulkan build on an NVIDIA
         card never gets CUDA settings. The cached detect() result is enough except right before a launch."""
         cached = store.get("runtime") or {}
-        if cached.get("installed") and not fresh:
+        if not fresh:
             return cached.get("backend")
         try:
             from . import runtime_install
@@ -852,14 +854,14 @@ def make_server(store, port=8765, demo=False):
                         raise ValueError("include_models must be a boolean")
                     if not refresh_lock.acquire(blocking=False):
                         return self.send(409, {"error": "Metadata refresh already running"})
+                    cancel = refresh_cancel["event"] = threading.Event()
                     refresh_state.update(running=True, result=None, progress=None)
-                    refresh_cancel.clear()
                     def progress(value):
                         refresh_state["progress"] = value  # {stage, done, total, message}; scrubbed when sent
                     def run():
                         try:
                             refresh_state["result"] = app._call(refresh, store, include_scores=include_scores, include_models=include_models,
-                                                                progress=progress, cancel=refresh_cancel)
+                                                                progress=progress, cancel=cancel)
                         except Cancelled:
                             refresh_state["result"] = {"warnings": ["Refresh cancelled. The model list keeps what it had."], "cancelled": True}
                         except Exception as error:
@@ -873,7 +875,7 @@ def make_server(store, port=8765, demo=False):
                 if path == "/api/refresh/cancel":
                     fields(body)
                     if refresh_state["running"]:
-                        refresh_cancel.set()
+                        refresh_cancel["event"].set()
                     return self.send(200, refresh_state)
             except (ValueError, TypeError, KeyError, OSError) as error:
                 return self.send(400, {"error": str(error)})

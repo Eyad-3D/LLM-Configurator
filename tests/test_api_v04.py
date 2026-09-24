@@ -882,7 +882,7 @@ class FixupTests(ApiCase):
 
     def test_community_share_accepts_up_to_fifty_ids(self):
         seen = []
-        self.fakes.modules["community"].share_payload = lambda store, ids, hardware=None, variants=None: seen.append(ids) or {"json": "{}", "issue_url": "https://github.com/o/r/issues/new?body=%2Fhome"}
+        self.fakes.modules["community"].share_payload = lambda store, measurement_ids, hardware=None, variants=None: seen.append(measurement_ids) or {"json": "{}", "issue_url": "https://github.com/o/r/issues/new?body=%2Fhome"}
         ids = [f"id_{i}" for i in range(50)]
         status, out, _ = self.call("/api/community/share", {"measurement_ids": ids})
         self.assertEqual((status, seen[-1], out["issue_url"]), (200, ids, "https://github.com/o/r/issues/new?body=%2Fhome"))
@@ -929,6 +929,8 @@ class Round3Tests(ApiCase):
                     fake_names = [p for p in fake_params if p != "self"]
                     real_names = [p for p in real_params if p != "self"]
                     self.assertEqual(fake_names, real_names, f"{name}.{label}")
+                    required = lambda params: {p for p, v in params.items() if v.default is v.empty and v.kind not in (v.VAR_POSITIONAL, v.VAR_KEYWORD)}
+                    self.assertEqual(required(fake_params) - {"self"}, required(real_params) - {"self"}, f"{name}.{label} required arguments")
 
     def test_favicon_is_an_empty_answer_not_an_error(self):
         with urlopen(Request(self.url + "/favicon.ico")) as response:
@@ -987,7 +989,7 @@ class Round3Tests(ApiCase):
 
     def test_shutdown_cancels_a_running_refresh(self):
         self.server.server_close()
-        self.assertTrue(self.server.refresh_cancel.is_set())
+        self.assertTrue(self.server.refresh_cancel["event"].is_set())
 
     def test_community_share_passes_skipped_through(self):
         self.fakes.modules["community"].share_payload = lambda store, measurement_ids, hardware=None, variants=None: {
