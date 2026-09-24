@@ -28,11 +28,14 @@ from .storage import Store, models_dir
 RUN_POLL_SECONDS = 1.0
 # Stages that report elapsed time against a timeout, not real progress: show seconds, never a percentage.
 OPEN_ENDED = {"loading", "starting", "scanning"}
+BYTE_STAGES = {"verifying", "checking", "download", "downloading", "extract"}  # done/total count bytes
+TIME_STAGES = {"tune"}  # done/total count seconds of the time budget
 PAUSED = "Paused. Run the same command again to resume."
+CANCEL_WAIT_SECONDS = 120
 
 
 def parser():
-    root = argparse.ArgumentParser(description="Choose local model configurations using available hardware and benchmark evidence, "
+    root = argparse.ArgumentParser(prog="llm-config", description="Choose local model configurations using available hardware and benchmark evidence, "
                                                "then download, test, tune and run them with llama.cpp")
     root.add_argument("--data-dir", help="Override local cache/settings directory")
     commands = root.add_subparsers(dest="command", required=True, metavar="COMMAND")
@@ -189,11 +192,13 @@ class ProgressBar:
             total = None  # a load timeout is not a finish line
             if done:
                 parts.append(f"{duration(done)} so far")
-        in_bytes = "bytes_per_second" in value or value.get("unit") == "bytes" or (total or 0) > 1024**2
+        in_bytes = ("bytes_per_second" in value or value.get("unit") == "bytes" or stage in BYTE_STAGES
+                    or (total or 0) > 1024**2)
         if total:
             fraction = max(0.0, min(1.0, done / total))
             parts.append(f"{fraction * 100:3.0f}%")
-            parts.append(f"{size(done)} of {size(total)}" if in_bytes else f"{done:g} of {total:g}")
+            parts.append(f"{size(done)} of {size(total)}" if in_bytes else f"{duration(done)} of {duration(total)}"
+                         if stage in TIME_STAGES else f"{done:g} of {total:g}")
         if value.get("bytes_per_second"):
             parts.append(f"{value['bytes_per_second'] / 1024**2:.1f} MB/s")
         if value.get("eta_seconds") is not None:
@@ -245,7 +250,11 @@ def run_job(fn, title):
         bar.close()
         print("Stopping… (press Ctrl+C again to quit immediately)", file=sys.stderr, flush=True)
         jobs.cancel(job["id"])
-        jobs.wait(job["id"], 120)
+        # Poll the state: a Thread.join() interrupted by Ctrl+C can return at once while the job still runs,
+        # and exiting then would leave llama-bench or llama-server running on its own.
+        deadline = time.monotonic() + CANCEL_WAIT_SECONDS
+        while (jobs.get(job["id"]) or {}).get("state") in {"queued", "running"} and time.monotonic() < deadline:
+            time.sleep(0.05)
         raise
     finally:
         bar.close()
@@ -448,6 +457,12 @@ def main(argv=None):
     except KeyboardInterrupt:
         print("Cancelled.", file=sys.stderr)
         return 130
+    except BrokenPipeError:  # `llm-config models | head`: the reader left, which is not an error
+        try:
+            sys.stdout = open(os.devnull, "w")
+        except OSError:
+            pass
+        return 0
     except Exception as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
@@ -607,14 +622,17 @@ def model_command(store, args):
         if args.json:
             print_json(result)
             return 0
-        notes = result.get("notes") or []
+        notes, instructions = result.get("notes") or [], result.get("instructions") or []
         if args.output:
-            write_export(args.output, result)
-            notes = [n for n in notes if "UTF-8 with BOM" not in n]  # write_export already did it
+            executable = write_export(args.output, result)
+            # write_export already saved it under the user's name, with a BOM or as runnable.
+            notes = [n for n in notes if "UTF-8 with BOM" not in n]
+            instructions = [line.replace(result.get("filename") or "\0", args.output.name) for line in instructions
+                            if not line.startswith("Save this as") and not (executable and "chmod +x" in line)]
             print(f"Saved {args.output}", file=sys.stderr)
         else:
             print(result["content"])
-        for line in (result.get("instructions") or []) + notes:
+        for line in instructions + notes:
             print(f"  {line}", file=sys.stderr)
         return 0
     return run_command(store, args, variant, candidate, hardware)
@@ -631,6 +649,8 @@ def write_export(path, result):
     path.write_bytes(result["content"].encode("utf-8-sig" if powershell else "utf-8"))
     if os.name != "nt" and (any(n.endswith(".sh") for n in names) or result["content"].startswith("#!")):
         path.chmod(path.stat().st_mode | 0o755)
+        return True
+    return False
 
 
 def run_command(store, args, variant, candidate, hardware):
@@ -643,7 +663,7 @@ def run_command(store, args, variant, candidate, hardware):
     running = False
     try:
         run_job(lambda progress, cancel: server.start(progress=progress, cancel=cancel), f"Loading {variant.name} {variant.quant}")
-        print(f"Running. OpenAI-compatible address: {server.base_url}/v1")
+        print(f"Running. OpenAI-compatible address: {server.base_url}/v1", flush=True)
         print("Press Ctrl+C to stop.", file=sys.stderr, flush=True)
         running = True
         misses = 0

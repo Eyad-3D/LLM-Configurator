@@ -131,6 +131,31 @@ class ProgressTests(unittest.TestCase):
         self.assertNotIn("%", lines[0])
         self.assertTrue(lines[1].startswith("First word · "))
 
+    def test_seconds_and_small_files_read_as_units(self):
+        stream = io.StringIO()
+        bar = cli.ProgressBar(stream)
+        bar.update({"stage": "tune", "done": 7.6, "total": 60, "message": "Trying threads"})
+        bar.update({"stage": "verifying", "done": 559392, "total": 559392, "message": "Checking x.gguf"})
+        lines = stream.getvalue().splitlines()
+        self.assertIn("7s of 1m 00s", lines[0])
+        self.assertIn("0.5 MB of 0.5 MB", lines[1])
+
+    def test_ctrl_c_waits_until_the_job_has_stopped(self):
+        import threading, time
+        stopped = threading.Event()
+        def job(progress, cancel):
+            progress({"stage": "tune", "done": 1, "total": 60})
+            cancel.wait(5)
+            time.sleep(0.3)  # like killing llama-bench
+            stopped.set()
+        def interrupt(bar, value):
+            if value:
+                raise KeyboardInterrupt
+        with patch.object(cli.ProgressBar, "update", interrupt), redirect_stderr(io.StringIO()), \
+             self.assertRaises(KeyboardInterrupt):
+            cli.run_job(job, "Tuning")
+        self.assertTrue(stopped.is_set())
+
     def test_terminal_line_fits_the_terminal_width(self):
         class Terminal(io.StringIO):
             def isatty(self):
