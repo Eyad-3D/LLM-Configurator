@@ -6,9 +6,13 @@
     <meta name="session-token" content="__SESSION_TOKEN__" />
     <title>LLM Configurator · Find your local fit</title>
     <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="/quality.css" />
     <script defer src="/app.js"></script>
     <script defer src="/wizard.js"></script>
     <script defer src="/selects.js"></script>
+    <script defer src="/jobs.js"></script>
+    <script defer src="/quality.js"></script>
+    <script defer src="/run.js"></script>
   </head>
   <body>
     <header>
@@ -128,6 +132,21 @@
               value="8192"
               step="1"
             />
+          </details>
+          <details>
+            <summary>Fit longer conversations in less memory</summary>
+            <label for="kv_cache_type">Compress the conversation memory</label
+            ><select id="kv_cache_type">
+              <option value="f16" selected>Off: full size (best quality)</option>
+              <option value="q8_0">Half size (tiny quality loss)</option>
+              <option value="q4_0">Quarter size (some quality loss)</option>
+            </select>
+            <p class="hint">
+              While it works, the model keeps notes about everything in the
+              conversation. Compressing those notes is like zipping a folder:
+              longer conversations fit in the same memory, and answers can get
+              slightly worse.
+            </p>
           </details>
         </section>
         <section data-screen="q4" class="question" hidden>
@@ -374,16 +393,57 @@
           ><button id="compare">Recalculate</button
           ><button id="export" class="secondary" disabled>Export JSON</button>
         </div>
+        <details id="local-files-box">
+          <summary>Model files already on this computer</summary>
+          <div id="local-files"></div>
+        </details>
+        <details id="community-box" class="community-box">
+          <summary>Speed results shared by other people</summary>
+          <p class="hint">
+            Other people post how fast models ran on their computers. We can
+            download that public list and use it as a rough guide for models
+            you haven’t tested yet. Nothing about your computer is sent.
+          </p>
+          <p id="community-status" class="hint" role="status">
+            Checking…
+          </p>
+          <div class="step-actions">
+            <button id="community-import" type="button" class="secondary">
+              Get the latest shared results
+            </button>
+          </div>
+        </details>
         <details>
           <summary>Assumptions & technical notes</summary>
           <div id="notes" class="notes"></div>
         </details>
       </section>
       <footer>
-        Local models. Clear trade-offs.<span>LLM Configurator / v0.2</span>
+        Local models. Clear trade-offs.<span>LLM Configurator / v0.4</span>
       </footer>
     </main>
-    <dialog id="detail">
+    <aside id="jobs-tray" aria-label="Background tasks" hidden>
+      <button
+        id="jobs-toggle"
+        type="button"
+        class="jobs-toggle"
+        aria-expanded="true"
+        aria-controls="jobs-list"
+      >
+        <span>Background tasks<span class="visually-hidden">: </span></span
+        ><span id="jobs-count"></span>
+      </button>
+      <ul id="jobs-list"></ul>
+      <p id="jobs-live" class="visually-hidden" aria-live="polite"></p>
+    </aside>
+    <dialog id="run-panel" class="run-panel" aria-labelledby="run-title">
+      <button id="run-close" class="secondary close" type="button">
+        Close
+      </button>
+      <div id="run-content"></div>
+      <p id="run-live" class="visually-hidden" aria-live="polite"></p>
+    </dialog>
+    <dialog id="detail" aria-label="Deployment details">
       <button id="close_detail" class="secondary close">Close</button>
       <div id="detail_content"></div>
     </dialog>

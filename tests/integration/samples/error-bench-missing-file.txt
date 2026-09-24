@@ -1,0 +1,6 @@
+$ llama-bench -m does-not-exist.gguf -o json
+# exit code: 1
+# ---- stdout ----
+[
+# ---- stderr ----
+llama_bench: error: failed to load model '/opt/llama-work/models/does-not-exist.gguf'

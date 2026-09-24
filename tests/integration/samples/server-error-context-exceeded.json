@@ -1,0 +1,13 @@
+{
+  "request": "3000 x 'hello ' with -c 2048",
+  "status": 400,
+  "response": {
+    "error": {
+      "code": 400,
+      "message": "request (3018 tokens) exceeds the available context size (2048 tokens), try increasing it",
+      "type": "exceed_context_size_error",
+      "n_prompt_tokens": 3018,
+      "n_ctx": 2048
+    }
+  }
+}

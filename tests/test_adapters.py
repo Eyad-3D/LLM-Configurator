@@ -23,8 +23,9 @@ class AdapterTests(unittest.TestCase):
                  patch("llm_configurator.catalogue.fetch_scores", side_effect=ValueError("key unavailable")):
                 refresh(Store(directory), progress=updates.append)
         self.assertEqual(updates[0]["models_done"], 0)
-        self.assertEqual(updates[-1], {"models_done": 2, "models_total": 2,
-                                      "models_failed": 1, "scores": "failed"})
+        self.assertEqual(updates[-1], {"models_done": 2, "models_total": 2, "models_failed": 1, "scores": "failed",
+                                      "stage": "metadata", "done": 3, "total": 3,
+                                      "message": "Checked 2 of 2 model sources"})
         self.assertEqual(len(updates), 4)
 
     def test_model_and_score_requests_overlap(self):
@@ -75,7 +76,7 @@ class AdapterTests(unittest.TestCase):
     def test_hf_uses_real_file_size_and_skips_shards(self):
         responses = [{"sha": "base123"}, {"model_type": "qwen3", "num_hidden_layers": 32, "num_key_value_heads": 8,
                      "head_dim": 128, "max_position_embeddings": 32768}, {"sha": "gguf123", "siblings": [
-                         {"rfilename": "Model-Q4_K_M.gguf", "size": 12345, "lfs": {"sha256": "hash"}},
+                         {"rfilename": "Model-Q4_K_M.gguf", "size": 12345, "lfs": {"sha256": "ab" * 32}},
                          {"rfilename": "Model-Q8_0-00001-of-00002.gguf", "size": 12345}]}]
         with patch("llm_configurator.catalogue.get_json", side_effect=responses):
             variants = fetch_variants({"base_repo": "test/base", "gguf_repo": "test/gguf"})
@@ -85,8 +86,8 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(variants[0].revision, "gguf123")
 
     def test_unsupported_architecture_is_rejected(self):
-        with patch("llm_configurator.catalogue.get_json", side_effect=[{"sha": "x"}, {"model_type": "qwen3_moe"}, {}]):
-            with self.assertRaises(ValueError):
+        with patch("llm_configurator.catalogue.get_json", side_effect=[{"sha": "x"}, {"model_type": "mamba"}, {}]):
+            with self.assertRaisesRegex(ValueError, "not supported"):
                 fetch_variants({"base_repo": "test/base", "gguf_repo": "test/gguf"})
 
     def test_aa_pagination_and_null_scores(self):

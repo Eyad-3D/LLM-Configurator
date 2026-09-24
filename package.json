@@ -1,6 +1,6 @@
 {
   "name": "llm-configurator-ui-tests",
   "private": true,
-  "scripts": {"test": "node --test tests/ui-flow.test.cjs"},
+  "scripts": {"test": "node --test \"tests/ui-*.test.cjs\""},
   "devDependencies": {"jsdom": "26.1.0"}
 }

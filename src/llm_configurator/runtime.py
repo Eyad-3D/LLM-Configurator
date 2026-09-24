@@ -1,98 +1,98 @@
-"""Explicit downloads and local llama-bench execution. Never invoked by a scan."""
-import hashlib
+"""Explicit downloads (via `downloads`) and local llama-bench execution. Never invoked by a scan."""
 import json
 import math
 import os
 from pathlib import Path
+import secrets
 import shutil
 import subprocess
-from urllib.parse import quote, urlparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .domain import GIB, now
+from .downloads import DownloadRedirect, digest, download_variant  # noqa: F401 (re-exported for compatibility)
 from .engine import allocations
 from .hardware import scan
+from . import launch
+from .runtime_install import list_devices, pick_device
 
 
-def digest(path):
-    result = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(4 * 1024**2), b""):
-            result.update(chunk)
-    return result.hexdigest()
+def download(variant, directory, progress=None, cancel=None, token=None):
+    """Kept for existing callers; resumable, verified downloads live in `downloads`."""
+    return download_variant(variant, directory, progress=progress, cancel=cancel, token=token)
 
 
-class DownloadRedirect(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if urlparse(newurl).scheme != "https":
-            raise ValueError("Model downloads require HTTPS redirects")
-        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if redirected is not None and urlparse(req.full_url).netloc != urlparse(newurl).netloc:
-            redirected.remove_header("Authorization")
-        return redirected
+def _command(executable):
+    """argv prefix for llama-bench: a list is used as given (tests, managed installs), a string is looked up."""
+    if isinstance(executable, (list, tuple)) and executable:
+        return [str(part) for part in executable]
+    binary = shutil.which(executable) or (str(Path(executable).resolve()) if Path(executable).is_file() else None)
+    if not binary:
+        raise ValueError("llama-bench was not found; install llama.cpp or provide --executable")
+    return [binary]
 
 
-def download(variant, directory):
-    if variant.demo or not variant.sha256:
-        raise ValueError("A real model with a published SHA256 is required")
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
-    target = directory / Path(variant.filename).name
-    if target.exists():
-        if digest(target) == variant.sha256:
-            return target
-        raise ValueError("Destination already exists with a different hash; choose a different directory")
-    if shutil.disk_usage(directory).free < variant.size_bytes + GIB:
-        raise ValueError("Insufficient disk space for the model plus 1 GiB headroom")
-    url = f"https://huggingface.co/{variant.repo}/resolve/{quote(variant.revision)}/{quote(variant.filename)}"
-    headers = {"Authorization": f"Bearer {os.environ['HF_TOKEN']}"} if os.environ.get("HF_TOKEN") else {}
-    partial = target.with_suffix(target.suffix + ".part")
-    try:
-        with partial.open("xb") as output, build_opener(DownloadRedirect()).open(Request(url, headers=headers), timeout=60) as response:
-            written = 0
-            while chunk := response.read(4 * 1024**2):
-                written += len(chunk)
-                if written > variant.size_bytes:
-                    raise ValueError("Download exceeded catalogue file size")
-                output.write(chunk)
-        if written != variant.size_bytes or digest(partial) != variant.sha256:
-            raise ValueError("Downloaded model does not match the pinned size and SHA256")
-        partial.rename(target)
-    except FileExistsError:
-        raise ValueError("A partial download already exists; inspect/remove it before retrying") from None
-    except BaseException:
-        partial.unlink(missing_ok=True)
-        raise
-    return target
+def gpu_placement(command, gpu, env=None):
+    """How to point llama.cpp at one scanned GPU: (extra args, env, devices). NVIDIA is pinned by UUID through
+    CUDA_VISIBLE_DEVICES (then it is the only CUDA device). The `-dev` name always comes from the build's own
+    `--list-devices`, so a Vulkan, ROCm or Metal build never gets a made-up name like CUDA0 (llama.cpp exits on an
+    unknown name). When the build cannot list devices (older builds), `-dev` is left out: llama.cpp's default
+    `auto` then uses the visible GPU(s)."""
+    env = dict(os.environ if env is None else env)
+    backend = gpu.get("backend") or "cuda"    # scans before v0.4 only listed NVIDIA cards
+    if backend == "cuda" and str(gpu.get("uuid") or "").startswith("GPU-"):
+        env["CUDA_VISIBLE_DEVICES"] = gpu["uuid"]
+    devices = list_devices(command, env)
+    if devices is None:
+        return [], env, None
+    name = gpu.get("name") or "the selected GPU"
+    if not devices:
+        raise ValueError(f"This llama.cpp build sees no graphics card it can use, so it cannot put layers on {name}. "
+                         "It may be a CPU-only build, or the graphics driver may be missing. Install the build that "
+                         "matches your graphics card, or benchmark with 0 GPU layers.")
+    device = pick_device(devices, dict(gpu, backend=backend))
+    if not device:
+        seen = ", ".join(f"{d['name']} ({d['description']})" for d in devices)
+        raise ValueError(f"This llama.cpp build cannot tell which of its graphics devices is {name} (it sees: {seen}). "
+                         "Benchmark with 0 GPU layers, or pick the GPU with a llama.cpp build for that card only.")
+    return ["-dev", device], env, devices
 
 
 def bench(variant, model_path, executable, context, layers, gpu_index=0, timeout=600):
+    """Measure generation speed near a full context with llama-bench. `executable` is a path/name or an
+    argv prefix (`command: str | list[str]`)."""
     if variant.demo or not variant.sha256:
         raise ValueError("Cannot benchmark demo models or variants without a published SHA256")
     if not 256 <= context <= variant.max_context or not 0 <= layers <= variant.layers:
         raise ValueError("Context or GPU layer count exceeds model limits")
     if digest(model_path) != variant.sha256:
         raise ValueError("Local GGUF SHA256 does not match the selected variant")
-    binary = shutil.which(executable) or (str(Path(executable).resolve()) if Path(executable).is_file() else None)
-    if not binary:
-        raise ValueError("llama-bench was not found; install llama.cpp or provide --executable")
+    command = _command(executable)
     hardware = scan(False)
     gpu = next((g for g in hardware["gpus"] if g["index"] == gpu_index), None)
     if layers and not gpu:
-        raise ValueError("Selected NVIDIA GPU is unavailable")
-    memory = allocations(variant, context, 1, layers)
-    if memory["ram"] > hardware["ram_available"] - 2 * GIB or (layers and memory["vram"] > gpu["available"] - 0.5 * GIB):
+        raise ValueError("The selected GPU is unavailable")
+    memory = allocations(variant, context, 1, layers, unified=bool(layers and gpu.get("unified")))
+    vram_free = gpu.get("available") if layers else None
+    if memory["ram"] > hardware["ram_available"] - 2 * GIB or (vram_free is not None and memory["vram"] > vram_free - 0.5 * GIB):
         raise ValueError("Current resources do not meet the conservative benchmark memory check; free resources or reduce context")
     threads = hardware.get("cores") or hardware["threads"] or 1
-    env = os.environ.copy()
+    # The same launch settings a served model would get: launch owns the environment (inherited LLAMA_ARG_*
+    # dropped, CORS limited to this computer, NVIDIA pinned by UUID) and the -ngl count.
+    config = launch.normalize({"context": context, "gpu_layers": layers, "total_layers": variant.layers,
+                               "threads": threads, "gpu_uuid": gpu.get("uuid") or None if layers else None,
+                               "gpu_backend": (gpu.get("backend") or "cuda") if layers else None})
+    env = launch.server_env(config)
     if layers:
-        env["CUDA_VISIBLE_DEVICES"] = gpu["uuid"]
+        device_args, env, devices = gpu_placement(command, gpu, env)
+    else:
+        # `none` is the one device name every build accepts: nothing is offloaded.
+        device_args, devices = ["-dev", "none"], None
     # Test 128 generated tokens near the requested context capacity, not an empty cache.
-    runtime_layers = layers + 1 if layers == variant.layers else layers
-    command = [binary, "-m", str(Path(model_path).resolve()), "-p", "0", "-n", "128", "-d", str(context - 128),
-               "-ngl", str(runtime_layers), "-t", str(threads), "-ctk", "f16", "-ctv", "f16", "-r", "3", "-o", "json",
-               "-dev", "CUDA0" if layers else "none"]
-    completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout, env=env, check=False)
+    runtime_layers = launch.runtime_gpu_layers(layers, variant.layers)
+    args = command + ["-m", str(Path(model_path).resolve()), "-p", "0", "-n", "128", "-d", str(context - 128),
+                      "-ngl", str(runtime_layers), "-t", str(threads), "-ctk", "f16", "-ctv", "f16", "-r", "3", "-o", "json"]
+    args += device_args
+    completed = subprocess.run(args, capture_output=True, text=True, timeout=timeout, env=env, check=False,
+                               errors="replace", creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
     if completed.returncode:
         raise ValueError(f"llama-bench failed ({completed.returncode}): {completed.stderr[-1200:]}")
     try:
@@ -105,7 +105,16 @@ def bench(variant, model_path, executable, context, layers, gpu_index=0, timeout
             raise ValueError("Runtime settings differ from requested settings")
     except (ValueError, TypeError, KeyError, StopIteration):
         raise ValueError("Unrecognised llama-bench output or settings; use a build supporting JSON output and --n-depth") from None
+    # llama-bench has no --version; its rows carry the build. "b<N>" matches runtime_install.detect()["version"].
+    number = row.get("build_number")
+    version = f"b{number}" if isinstance(number, int) and not isinstance(number, bool) else row.get("build_commit")
+    chosen = device_args[1] if len(device_args) == 2 else None
+    backend = next((d["backend"] for d in devices or [] if d["name"] == chosen), None) if layers else "cpu"
     return {"variant_id": variant.id, "sha256": variant.sha256, "fingerprint": hardware["fingerprint"], "timestamp": now(),
             "context": context, "users": 1, "gpu_layers": layers, "gpu_uuid": gpu["uuid"] if layers else None,
-            "threads": threads, "tps": tps, "runtime_build": row.get("build_commit"), "raw": row,
+            "threads": threads, "tps": tps, "runtime_build": version, "raw": row,
+            "kind": "bench", "id": secrets.token_hex(6), "depth": context - 128,
+            "settings": {"flash_attn": {0: "off", 1: "on"}.get(row.get("flash_attn"), "auto"), "cache_type_k": "f16", "cache_type_v": "f16", "batch": row.get("n_batch"),
+                         "ubatch": row.get("n_ubatch"), "n_cpu_moe": 0},
+            "runtime": {"version": version, "backend": backend},
             "note": "Synthetic generation benchmark; not TTFT, quality or concurrent throughput. Load changes can affect speed."}

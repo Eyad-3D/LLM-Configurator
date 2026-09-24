@@ -1,0 +1,56 @@
+{
+  "status": 200,
+  "response": {
+    "models": [
+      {
+        "name": "tiny",
+        "model": "tiny",
+        "modified_at": "",
+        "size": "",
+        "digest": "",
+        "type": "model",
+        "description": "",
+        "tags": [
+          ""
+        ],
+        "capabilities": [
+          "completion"
+        ],
+        "parameters": "",
+        "details": {
+          "parent_model": "",
+          "format": "gguf",
+          "family": "",
+          "families": [
+            ""
+          ],
+          "parameter_size": "",
+          "quantization_level": ""
+        }
+      }
+    ],
+    "object": "list",
+    "data": [
+      {
+        "id": "tiny",
+        "aliases": [
+          "tiny"
+        ],
+        "tags": [],
+        "object": "model",
+        "created": 1790254095,
+        "owned_by": "llamacpp",
+        "meta": {
+          "vocab_type": 2,
+          "n_vocab": 422,
+          "n_ctx": 2048,
+          "n_ctx_train": 16384,
+          "n_embd": 512,
+          "n_params": 6728192,
+          "size": 13465600,
+          "ftype": "F16"
+        }
+      }
+    ]
+  }
+}

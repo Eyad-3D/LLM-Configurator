@@ -1,0 +1,30 @@
+name: Community speed results
+description: Share anonymous speed results that LLM Configurator prepared for you.
+title: "Community results"
+labels: ["community-results"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for sharing. These results help other people see how fast a model runs on computers like theirs.
+
+        LLM Configurator fills in the box below. If it is empty, paste the JSON the app showed you.
+        Read it before you submit: it should only hold the model (quantisation, layer count and the file's SHA-256
+        checksum, plus its name for catalogue models only), a rough hardware description (names, memory rounded to 4 GB, operating
+        system family), the month of the test, the llama.cpp version and backend, settings and speeds.
+        No file paths, user names, computer names or serial numbers.
+  - type: textarea
+    id: results
+    attributes:
+      label: Results (JSON)
+      description: The anonymous JSON from LLM Configurator. Do not edit the numbers.
+      render: json
+    validations:
+      required: true
+  - type: checkboxes
+    id: review
+    attributes:
+      label: Check
+      options:
+        - label: I read the JSON and it contains nothing personal.
+          required: true

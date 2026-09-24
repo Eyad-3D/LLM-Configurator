@@ -1,0 +1,418 @@
+{
+  "version": 2,
+  "workload": "general",
+  "description": "Short original questions on arithmetic, reasoning, dates, unit conversion, string manipulation and stable common knowledge.",
+  "items": [
+    {
+      "id": "gen-001",
+      "kind": "arithmetic",
+      "difficulty": "easy",
+      "prompt": "Mira buys 7 notebooks at 3 dollars each and one pen for 4 dollars. How many dollars does she spend in total? Give just the number.",
+      "answer": "25"
+    },
+    {
+      "id": "gen-002",
+      "kind": "arithmetic",
+      "difficulty": "easy",
+      "prompt": "A bus has 38 passengers. At the first stop 9 people get off and 14 people get on. How many passengers are on the bus now? Give just the number.",
+      "answer": "43"
+    },
+    {
+      "id": "gen-003",
+      "kind": "capital",
+      "difficulty": "easy",
+      "prompt": "What is the capital city of Japan? Reply with the city name only.",
+      "answer": "tokyo",
+      "accept": [
+        "t[oō]ky[oō](,? japan)?"
+      ]
+    },
+    {
+      "id": "gen-004",
+      "kind": "chemical_symbol",
+      "difficulty": "easy",
+      "prompt": "What is the chemical symbol for the element sodium? Give just the symbol.",
+      "answer": "Na"
+    },
+    {
+      "id": "gen-005",
+      "kind": "planets",
+      "difficulty": "easy",
+      "prompt": "Which planet is closest to the Sun? Reply with one word.",
+      "answer": "mercury"
+    },
+    {
+      "id": "gen-006",
+      "kind": "string_reverse",
+      "difficulty": "easy",
+      "prompt": "Reverse the letters of the word 'lantern'. Give just the reversed word.",
+      "answer": "nretnal"
+    },
+    {
+      "id": "gen-007",
+      "kind": "letter_count",
+      "difficulty": "easy",
+      "prompt": "How many letters are in the word 'orchestra'? Give just the number.",
+      "answer": "9"
+    },
+    {
+      "id": "gen-008",
+      "kind": "unit_conversion",
+      "difficulty": "easy",
+      "prompt": "How many centimeters are in 4.5 meters? Give just the number.",
+      "answer": "450"
+    },
+    {
+      "id": "gen-009",
+      "kind": "weekday",
+      "difficulty": "easy",
+      "prompt": "If today is Monday, what day of the week will it be in 3 days? Reply with the day name.",
+      "answer": "thursday",
+      "accept": [
+        "thursday",
+        "thu",
+        "thurs"
+      ]
+    },
+    {
+      "id": "gen-010",
+      "kind": "common_knowledge",
+      "difficulty": "easy",
+      "prompt": "How many days are in a leap year? Give just the number.",
+      "answer": "366"
+    },
+    {
+      "id": "gen-011",
+      "kind": "percentage",
+      "difficulty": "easy",
+      "prompt": "What is 15% of 80? Give just the number.",
+      "answer": "12"
+    },
+    {
+      "id": "gen-012",
+      "kind": "nth_letter",
+      "difficulty": "easy",
+      "prompt": "What is the 3rd letter of the word 'garden'? Reply with the single letter.",
+      "answer": "r"
+    },
+    {
+      "id": "gen-013",
+      "kind": "capital",
+      "difficulty": "easy",
+      "prompt": "What is the capital city of Canada? Reply with the city name only.",
+      "answer": "ottawa",
+      "accept": [
+        "ottawa(,? (ontario|on|canada))?"
+      ]
+    },
+    {
+      "id": "gen-014",
+      "kind": "chemical_symbol",
+      "difficulty": "easy",
+      "prompt": "Which chemical element has the symbol Fe? Reply with the element name only.",
+      "answer": "iron",
+      "accept": [
+        "iron(,? \\(?fe\\)?)?"
+      ]
+    },
+    {
+      "id": "gen-015",
+      "kind": "comparison",
+      "difficulty": "easy",
+      "prompt": "Which number is larger: 0.7 or 0.65? Give just the number.",
+      "answer": "0.7"
+    },
+    {
+      "id": "gen-016",
+      "kind": "unit_conversion",
+      "difficulty": "easy",
+      "prompt": "How many minutes are in 3.5 hours? Give just the number.",
+      "answer": "210"
+    },
+    {
+      "id": "gen-017",
+      "kind": "word_count",
+      "difficulty": "easy",
+      "prompt": "How many words are in this sentence: 'The quick grey heron waited by the cold river.' Give just the number.",
+      "answer": "9"
+    },
+    {
+      "id": "gen-018",
+      "kind": "planets",
+      "difficulty": "easy",
+      "prompt": "What is the largest planet in our solar system? Reply with one word.",
+      "answer": "jupiter"
+    },
+    {
+      "id": "gen-019",
+      "kind": "word_problem",
+      "difficulty": "medium",
+      "prompt": "A bakery bakes 12 trays of rolls with 18 rolls on each tray. It sells 175 rolls and gives away 20. How many rolls are left? Give just the number.",
+      "answer": "21"
+    },
+    {
+      "id": "gen-020",
+      "kind": "word_problem",
+      "difficulty": "medium",
+      "prompt": "Tomas earns 14 dollars per hour. He works 6 hours on Monday and 9 hours on Wednesday, then spends 57 dollars of those earnings on groceries. How many dollars of those earnings does he have left? Give just the number.",
+      "answer": "153"
+    },
+    {
+      "id": "gen-021",
+      "kind": "weekday",
+      "difficulty": "medium",
+      "prompt": "Today is a Wednesday. What day of the week will it be 100 days from today? Reply with the day name.",
+      "answer": "friday",
+      "accept": [
+        "friday",
+        "fri"
+      ]
+    },
+    {
+      "id": "gen-022",
+      "kind": "unit_conversion",
+      "difficulty": "medium",
+      "prompt": "A runner covers 5 kilometers in 25 minutes at a steady pace. What is her speed in kilometers per hour? Give just the number.",
+      "answer": "12"
+    },
+    {
+      "id": "gen-023",
+      "kind": "letter_count",
+      "difficulty": "medium",
+      "prompt": "How many times does the letter 's' appear in the word 'possessiveness'? Give just the number.",
+      "answer": "6"
+    },
+    {
+      "id": "gen-024",
+      "kind": "string_sort",
+      "difficulty": "medium",
+      "prompt": "Sort the letters of the word 'planet' into alphabetical order. Give the resulting string of letters with no spaces.",
+      "answer": "aelnpt"
+    },
+    {
+      "id": "gen-025",
+      "kind": "logic_ordering",
+      "difficulty": "medium",
+      "prompt": "Ana is taller than Ben. Ben is taller than Cleo. Cleo is taller than Dev. Who is the second shortest of the four? Reply with the name only.",
+      "answer": "cleo"
+    },
+    {
+      "id": "gen-026",
+      "kind": "percentage",
+      "difficulty": "medium",
+      "prompt": "A jacket costs 80 dollars. It is discounted by 25%, and then the discounted price is increased by 10%. What is the final price in dollars? Give just the number.",
+      "answer": "66"
+    },
+    {
+      "id": "gen-027",
+      "kind": "date_arithmetic",
+      "difficulty": "medium",
+      "prompt": "In the same year, how many days after March 3 is April 10? Give just the number.",
+      "answer": "38"
+    },
+    {
+      "id": "gen-028",
+      "kind": "unit_conversion",
+      "difficulty": "medium",
+      "prompt": "How many seconds are in 2 hours and 15 minutes? Give just the number.",
+      "answer": "8100"
+    },
+    {
+      "id": "gen-029",
+      "kind": "arithmetic",
+      "difficulty": "medium",
+      "prompt": "What is 23 multiplied by 47? Give just the number.",
+      "answer": "1081"
+    },
+    {
+      "id": "gen-030",
+      "kind": "sequence",
+      "difficulty": "medium",
+      "prompt": "What is the next number in this sequence: 3, 7, 15, 31, 63, ? Give just the number.",
+      "answer": "127"
+    },
+    {
+      "id": "gen-031",
+      "kind": "ratio",
+      "difficulty": "medium",
+      "prompt": "A recipe uses 3 cups of flour for every 2 cups of milk. If you use 12 cups of flour, how many cups of milk do you need? Give just the number.",
+      "answer": "8"
+    },
+    {
+      "id": "gen-032",
+      "kind": "string_manipulation",
+      "difficulty": "medium",
+      "prompt": "Take the word 'bicycle' and swap its first and last letters. Give just the resulting word.",
+      "answer": "eicyclb"
+    },
+    {
+      "id": "gen-033",
+      "kind": "letter_count",
+      "difficulty": "medium",
+      "prompt": "How many vowels (a, e, i, o, u) are in the word 'education'? Give just the number.",
+      "answer": "5"
+    },
+    {
+      "id": "gen-034",
+      "kind": "time_arithmetic",
+      "difficulty": "medium",
+      "prompt": "A train leaves at 09:47 and the trip takes 2 hours and 38 minutes. At what time does it arrive? Give the time in 24-hour HH:MM format.",
+      "answer": "12:25",
+      "accept": [
+        "12:25( pm| p\\.m)?"
+      ]
+    },
+    {
+      "id": "gen-035",
+      "kind": "age_puzzle",
+      "difficulty": "medium",
+      "prompt": "Priya is 4 years older than Omar. In 6 years, the sum of their ages will be 50. How old is Omar now? Give just the number.",
+      "answer": "17"
+    },
+    {
+      "id": "gen-036",
+      "kind": "capital",
+      "difficulty": "medium",
+      "prompt": "What is the capital city of Australia? Reply with the city name only.",
+      "answer": "canberra"
+    },
+    {
+      "id": "gen-037",
+      "kind": "logic_syllogism",
+      "difficulty": "medium",
+      "prompt": "All blickets are green. Some green things are round. Jojo is a blicket. Must Jojo be round? Reply with yes or no.",
+      "answer": "no",
+      "accept": [
+        "no( ?[,;:—–-] ?| )(not necessarily|it need not be|jojo need not be round|jojo is not necessarily round)"
+      ]
+    },
+    {
+      "id": "gen-038",
+      "kind": "average",
+      "difficulty": "medium",
+      "prompt": "The average of four numbers is 15. Three of the numbers are 10, 12, and 20. What is the fourth number? Give just the number.",
+      "answer": "18"
+    },
+    {
+      "id": "gen-039",
+      "kind": "chemical_symbol",
+      "difficulty": "medium",
+      "prompt": "What is the chemical symbol for the element potassium? Give just the symbol.",
+      "answer": "K"
+    },
+    {
+      "id": "gen-040",
+      "kind": "weekday",
+      "difficulty": "hard",
+      "prompt": "January 1 of a certain non-leap year is a Thursday. What day of the week is March 1 of that same year? Reply with the day name.",
+      "answer": "sunday",
+      "accept": [
+        "sunday",
+        "sun"
+      ]
+    },
+    {
+      "id": "gen-041",
+      "kind": "rate_problem",
+      "difficulty": "hard",
+      "prompt": "Pipe A alone fills an empty tank in 6 hours. Pipe B alone fills it in 4 hours. If both pipes are opened together on the empty tank, how many hours does it take to fill? Give just the number.",
+      "answer": "2.4",
+      "accept": [
+        "(2\\.4 (hours?|hrs?|h) )?\\(?2 ?(hours?|hrs?|h),? (and )?24 ?(minutes?|mins?|m)\\)?"
+      ]
+    },
+    {
+      "id": "gen-042",
+      "kind": "letter_count",
+      "difficulty": "hard",
+      "prompt": "How many times does the letter 'r' appear in the word 'refrigerator'? Give just the number.",
+      "answer": "4"
+    },
+    {
+      "id": "gen-043",
+      "kind": "string_manipulation",
+      "difficulty": "hard",
+      "prompt": "Take the word 'thunderstorm', remove every vowel (a, e, i, o, u), and give the remaining letters in their original order as one word.",
+      "answer": "thndrstrm"
+    },
+    {
+      "id": "gen-044",
+      "kind": "logic_puzzle",
+      "difficulty": "hard",
+      "prompt": "Four friends, Ari, Bo, Cy and Di, finished a race in places 1 to 4 with no ties. Bo finished immediately after Di. Ari was neither first nor last. Cy finished ahead of Ari. Who finished in 2nd place? Reply with the name only.",
+      "answer": "ari"
+    },
+    {
+      "id": "gen-045",
+      "kind": "arithmetic",
+      "difficulty": "hard",
+      "prompt": "What is 1234 multiplied by 56, minus 789? Give just the number.",
+      "answer": "68315"
+    },
+    {
+      "id": "gen-046",
+      "kind": "optimization",
+      "difficulty": "hard",
+      "prompt": "A shop sells pencils in packs of 12 for 3 dollars per pack, or singly for 30 cents each. What is the lowest cost, in cents, to buy exactly 30 pencils? Give just the number.",
+      "answer": "780"
+    },
+    {
+      "id": "gen-047",
+      "kind": "date_arithmetic",
+      "difficulty": "hard",
+      "prompt": "How many days are there in the years 2023 and 2024 combined? Give just the number.",
+      "answer": "731"
+    },
+    {
+      "id": "gen-048",
+      "kind": "unit_conversion",
+      "difficulty": "hard",
+      "prompt": "How many square centimeters are in 2.5 square meters? Give just the number.",
+      "answer": "25000",
+      "accept": [
+        "25,? ?000 ?(cm ?(2|\\^2)|sq\\.? ?cm|square centimet(er|re)s?)"
+      ]
+    },
+    {
+      "id": "gen-049",
+      "kind": "letter_count",
+      "difficulty": "hard",
+      "prompt": "How many letters are in the word 'overcompensation'? Give just the number.",
+      "answer": "16"
+    },
+    {
+      "id": "gen-050",
+      "kind": "clock_angle",
+      "difficulty": "hard",
+      "prompt": "What is the smaller angle, in degrees, between the hour hand and the minute hand of an analog clock at 3:40? Give just the number.",
+      "answer": "130"
+    },
+    {
+      "id": "gen-051",
+      "kind": "string_sort",
+      "difficulty": "hard",
+      "prompt": "Which of these words comes last in alphabetical order: maple, mango, marble, magnet? Reply with the word only.",
+      "answer": "marble"
+    },
+    {
+      "id": "gen-052",
+      "kind": "rate_problem",
+      "difficulty": "hard",
+      "prompt": "3 identical printers print 90 pages in 6 minutes. At the same rate per printer, how many pages do 5 printers print in 10 minutes? Give just the number.",
+      "answer": "250"
+    },
+    {
+      "id": "gen-053",
+      "kind": "date_arithmetic",
+      "difficulty": "hard",
+      "prompt": "What date is 45 days after 20 January 2026? Give the date in YYYY-MM-DD format.",
+      "answer": "2026-03-06",
+      "accept": [
+        "2026-0?3-0?6( \\((friday|fri)\\))?",
+        "((friday|fri),? )?(march|mar) 0?6(th)?,? 2026",
+        "((friday|fri),? )?0?6(th)? (of )?(march|mar),? 2026",
+        "2026/0?3/0?6"
+      ]
+    }
+  ]
+}

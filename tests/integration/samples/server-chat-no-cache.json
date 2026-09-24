@@ -1,0 +1,30 @@
+{
+  "request": {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are terse."
+      },
+      {
+        "role": "user",
+        "content": "What is 17 + 25? Reply with just the number."
+      }
+    ],
+    "max_tokens": 16,
+    "temperature": 0.0,
+    "seed": 1,
+    "cache_prompt": false
+  },
+  "status": 200,
+  "timings": {
+    "cache_n": 0,
+    "prompt_n": 67,
+    "prompt_ms": 6.775,
+    "prompt_per_token_ms": 0.10111940298507463,
+    "prompt_per_second": 9889.29889298893,
+    "predicted_n": 3,
+    "predicted_ms": 1.584,
+    "predicted_per_token_ms": 0.792,
+    "predicted_per_second": 1262.6262626262626
+  }
+}
