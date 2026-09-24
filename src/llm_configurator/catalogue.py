@@ -4,31 +4,35 @@ Sizes and checksums come from the Hugging Face file listing, never from guesses.
 is offered only when every shard is listed. Derived numbers (expert share, active parameters) are
 computed from config.json shapes, as described in `moe_shape`.
 """
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from http.client import HTTPException
 import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import math
 import os
 from pathlib import Path
 import re
 import tempfile
 import threading
+import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from .domain import ARCHITECTURES, GIB, MOE_ARCHITECTURES, QUANT_BYTES_PER_PARAMETER, Variant, check_cancel, now
+from .domain import ARCHITECTURES, GIB, MOE_ARCHITECTURES, QUANT_BYTES_PER_PARAMETER, Cancelled, Variant, check_cancel, now
 from .credentials import resolve, validate_key
 
 HF = "https://huggingface.co"
 QUANTS = tuple(QUANT_BYTES_PER_PARAMETER)  # every quant the memory model understands
 # The default shortlist: enough steps to trade quality for memory without flooding the results.
 DEFAULT_QUANTS = ("Q3_K_M", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0", "MXFP4")
-FULL_PRECISION = ("F16", "BF16")
+FULL_PRECISION = ("F16", "BF16")  # one of them is offered: F16 when present, it runs on every llama.cpp backend
+MXFP4_BYTES_PER_WEIGHT = 17 / 32  # 32 four-bit values plus one shared scale byte
 FULL_PRECISION_MAX_PARAMETERS = 4.5e9  # 16-bit files are only a sensible choice for small models
 SCORE_FIELDS = {"general": "artificial_analysis_intelligence_index", "coding": "artificial_analysis_coding_index",
                 "agentic": "artificial_analysis_agentic_index"}
 SHARD = re.compile(r"^(?P<stem>.+)-(?P<index>\d{5})-of-(?P<total>\d{5})\.gguf$", re.I)
 SKIP_FILE = re.compile(r"mmproj|imatrix", re.I)  # vision add-ons and calibration data are not models
+SHA256 = re.compile(r"[0-9a-f]{64}")
 MAX_WORKERS = 6  # polite to Hugging Face with ~40 entries; the score request shares the pool
 MAX_USER_ENTRIES = 200
 REMOVED_KEY = "catalogue_removed"
@@ -50,12 +54,12 @@ def get_json(url, headers=None):
         return json.loads(raw)
     except HTTPError as error:
         raise ValueError(f"Metadata request returned HTTP {error.code}; check access, API key or rate limit") from None
-    except (URLError, TimeoutError, OSError, json.JSONDecodeError) as error:
+    except (URLError, TimeoutError, OSError, HTTPException, json.JSONDecodeError, UnicodeDecodeError) as error:
         raise ValueError(f"Metadata unavailable ({type(error).__name__}); cached results remain available") from None
 
 
 def valid_repo(value):
-    return isinstance(value, str) and bool(re.fullmatch(r"[\w.-]+/[\w.-]+", value)) and ".." not in value \
+    return isinstance(value, str) and bool(re.fullmatch(r"[\w.-]+/[\w.-]+", value, re.ASCII)) and ".." not in value \
         and not any(part.startswith(".") for part in value.split("/"))
 
 
@@ -84,21 +88,44 @@ def user_copy(store):
     return store.directory / "catalogue.json"
 
 
+def _saved_entries(store):
+    """The user copy's valid entries. A damaged file is set aside (never deleted) so the app still starts."""
+    path = user_copy(store)
+    if not path.exists():
+        return []
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(saved, list):
+            raise ValueError("not a list")
+    except (OSError, ValueError, UnicodeDecodeError):
+        try:
+            os.replace(path, path.with_name(f"catalogue.json.damaged-{int(time.time())}"))
+        except OSError:
+            pass
+        return []
+    valid = []
+    for entry in saved:
+        try:
+            valid.append(validate_entry(entry))
+        except (ValueError, KeyError, TypeError):
+            continue  # one bad hand edit must not hide every model
+    return valid
+
+
 def definitions(store):
     """The shipped catalogue plus the user's copy.
 
     The user copy may hold benchmark mappings (`aa_slug`) for shipped entries and whole user-added
     entries (`"user": true`). Shipped entries the user removed stay hidden, and entries added to the
-    shipped list in later versions still appear for people who already have a copy.
+    shipped list in later versions still appear for people who already have a copy. Shipped entries
+    are marked `"shipped": true`, so a later version that drops one does not bring it back as "custom".
     """
     shipped = packaged_entries()
-    path = user_copy(store)
-    saved = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
-    if not isinstance(shipped, list) or not isinstance(saved, list):
+    if not isinstance(shipped, list):
         raise ValueError("catalogue.json must contain an array")
-    for entry in shipped + saved:
+    for entry in shipped:
         validate_entry(entry)
-    mine = {e["base_repo"]: e for e in saved}
+    mine = {e["base_repo"]: e for e in _saved_entries(store)}
     removed = set(store.get(REMOVED_KEY, []) or [])
     entries = []
     for entry in shipped:
@@ -108,9 +135,10 @@ def definitions(store):
         if own and own.get("user"):
             entries.append(dict(own))
         else:
-            entries.append({**entry, "aa_slug": own.get("aa_slug") if own and "aa_slug" in own else entry.get("aa_slug")})
+            entries.append({**entry, "shipped": True,
+                            "aa_slug": own.get("aa_slug") if own and "aa_slug" in own else entry.get("aa_slug")})
     # Anything else in the copy was added by the user (including hand-edited v0.3 copies).
-    entries.extend({**entry, "user": True} for entry in mine.values())
+    entries.extend({**entry, "user": True} for entry in mine.values() if not entry.get("shipped"))
     return entries
 
 
@@ -136,14 +164,27 @@ def add_entry(store, base_repo, gguf_repo, config_repo=None, family=None, tags=N
                             **({"config_repo": config_repo} if config_repo else {})})
     with _user_copy_lock:
         entries = definitions(store)
-        if any(e["base_repo"] == base_repo for e in entries):
+        # Hugging Face repo names are not case-sensitive.
+        if any(e["base_repo"].lower() == base_repo.lower() for e in entries):
             raise ValueError(f"{base_repo} is already in the catalogue")
-        if any(e["gguf_repo"] == gguf_repo for e in entries):
+        if any(e["gguf_repo"].lower() == gguf_repo.lower() for e in entries):
             raise ValueError(f"{gguf_repo} is already used by another catalogue entry")
         if sum(bool(e.get("user")) for e in entries) >= MAX_USER_ENTRIES:
             raise ValueError(f"You can add up to {MAX_USER_ENTRIES} models; remove one first")
         _write_user_copy(store, entries + [entry])
         store.update(REMOVED_KEY, lambda items: [b for b in (items or []) if b != base_repo], [])
+    return entry
+
+
+def set_slug(store, base_repo, slug):
+    """Save a benchmark mapping (`aa_slug`) with the same lock and atomic write as add/remove."""
+    with _user_copy_lock:
+        entries = definitions(store)
+        entry = next((e for e in entries if e["base_repo"] == base_repo), None)
+        if not entry:
+            raise ValueError("Model is not in the configured catalogue")
+        entry["aa_slug"] = slug or None
+        _write_user_copy(store, entries)
     return entry
 
 
@@ -176,7 +217,10 @@ def load_config(entry, base_info, headers):
     for repo, revision in sources:
         try:
             revision = revision or get_json(f"{HF}/api/models/{repo}", headers)["sha"]
-            return get_json(f"{HF}/{repo}/resolve/{quote(revision)}/config.json", headers)
+            config = get_json(f"{HF}/{repo}/resolve/{quote(revision)}/config.json", headers)
+            if not isinstance(config, dict):
+                raise ValueError(f"{repo}: config.json is not a settings object")
+            return config
         except (ValueError, KeyError, TypeError) as failure:
             error = failure
     if base_info.get("gated") and not mirror:
@@ -301,16 +345,18 @@ def gguf_artifacts(siblings):
             continue
         lfs = file.get("lfs") or {}
         size = file.get("size") or lfs.get("size")
-        record = {"filename": name, "size_bytes": size, "sha256": lfs.get("sha256") or lfs.get("oid")}
+        # An LFS oid is the file's sha256. Without one a file can be neither downloaded safely nor recognised.
+        sha = str(lfs.get("sha256") or lfs.get("oid") or "").lower()
+        record = {"filename": name, "size_bytes": size, "sha256": sha if SHA256.fullmatch(sha) else None}
         match = SHARD.match(name)
         if match:
             shard_sets.setdefault((match["stem"], int(match["total"])), {})[int(match["index"])] = record
-        elif type(size) is int and size > 0:
+        elif type(size) is int and size > 0 and record["sha256"]:
             singles.append({**record, "files": [], "quant": quant_of(name)})
     for (stem, total), parts in shard_sets.items():
-        # Never count a partial set as a model: every shard must be listed with its size.
+        # Never count a partial set as a model: every shard must be listed with its size and checksum.
         if total < 1 or sorted(parts) != list(range(1, total + 1)) or \
-                any(type(p["size_bytes"]) is not int or p["size_bytes"] <= 0 for p in parts.values()):
+                any(type(p["size_bytes"]) is not int or p["size_bytes"] <= 0 or not p["sha256"] for p in parts.values()):
             continue
         files = [parts[i] for i in range(1, total + 1)]
         singles.append({"filename": files[0]["filename"], "size_bytes": sum(f["size_bytes"] for f in files),
@@ -327,15 +373,19 @@ def pick_artifacts(artifacts, allowed):
         key = ("ud-" in artifact["filename"].lower(), bool(artifact["files"]), len(artifact["filename"]), artifact["filename"])
         if artifact["quant"] not in best or key < best[artifact["quant"]][0]:
             best[artifact["quant"]] = (key, artifact)
+    if "F16" in best:
+        best.pop("BF16", None)  # the same weights twice; F16 runs everywhere
     return [best[q][1] for q in QUANTS if q in best]
 
 
-def fetch_variants(entry):
+def fetch_variants(entry, cancel=None):
     base, repo = entry["base_repo"], entry["gguf_repo"]
     headers = hf_headers()
     base_info = get_json(f"{HF}/api/models/{base}", headers)
     base_revision = base_info["sha"]
+    check_cancel(cancel)
     config, architecture = flatten_config(load_config(entry, base_info, headers))
+    check_cancel(cancel)
     info = get_json(f"{HF}/api/models/{repo}?blobs=true", headers)
     if architecture not in ARCHITECTURES:
         raise ValueError(f"{base}: model type '{architecture}' is not supported yet; "
@@ -368,6 +418,13 @@ def fetch_variants(entry):
     license_name = entry.get("license") or (base_info.get("cardData") or {}).get("license")
     variants = []
     for artifact in pick_artifacts(gguf_artifacts(info.get("siblings", [])), allowed):
+        if moe and artifact["quant"] == "MXFP4":
+            # MXFP4 files keep only the experts at ~4.25 bits; the rest is stored larger, so the expert share of
+            # the file's bytes is lower than their share of parameters (gpt-oss-20b: about 0.84 vs 0.91).
+            moe_fields = {**moe_fields, "expert_fraction": round(min(
+                moe["routed"] * MXFP4_BYTES_PER_WEIGHT / artifact["size_bytes"], moe["routed"] / parameters, 0.99), 4)}
+        elif moe:
+            moe_fields = {**moe_fields, "expert_fraction": round(min(moe["routed"] / parameters, 0.99), 4)}
         variants.append(Variant(
             id=f"{repo}@{info['sha']}:{artifact['filename']}", name=base.split("/")[-1], base_repo=base, repo=repo,
             revision=info["sha"], base_revision=base_revision, filename=artifact["filename"],
@@ -382,12 +439,13 @@ def fetch_variants(entry):
     return variants
 
 
-def fetch_scores():
+def fetch_scores(cancel=None):
     key, _ = resolve()
     if not key:
         raise ValueError("Add an API key in Benchmark settings to retrieve Artificial Analysis rankings; quality remains unknown without it")
     items, version = [], None
     for page in range(1, 101):
+        check_cancel(cancel)
         payload = get_json(f"https://artificialanalysis.ai/api/v2/language/models/free?page={page}", {"x-api-key": key})
         current = payload.get("intelligence_index_version")
         if page > 1 and current != version:
@@ -418,7 +476,9 @@ def apply_scores(variant, entry, score_cache):
 
 
 def cached_variants(old, entry):
-    return [Variant(**v) for v in old if v["repo"] == entry["gguf_repo"] and v.get("base_repo", entry["base_repo"]) == entry["base_repo"]]
+    # `source` follows the entry, not the cache: a v0.3 cache says "catalogue" even for a user's own repo.
+    return [Variant(**{**v, "source": "custom" if entry.get("user") else "catalogue"}) for v in old
+            if v["repo"] == entry["gguf_repo"] and v.get("base_repo", entry["base_repo"]) == entry["base_repo"]]
 
 
 def refresh(store, include_scores=True, include_models=True, progress=None, cancel=None):
@@ -429,38 +489,53 @@ def refresh(store, include_scores=True, include_models=True, progress=None, canc
     entries = definitions(store)
     state = {"models_done": 0, "models_total": len(entries) if include_models else 0,
              "models_failed": 0, "scores": "running" if include_scores else "skipped"}
+    total = state["models_total"] + int(include_scores)
+
     def notify():
+        # Contract keys (stage/done/total/message) next to the older ones the page already reads.
         if progress:
-            progress(dict(state))
+            done = state["models_done"] + int(state["scores"] in {"complete", "failed"})
+            message = f"Checked {state['models_done']} of {state['models_total']} model sources"
+            progress({**state, "stage": "metadata", "done": done, "total": total, "message": message})
     notify()
     # Fetch rankings and model metadata concurrently; only this thread writes the cache.
     pool = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    cancelled = False
     try:
-        score_future = pool.submit(fetch_scores) if include_scores else None
-        futures = [pool.submit(fetch_variants, entry) for entry in entries] if include_models else [None] * len(entries)
-        jobs = [future for future in futures if future is not None] + ([score_future] if score_future else [])
-        for future in as_completed(jobs):
-            check_cancel(cancel)
-            failed = future.exception() is not None
-            if future is score_future:
-                state["scores"] = "failed" if failed else "complete"
-            else:
-                state["models_done"] += 1
-                state["models_failed"] += int(failed)
-            notify()
+        # `cancel` is passed only when given, so simple stand-ins for these functions keep working.
+        extra = {"cancel": cancel} if cancel is not None else {}
+        score_future = pool.submit(fetch_scores, **extra) if include_scores else None
+        futures = [pool.submit(fetch_variants, entry, **extra) for entry in entries] if include_models else [None] * len(entries)
+        pending = {future for future in futures if future is not None} | ({score_future} if score_future else set())
+        while pending:
+            check_cancel(cancel)  # checked often, not only when a slow request finishes
+            finished, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+            for future in finished:
+                failed = future.exception() is not None
+                if future is score_future:
+                    state["scores"] = "failed" if failed else "complete"
+                else:
+                    state["models_done"] += 1
+                    state["models_failed"] += int(failed)
+                notify()
+    except Cancelled:
+        cancelled = True
+        raise
     finally:
-        pool.shutdown(wait=True, cancel_futures=True)
+        # On cancel, do not wait for requests already on the wire; their results are thrown away.
+        pool.shutdown(wait=not cancelled, cancel_futures=True)
     if score_future:
         try:
             score_cache = score_future.result()
             store.put("scores", score_cache)
-        except ValueError as error:
-            errors.append(str(error))
+        except Exception as error:  # noqa: BLE001 - rankings are optional; keep the old ones
+            errors.append(str(error) if isinstance(error, ValueError) else f"Benchmark rankings failed ({type(error).__name__})")
     for entry, future in zip(entries, futures):
         try:
             fetched = future.result() if future else cached_variants(old, entry)
-        except (ValueError, KeyError, TypeError) as error:
-            errors.append(f"{entry['base_repo']}: {error}")
+        except Exception as error:  # noqa: BLE001 - one odd reply must not lose every other model
+            errors.append(f"{entry['base_repo']}: {error}" if isinstance(error, (ValueError, KeyError, TypeError))
+                          else f"{entry['base_repo']}: unexpected reply from Hugging Face ({type(error).__name__})")
             fetched = cached_variants(old, entry)
         for variant in fetched:
             # Clear stale mappings if the user removes or changes a slug.
@@ -475,12 +550,12 @@ def refresh(store, include_scores=True, include_models=True, progress=None, canc
     return status
 
 
-def refresh_entry(store, base_repo):
+def refresh_entry(store, base_repo, cancel=None):
     """Fetch one entry (for example right after add_entry) and replace only its cached variants."""
     entry = next((e for e in definitions(store) if e["base_repo"] == base_repo), None)
     if not entry:
         raise ValueError(f"{base_repo} is not in the catalogue")
-    fetched = fetch_variants(entry)
+    fetched = fetch_variants(entry, **({"cancel": cancel} if cancel is not None else {}))
     for variant in fetched:
         apply_scores(variant, entry, store.get("scores"))
     store.update("variants", lambda items: [v for v in (items or []) if v.get("base_repo") != base_repo]

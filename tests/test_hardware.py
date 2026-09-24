@@ -49,9 +49,11 @@ class FakeTools:
     def run(self, argv, **kwargs):
         self.calls.append((argv, kwargs))
         name = os.path.basename(argv[0])
-        if name == "sysctl" and "iogpu.wired_limit_mb" in argv and len(argv) == 2:
-            value = self.outputs.get("wired")
-            return completed(f"iogpu.wired_limit_mb: {value}\n" if value is not None else "", 0 if value is not None else 1)
+        if name == "sysctl" and argv[1] == "iogpu.wired_limit_mb":
+            value, old = self.outputs.get("wired"), self.outputs.get("wired_bytes")
+            text = (f"iogpu.wired_limit_mb: {value}\n" if value is not None else "") + \
+                   (f"debug.iogpu.wired_limit: {old}\n" if old is not None else "")
+            return completed(text, 0 if text else 1)
         output = self.outputs.get(name)
         if isinstance(output, Exception):
             raise output
@@ -196,12 +198,31 @@ class NvidiaAndCpuOnlyTests(HardwareTestCase):
         self.assertTrue(any("nvidia-smi was not found" in w for w in result["warnings"]))
         self.assert_engine_safe(result)
 
+    def test_one_unreadable_nvidia_row_keeps_the_others(self):
+        self.system("Linux")
+        self.tools({"nvidia-smi": NVIDIA_CSV + "1, GPU-gb10, NVIDIA GB10, [N/A], [N/A], [N/A], 580.95\n\n"}, which=["nvidia-smi"])
+        result = hardware.scan(include_processes=False)
+        self.assertEqual([g["uuid"] for g in result["gpus"]], ["GPU-abc"])
+        self.assertEqual((result["other_gpus"][0]["name"], result["other_gpus"][0]["vendor"]), ("NVIDIA GB10", "nvidia"))
+        self.assertEqual(result["fingerprint"], old_fingerprint(result["gpus"], result["ram_total"]))
+        self.assert_engine_safe(result)
+
+    def test_failing_nvidia_smi_is_not_called_missing(self):
+        self.system("Linux")
+        self.tools({"nvidia-smi": subprocess.TimeoutExpired("nvidia-smi", 2)}, which=["nvidia-smi"])
+        make_card(self.root, "card0", "0x10de", device="0x2684", driver="nvidia")
+        result = hardware.scan(include_processes=False)
+        self.assertIn("did not answer", result["other_gpus"][0]["reason"])
+        self.assertFalse(any("not found" in w for w in result["warnings"]))
+        self.assertIn("unknown, not zero", result["warnings"][0])
+
 
 class AppleTests(HardwareTestCase):
-    def mac(self, wired=None, ram_available=20 * GIB):
+    def mac(self, wired=None, ram_available=20 * GIB, wired_bytes=None, total=32 * GIB):
         self.system("Darwin", "arm64")
-        fake = self.tools({"sysctl": MAC_ARM_SYSCTL, "system_profiler": MAC_ARM_DISPLAYS, "wired": wired}, which=["sysctl"])
-        memory = SimpleNamespace(total=32 * GIB, available=ram_available)
+        fake = self.tools({"sysctl": MAC_ARM_SYSCTL, "system_profiler": MAC_ARM_DISPLAYS, "wired": wired,
+                           "wired_bytes": wired_bytes}, which=["sysctl"])
+        memory = SimpleNamespace(total=total, available=ram_available)
         with patch("llm_configurator.hardware.psutil.virtual_memory", return_value=memory):
             return hardware.scan(include_processes=False), fake
 
@@ -226,6 +247,11 @@ class AppleTests(HardwareTestCase):
         gpu = result["gpus"][0]
         self.assertEqual((gpu["total"], gpu["available"], gpu["limit_source"]), (28 * GIB, 28 * GIB, "iogpu.wired_limit_mb"))
 
+    def test_macos13_wired_limit_key(self):
+        result, _ = self.mac(wired_bytes=24 * GIB, ram_available=30 * GIB)
+        gpu = result["gpus"][0]
+        self.assertEqual((gpu["total"], gpu["limit_source"]), (24 * GIB, "iogpu.wired_limit_mb"))
+
     def test_available_never_exceeds_free_ram(self):
         result, _ = self.mac(wired=None, ram_available=3 * GIB)
         self.assertEqual(result["gpus"][0]["available"], 3 * GIB)
@@ -233,6 +259,9 @@ class AppleTests(HardwareTestCase):
     def test_limit_rule(self):
         self.assertEqual(hardware.mac_gpu_limit(16 * GIB, 0), (int(16 * GIB * 2 / 3), "estimated_default"))
         self.assertEqual(hardware.mac_gpu_limit(64 * GIB, None), (48 * GIB, "estimated_default"))
+        # Metal's recommendedMaxWorkingSetSize from llama.cpp logs: 32 GiB -> 21845.34 MiB, 36 GiB -> 27648 MiB.
+        self.assertEqual(hardware.mac_gpu_limit(32 * GIB, 0)[0] // MIB, 21845)
+        self.assertEqual(hardware.mac_gpu_limit(36 * GIB, 0)[0], 27648 * MIB)
         self.assertEqual(hardware.mac_gpu_limit(16 * GIB, 64 * 1024), (16 * GIB, "iogpu.wired_limit_mb"))
 
     def test_static_facts_are_cached(self):
@@ -266,9 +295,20 @@ class AppleTests(HardwareTestCase):
         self.system("Darwin", "arm64")
         self.tools({"sysctl": OSError("no")}, which=[])
         result = hardware.scan(include_processes=False)
-        self.assertEqual(result["gpus"], [])
+        # Still an Apple Silicon Mac (not "an Intel Mac"): the limit falls back to the labelled default share.
+        gpu = result["gpus"][0]
+        self.assertEqual((gpu["backend"], gpu["unified"], gpu["limit_source"]), ("metal", True, "estimated_default"))
         self.assertIsNone(result["cpu_name"])
-        self.assertTrue(result["warnings"])
+        self.assertIsNone(result["cpu_features"])
+        self.assertFalse(any("Intel Mac" in g.get("reason", "") for g in result["other_gpus"]))
+        self.assert_engine_safe(result)
+
+    def test_rosetta_brand_string_does_not_name_the_gpu(self):
+        self.system("Darwin", "x86_64")
+        sysctl_text = MAC_ARM_SYSCTL.replace("Apple M2 Pro", "VirtualApple @ 2.50GHz processor") + "sysctl.proc_translated: 1\n"
+        self.tools({"sysctl": sysctl_text, "system_profiler": MAC_ARM_DISPLAYS, "wired": 0}, which=["sysctl"])
+        gpu = hardware.scan(include_processes=False)["gpus"][0]
+        self.assertEqual((gpu["name"], gpu["uuid"]), ("Apple M2 Pro", "apple-m2-pro"))
 
 
 class LinuxTests(HardwareTestCase):
@@ -295,9 +335,22 @@ class LinuxTests(HardwareTestCase):
         result = hardware.scan(include_processes=False)
         hardware.scan(include_processes=False)
         gpu = result["gpus"][0]
-        self.assertEqual((gpu["name"], gpu["backend"]), ("Radeon RX 7900 XTX", "rocm"))
+        # The installer gives AMD a Vulkan build; ROCm tools are only reported, never assumed to be the runtime.
+        self.assertEqual((gpu["name"], gpu["backend"], gpu["rocm"]), ("Radeon RX 7900 XTX", "vulkan", True))
         self.assertEqual(sum(1 for argv, _ in fake.calls if argv[0].endswith("rocm-smi")), 1)  # cached
         self.assert_safe_calls(fake)
+
+    def test_placeholder_tool_names_and_failed_tools_are_not_kept(self):
+        self.system("Linux")
+        self.amd()
+        fake = self.tools({"rocm-smi": {"card0": {"Card series": "N/A"}}}, which=["rocm-smi"])
+        first = hardware.scan(include_processes=False)["gpus"][0]
+        self.assertIn("0x744c", first["name"])  # "N/A" is not a name
+        fake.outputs["rocm-smi"] = {"card0": {"Card series": "Radeon RX 7900 XTX"}}
+        # A tool that gave no usable answer is asked again next time, so the name (and fingerprint) settle.
+        self.assertEqual(hardware.scan(include_processes=False)["gpus"][0]["name"], "Radeon RX 7900 XTX")
+        hardware.scan(include_processes=False)
+        self.assertEqual(sum(1 for argv, _ in fake.calls if argv[0].endswith("rocm-smi")), 2)
 
     def test_amd_with_amd_smi(self):
         self.system("Linux")
@@ -386,6 +439,33 @@ class WindowsTests(HardwareTestCase):
         self.assertEqual([o["vendor"] for o in others], ["nvidia", "intel"])
         self.assertEqual(others[0]["total"], 6 * GIB)
         self.assertTrue(warnings)
+
+    def test_registry_is_read_once_but_nvidia_state_is_fresh(self):
+        self.system("Windows", "AMD64")
+        fake = self.tools({"nvidia-smi": OSError("busy")}, which=["nvidia-smi"])
+        reads = []
+        registry = self.registry()
+        counting = lambda path: reads.append(path) or registry(path)
+        with patch("llm_configurator.hardware._windows_registry_reader", return_value=counting), \
+                patch("llm_configurator.hardware._windows_features", return_value=None):
+            first = hardware.scan(include_processes=False)
+            fake.outputs["nvidia-smi"] = NVIDIA_CSV
+            second = hardware.scan(include_processes=False)
+        self.assertEqual([o["vendor"] for o in first["other_gpus"]], ["nvidia", "intel"])
+        self.assertIn("did not answer", first["other_gpus"][0]["reason"])
+        self.assertEqual([g["uuid"] for g in second["gpus"]], ["GPU-abc"])
+        self.assertEqual([o["vendor"] for o in second["other_gpus"]], ["intel"])
+        self.assertEqual(reads.count(self.CLASS), 1)
+
+    def test_cpu_features_are_unknown_where_windows_cannot_detect_them(self):
+        import ctypes
+        kernel = SimpleNamespace(IsProcessorFeaturePresent=lambda code: 0)
+        self.system("Windows", "AMD64")
+        for build, expected in [(17763, None), (19045, False)]:
+            with patch.object(ctypes, "windll", SimpleNamespace(kernel32=kernel), create=True), \
+                    patch.object(hardware.sys, "getwindowsversion", lambda: SimpleNamespace(build=build), create=True):
+                features = hardware._windows_features()
+            self.assertEqual((features["avx2"], features["avx512"]), (expected, expected))
 
     def test_unreadable_registry(self):
         self.assertEqual(hardware.windows_gpus(False, fake_registry({}))[0], [])
