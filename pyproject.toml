@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llm-configurator"
-version = "0.3.0"
+version = "0.4.0"
 description = "Local hardware-aware model, quantisation and context recommendations"
 requires-python = ">=3.10"
 dependencies = ["psutil==7.2.2", "keyring==25.6.0", "numpy==2.2.6"]
@@ -16,4 +16,4 @@ llm-config = "llm_configurator.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-llm_configurator = ["static/*", "catalogue.json"]
+llm_configurator = ["static/*", "catalogue.json", "evals/*.json", "data/*"]
