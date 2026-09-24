@@ -522,17 +522,17 @@ def find_bin_dir(directory, depth=4):
     return None
 
 
-def _run_tool(argv, flag):
+def _run_tool(argv, flag, env=None):
     """Run a llama.cpp tool with one info flag; returns (ok, stdout + stderr). llama.cpp prints
     `--version` on stderr and `--list-devices` on stdout."""
     try:
         done = subprocess.run(list(argv) + [flag], capture_output=True, text=True, timeout=VERSION_TIMEOUT,
-                              errors="replace", creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+                              errors="replace", env=env, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
     except subprocess.TimeoutExpired:
         return False, f"llama-server did not answer {flag} in time"
     except OSError as error:
         return False, str(error)
-    return done.returncode == 0, (done.stdout or "") + "\n" + (done.stderr or "")
+    return done.returncode == 0, (getattr(done, "stdout", "") or "") + "\n" + (getattr(done, "stderr", "") or "")
 
 
 def _run_version(argv):
@@ -540,9 +540,9 @@ def _run_version(argv):
     return _run_tool(argv, "--version")
 
 
-def _run_devices(argv):
+def _run_devices(argv, env=None):
     """Run `llama-server --list-devices` (also works for llama-bench); returns (ok, combined output)."""
-    return _run_tool(argv, "--list-devices")
+    return _run_tool(argv, "--list-devices", env)
 
 
 # Current builds: `version: 0.1.0-dev (build 1234, commit abc1234)`; older ones: `version: 1234 (abc1234)`.
@@ -622,9 +622,10 @@ def parse_devices(text):
     return devices
 
 
-def list_devices(argv):
-    """GPU devices a llama.cpp tool can offload to (CPU-side accelerators left out), or None if it could not say."""
-    ok, output = _run_devices(argv)
+def list_devices(argv, env=None):
+    """GPU devices a llama.cpp tool can offload to (CPU-side accelerators left out), or None if it could not say.
+    `env` matters: CUDA_VISIBLE_DEVICES and friends change what is listed."""
+    ok, output = _run_devices(argv, env) if env is not None else _run_devices(argv)
     devices = parse_devices(output) if ok else None
     return None if devices is None else [d for d in devices if d["backend"] != "cpu"]
 
@@ -687,6 +688,25 @@ def _inspect(folder, source, manifest=None):
         result["warnings"].append("macOS has marked this llama.cpp as downloaded from the internet, so it may refuse "
                                   f"to run it. If it does, run: xattr -dr com.apple.quarantine \"{folder}\"")
     return result
+
+
+def _plain(text):
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def pick_device(devices, gpu):
+    """The ggml device name (`CUDA0`, `Vulkan1`, `MTL0`, ...) that is the hardware-scan GPU `gpu`, chosen
+    from a `list_devices` result. None when it cannot be told apart safely: never guess a name, because
+    llama.cpp exits on an unknown one (`invalid device: CUDA0`)."""
+    devices = [d for d in devices or [] if d.get("backend") != "cpu"]
+    if not devices or not gpu:
+        return None
+    same = [d for d in devices if d["backend"] == gpu.get("backend")] or devices
+    if len(same) == 1:
+        return same[0]["name"]
+    name = _plain(gpu.get("name"))
+    named = [d for d in same if name and (name in _plain(d["description"]) or _plain(d["description"]) in name)]
+    return named[0]["name"] if len(named) == 1 else None
 
 
 _BACKEND_WORDS = {"cuda": "CUDA (NVIDIA)", "rocm": "ROCm (AMD)", "vulkan": "Vulkan", "metal": "Metal"}
